@@ -1,0 +1,93 @@
+/* ============================================================================
+   INTERACTIVE CASHFLOW SANKEY DIAGRAM & LANDSCAPE iPHONE STYLES
+   ============================================================================ */
+.sankey-wrapper {
+  width: 100%;
+  overflow-x: auto;
+  position: relative;
+  min-height: 420px;
+  background: #FFFFFF;
+  border-radius: 12px;
+}
+
+.sankey-svg {
+  width: 100%;
+  height: auto;
+  min-width: 680px;
+  display: block;
+}
+
+.sankey-link {
+  fill: none;
+  stroke-opacity: 0.38;
+  transition: stroke-opacity 0.15s ease;
+  cursor: pointer;
+}
+
+.sankey-link:hover, .sankey-link.active {
+  stroke-opacity: 0.72;
+}
+
+.sankey-node rect {
+  rx: 4px;
+  ry: 4px;
+  stroke: rgba(15, 23, 42, 0.15);
+  stroke-width: 1px;
+  cursor: pointer;
+}
+
+.sankey-node-label {
+  font-size: 12px;
+  font-weight: 700;
+  fill: #0F172A;
+  pointer-events: none;
+}
+
+.sankey-node-amount {
+  font-size: 11px;
+  font-weight: 600;
+  fill: #475569;
+  pointer-events: none;
+}
+
+.sankey-tooltip {
+  position: fixed;
+  pointer-events: none;
+  background: rgba(15, 23, 42, 0.94);
+  color: #FFFFFF;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  z-index: 90;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+}
+
+.portrait-rotate-banner {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  background: #EFF6FF;
+  border: 1px solid #BFDBFE;
+  color: #1E40AF;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 14px;
+}
+
+@media (max-width: 896px) and (orientation: portrait) {
+  .portrait-rotate-banner {
+    display: flex;
+  }
+}
+
+@media (max-width: 896px) and (orientation: landscape) {
+  .mobile-topbar {
+    padding: 6px 14px;
+  }
+  .sankey-card-panel {
+    border: 2px solid #3B82F6;
+  }
+}

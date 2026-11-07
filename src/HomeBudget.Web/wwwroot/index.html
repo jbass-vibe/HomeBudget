@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="HomeBudget" />
+  <link rel="manifest" href="/manifest.json" />
+  <title>HomeBudget — Local Cashflow &amp; Budgeting</title>
+  <link rel="stylesheet" href="/css/app.css" />
+  <link rel="stylesheet" href="/css/sankey.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Desktop Admin Sidebar (Windows 11 PC View) -->
+    <aside class="desktop-sidebar" id="desktopSidebar">
+      <div class="brand-header">
+        <div class="brand-logo">HB</div>
+        <div>
+          <div class="brand-title">HomeBudget</div>
+          <div class="brand-subtitle">Local LAN Edition</div>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <button class="nav-item active" data-view="budgets">
+          <span class="nav-icon">&#128202;</span>
+          <span>Monthly Budgets</span>
+        </button>
+        <button class="nav-item" data-view="cashflow">
+          <span class="nav-icon">&#127754;</span>
+          <span>Cashflow &amp; Sankey</span>
+        </button>
+        <button class="nav-item" data-view="upload">
+          <span class="nav-icon">&#128228;</span>
+          <span>Upload CSVs</span>
+        </button>
+        <button class="nav-item" data-view="inspector">
+          <span class="nav-icon">&#128269;</span>
+          <span>Transaction Inspector</span>
+        </button>
+        <button class="nav-item" data-view="topology">
+          <span class="nav-icon">&#9881;&#65039;</span>
+          <span>Categories, Rules &amp; Backups</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="lan-badge">
+          <span class="status-dot"></span>
+          <span>LAN-Only SQLite (WAL)</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content Viewport -->
+    <main class="main-viewport">
+      <header class="mobile-topbar">
+        <div class="mobile-brand">
+          <span class="brand-logo-sm">HB</span>
+          <span id="mobileHeaderTitle">Monthly Budgets</span>
+        </div>
+        <div class="mobile-orientation-hint" id="orientationHint">
+          Rotate for Sankey &#8635;
+        </div>
+      </header>
+
+      <div id="viewContainer" class="view-container"></div>
+    </main>
+
+    <!-- Mobile Bottom Tab Bar (Wife's iPhone View) -->
+    <nav class="mobile-bottom-nav" id="mobileBottomNav">
+      <button class="mobile-tab active" data-view="budgets">
+        <span class="tab-icon">&#128202;</span>
+        <span class="tab-label">Budgets</span>
+      </button>
+      <button class="mobile-tab" data-view="cashflow">
+        <span class="tab-icon">&#127754;</span>
+        <span class="tab-label">Cashflow</span>
+      </button>
+      <button class="mobile-tab" data-view="inspector">
+        <span class="tab-icon">&#128221;</span>
+        <span class="tab-label">Transactions</span>
+      </button>
+      <button class="mobile-tab" data-view="upload">
+        <span class="tab-icon">&#128228;</span>
+        <span class="tab-label">Upload</span>
+      </button>
+      <button class="mobile-tab" data-view="topology">
+        <span class="tab-icon">&#9881;&#65039;</span>
+        <span class="tab-label">Admin</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- Global Modal Container -->
+  <div id="modalBackdrop" class="modal-backdrop hidden">
+    <div id="modalContent" class="modal-card"></div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toastContainer" class="toast-container"></div>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>
