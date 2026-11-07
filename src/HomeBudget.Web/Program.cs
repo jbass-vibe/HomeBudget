@@ -7,12 +7,6 @@ using HomeBudget.Web.Services;
 SqlMapper.AddTypeHandler(new SqliteDecimalHandler());
 SqlMapper.AddTypeHandler(new SqliteBoolHandler());
 
-using System.Globalization;
-using Dapper;
-using HomeBudget.Web.Data;
-using HomeBudget.Web.Models;
-using HomeBudget.Web.Services;
-
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(o =>
