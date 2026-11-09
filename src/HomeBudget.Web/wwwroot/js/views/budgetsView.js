@@ -3,6 +3,8 @@ import {
   apiFetch,
   formatCurrency,
   escapeHtml,
+  sortTransactions,
+  renderTransactionSortOptions,
   setSortPreference,
   openModal,
   closeModal,
@@ -19,6 +21,8 @@ export function sortBudgetCards(categories, sortMode = 'custom_order') {
     switch (sortMode) {
       case 'alpha_asc':
         return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+      case 'alpha_desc':
+        return nameB.localeCompare(nameA, undefined, { sensitivity: 'base' });
       case 'recent': {
         const tsA = String(a.lastActivityAt || a.updatedAt || '');
         const tsB = String(b.lastActivityAt || b.updatedAt || '');
@@ -52,7 +56,7 @@ export function sortBudgetCards(categories, sortMode = 'custom_order') {
 
 export async function renderBudgetsView(container) {
   const data = await apiFetch(`/api/budgets/${state.selectedYearMonth}`);
-  const uncatTxs = data.uncategorizedTransactions || [];
+  const uncatTxs = sortTransactions(data.uncategorizedTransactions || [], state.budgetsTransactionSort);
   const sortedCategories = sortBudgetCards(data.categories, state.budgetsCategorySort);
 
   const sourceBadge = data.incomeSourceType === 'ActualGoogleDeposits'
@@ -73,10 +77,17 @@ export async function renderBudgetsView(container) {
           <select id="budgetsSortSelect" class="select-control" style="font-size:12px;padding:4px 8px;">
             <option value="custom_order" ${state.budgetsCategorySort === 'custom_order' ? 'selected' : ''}>Custom Order</option>
             <option value="alpha_asc" ${state.budgetsCategorySort === 'alpha_asc' ? 'selected' : ''}>Alphabetical (A-Z)</option>
+            <option value="alpha_desc" ${state.budgetsCategorySort === 'alpha_desc' ? 'selected' : ''}>Alphabetical (Z-A)</option>
             <option value="recent" ${state.budgetsCategorySort === 'recent' ? 'selected' : ''}>Recent Changes</option>
             <option value="pct_used_desc" ${state.budgetsCategorySort === 'pct_used_desc' ? 'selected' : ''}>% Budget Used (High-Low)</option>
             <option value="spend_desc" ${state.budgetsCategorySort === 'spend_desc' ? 'selected' : ''}>Highest Spend ($)</option>
             <option value="remaining_asc" ${state.budgetsCategorySort === 'remaining_asc' ? 'selected' : ''}>Remaining Budget (Low-High)</option>
+          </select>
+        </label>
+        <label style="font-size:12px;font-weight:700;color:#475569;display:inline-flex;align-items:center;gap:6px;">
+          Sort Transactions:
+          <select id="budgetsTxSortSelect" class="select-control" style="font-size:12px;padding:4px 8px;">
+            ${renderTransactionSortOptions(state.budgetsTransactionSort)}
           </select>
         </label>
         <button class="btn btn-primary btn-sm" id="budgetsAddCatBtn">+ Add Category</button>
@@ -113,9 +124,17 @@ export async function renderBudgetsView(container) {
 
     ${uncatTxs.length > 0 ? `
       <div class="card-panel" style="border:2px solid #F59E0B;background:#FFFBEB;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-          <strong style="color:#B45309;">&#9888;&#65039; ${uncatTxs.length} Uncategorized Expense(s) in ${escapeHtml(data.yearMonth)}</strong>
-          <span style="font-size:12px;color:#92400E;">Categorize below (prompts to apply to similar future/past expenses)</span>
+        <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px;">
+          <div>
+            <strong style="color:#B45309;">&#9888;&#65039; ${uncatTxs.length} Uncategorized Expense(s) in ${escapeHtml(data.yearMonth)}</strong>
+            <div style="font-size:12px;color:#92400E;">Categorize below (prompts to apply to similar future/past expenses)</div>
+          </div>
+          <label style="font-size:11px;font-weight:700;color:#92400E;display:inline-flex;align-items:center;gap:6px;">
+            Sort Transactions:
+            <select class="select-control budget-drill-tx-sort" style="font-size:11px;padding:3px 6px;">
+              ${renderTransactionSortOptions(state.budgetsTransactionSort)}
+            </select>
+          </label>
         </div>
         <div style="display:flex;flex-direction:column;gap:6px;">
           ${uncatTxs.map(t => `
@@ -168,6 +187,20 @@ export async function renderBudgetsView(container) {
       renderBudgetsView(container);
     };
   }
+
+  const handleTxSortChange = (e) => {
+    setSortPreference('budgetsTransactionSort', e.target.value);
+    renderBudgetsView(container);
+  };
+
+  const budgetsTxSortSelect = container.querySelector('#budgetsTxSortSelect');
+  if (budgetsTxSortSelect) {
+    budgetsTxSortSelect.onchange = handleTxSortChange;
+  }
+
+  container.querySelectorAll('.budget-drill-tx-sort').forEach(sel => {
+    sel.onchange = handleTxSortChange;
+  });
 
   container.querySelector('#budgetsAddCatBtn').onclick = () => {
     openCategoryManagerModal(null, () => renderBudgetsView(container));
@@ -225,10 +258,19 @@ export async function renderBudgetsView(container) {
 
   container.querySelectorAll('[data-toggle-drill]').forEach(btn => {
     btn.onclick = () => {
-      const catId = btn.dataset.toggleDrill;
+      const catId = Number(btn.dataset.toggleDrill);
       const listEl = container.querySelector(`#drill_${catId}`);
       if (listEl) {
-        listEl.style.display = listEl.style.display === 'none' ? 'flex' : 'none';
+        const willExpand = listEl.style.display === 'none';
+        listEl.style.display = willExpand ? 'flex' : 'none';
+        if (willExpand && !state.expandedBudgetCategories.includes(catId)) {
+          state.expandedBudgetCategories.push(catId);
+        } else if (!willExpand) {
+          state.expandedBudgetCategories = state.expandedBudgetCategories.filter(id => id !== catId);
+        }
+        const countMatch = btn.textContent.match(/\d+\s+Transactions?/);
+        const countLabel = countMatch ? countMatch[0] : 'Transactions';
+        btn.innerHTML = `${countLabel} ${willExpand ? '&#9652;' : '&#9662;'}`;
       }
     };
   });
@@ -251,6 +293,8 @@ function renderCategoryCardHtml(cat) {
   const remLabel = cat.remaining >= 0
     ? `${formatCurrency(cat.remaining)} left`
     : `${formatCurrency(Math.abs(cat.remaining))} over`;
+  const isExpanded = state.expandedBudgetCategories.includes(cat.categoryId);
+  const sortedCatTxs = sortTransactions(cat.transactions, state.budgetsTransactionSort);
 
   return `
     <div class="budget-card">
@@ -278,13 +322,20 @@ function renderCategoryCardHtml(cat) {
       </div>
 
       <button class="drilldown-toggle" data-toggle-drill="${cat.categoryId}">
-        ${cat.transactions.length} Transaction${cat.transactions.length === 1 ? '' : 's'} &#9662;
+        ${sortedCatTxs.length} Transaction${sortedCatTxs.length === 1 ? '' : 's'} ${isExpanded ? '&#9652;' : '&#9662;'}
       </button>
 
-      <div class="drilldown-list" id="drill_${cat.categoryId}" style="display:none;">
-        ${cat.transactions.length === 0
+      <div class="drilldown-list" id="drill_${cat.categoryId}" style="display:${isExpanded ? 'flex' : 'none'};">
+        ${sortedCatTxs.length === 0
           ? '<div style="color:#94A3B8;font-size:12px;text-align:center;">No transactions this month</div>'
-          : cat.transactions.map(t => `
+          : `
+            <div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:6px;margin-bottom:4px;border-bottom:1px solid #E2E8F0;">
+              <span style="font-size:11px;font-weight:700;color:#64748B;">Sort Drill-down:</span>
+              <select class="select-control budget-drill-tx-sort" style="font-size:11px;padding:2px 6px;">
+                ${renderTransactionSortOptions(state.budgetsTransactionSort)}
+              </select>
+            </div>
+            ${sortedCatTxs.map(t => `
               <div class="drilldown-item">
                 <div>
                   <div style="font-weight:600;">${escapeHtml(t.cleanMerchantName)}</div>
@@ -298,6 +349,7 @@ function renderCategoryCardHtml(cat) {
                 </div>
               </div>
             `).join('')}
+          `}
       </div>
     </div>
   `;

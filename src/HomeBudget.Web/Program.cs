@@ -398,11 +398,13 @@ app.MapGet("/api/transactions", async (
     string orderByClause = (sortBy ?? "date_desc").ToLowerInvariant() switch
     {
         "date_asc" => "t.TransactionDate ASC, t.TransactionId ASC",
-        "recent_changes" => "COALESCE(t.UpdatedAt, t.CreatedAt, t.TransactionDate) DESC, t.TransactionId DESC",
+        "recent" or "recent_changes" => "COALESCE(t.UpdatedAt, t.CreatedAt, t.TransactionDate) DESC, t.TransactionId DESC",
         "amount_desc" => "ABS(t.Amount) DESC, t.TransactionDate DESC",
         "amount_asc" => "ABS(t.Amount) ASC, t.TransactionDate DESC",
-        "merchant_asc" => "t.CleanMerchantName COLLATE NOCASE ASC, t.TransactionDate DESC",
-        "merchant_desc" => "t.CleanMerchantName COLLATE NOCASE DESC, t.TransactionDate DESC",
+        "alpha_asc" or "merchant_asc" => "t.CleanMerchantName COLLATE NOCASE ASC, t.TransactionDate DESC",
+        "alpha_desc" or "merchant_desc" => "t.CleanMerchantName COLLATE NOCASE DESC, t.TransactionDate DESC",
+        "account_asc" => "a.AccountName COLLATE NOCASE ASC, t.TransactionDate DESC",
+        "category_asc" => "COALESCE(c.Name, 'ZZZZ') COLLATE NOCASE ASC, t.TransactionDate DESC",
         _ => "t.TransactionDate DESC, t.TransactionId DESC"
     };
 

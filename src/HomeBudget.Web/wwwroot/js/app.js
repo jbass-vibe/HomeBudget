@@ -7,8 +7,12 @@ import { renderTopologyView } from './views/topologyView.js';
 const SORT_STORAGE_KEYS = {
   categoryDropdownSort: 'hb_cat_dropdown_sort',
   cashflowCategorySort: 'hb_cashflow_cat_sort',
+  cashflowTransactionSort: 'hb_cashflow_tx_sort',
   triageSort: 'hb_triage_sort',
   budgetsCategorySort: 'hb_budgets_cat_sort',
+  budgetsTransactionSort: 'hb_budgets_tx_sort',
+  uploadTransactionSort: 'hb_upload_tx_sort',
+  inspectorTransactionSort: 'hb_inspector_tx_sort',
   topologyCategorySort: 'hb_topology_cat_sort',
   topologyRuleSort: 'hb_topology_rule_sort',
   backupsSort: 'hb_backups_sort'
@@ -37,11 +41,18 @@ export const state = {
   triageGroupByMerchant: true,
   categoryDropdownSort: getSavedSort('categoryDropdownSort', 'alpha_asc'),
   cashflowCategorySort: getSavedSort('cashflowCategorySort', 'spend_desc'),
+  cashflowTransactionSort: getSavedSort('cashflowTransactionSort', 'date_desc'),
   triageSort: getSavedSort('triageSort', 'amount_desc'),
   budgetsCategorySort: getSavedSort('budgetsCategorySort', 'custom_order'),
+  budgetsTransactionSort: getSavedSort('budgetsTransactionSort', 'date_desc'),
+  uploadTransactionSort: getSavedSort('uploadTransactionSort', 'status_priority'),
+  inspectorTransactionSort: getSavedSort('inspectorTransactionSort', 'date_desc'),
   topologyCategorySort: getSavedSort('topologyCategorySort', 'custom_order'),
   topologyRuleSort: getSavedSort('topologyRuleSort', 'priority_asc'),
   backupsSort: getSavedSort('backupsSort', 'date_desc'),
+  expandedCashflowCategories: [],
+  expandedCashflowMerchants: [],
+  expandedBudgetCategories: [],
   accounts: [],
   categories: []
 };
@@ -87,6 +98,75 @@ export function sortCategories(categories = state.categories, sortMode = state.c
       }
     }
   });
+}
+
+export function sortTransactions(transactions = [], sortMode = 'date_desc') {
+  const list = Array.isArray(transactions) ? [...transactions] : [];
+  return list.sort((a, b) => {
+    const dateA = String(a.transactionDate || '');
+    const dateB = String(b.transactionDate || '');
+    const idA = Number(a.transactionId || 0);
+    const idB = Number(b.transactionId || 0);
+    const amtA = Math.abs(Number(a.amount || 0));
+    const amtB = Math.abs(Number(b.amount || 0));
+    const merchA = String(a.cleanMerchantName || a.rawDescription || '');
+    const merchB = String(b.cleanMerchantName || b.rawDescription || '');
+    const acctA = String(a.accountName || '');
+    const acctB = String(b.accountName || '');
+
+    switch (sortMode) {
+      case 'date_asc':
+        return dateA.localeCompare(dateB) || (idA - idB);
+      case 'recent':
+      case 'recent_changes': {
+        const tsA = String(a.updatedAt || a.createdAt || a.transactionDate || '');
+        const tsB = String(b.updatedAt || b.createdAt || b.transactionDate || '');
+        return tsB.localeCompare(tsA) || (idB - idA) || dateB.localeCompare(dateA);
+      }
+      case 'amount_desc':
+        return (amtB - amtA) || dateB.localeCompare(dateA) || (idB - idA);
+      case 'amount_asc':
+        return (amtA - amtB) || dateB.localeCompare(dateA) || (idB - idA);
+      case 'alpha_asc':
+      case 'merchant_asc':
+        return merchA.localeCompare(merchB, undefined, { sensitivity: 'base' }) || dateB.localeCompare(dateA);
+      case 'alpha_desc':
+      case 'merchant_desc':
+        return merchB.localeCompare(merchA, undefined, { sensitivity: 'base' }) || dateB.localeCompare(dateA);
+      case 'account_asc':
+        return acctA.localeCompare(acctB, undefined, { sensitivity: 'base' }) || dateB.localeCompare(dateA);
+      case 'date_desc':
+      default:
+        return dateB.localeCompare(dateA) || (idB - idA);
+    }
+  });
+}
+
+export function renderCategoryDropdownSortOptions(selectedMode = state.categoryDropdownSort) {
+  return `
+    <option value="alpha_asc" ${selectedMode === 'alpha_asc' ? 'selected' : ''}>Alphabetical (A-Z)</option>
+    <option value="alpha_desc" ${selectedMode === 'alpha_desc' ? 'selected' : ''}>Alphabetical (Z-A)</option>
+    <option value="recent" ${selectedMode === 'recent' ? 'selected' : ''}>Recent Changes</option>
+    <option value="custom_order" ${selectedMode === 'custom_order' ? 'selected' : ''}>Custom Order</option>
+    <option value="budget_desc" ${selectedMode === 'budget_desc' ? 'selected' : ''}>Highest Budget ($)</option>
+  `;
+}
+
+export function renderTransactionSortOptions(selectedMode = 'date_desc') {
+  const norm = selectedMode === 'recent_changes' ? 'recent'
+    : selectedMode === 'merchant_asc' ? 'alpha_asc'
+      : selectedMode === 'merchant_desc' ? 'alpha_desc'
+        : selectedMode;
+  return `
+    <option value="date_desc" ${norm === 'date_desc' ? 'selected' : ''}>Newest Date First</option>
+    <option value="date_asc" ${norm === 'date_asc' ? 'selected' : ''}>Oldest Date First</option>
+    <option value="recent" ${norm === 'recent' ? 'selected' : ''}>Recent Changes</option>
+    <option value="amount_desc" ${norm === 'amount_desc' ? 'selected' : ''}>Highest Amount ($)</option>
+    <option value="amount_asc" ${norm === 'amount_asc' ? 'selected' : ''}>Lowest Amount ($)</option>
+    <option value="alpha_asc" ${norm === 'alpha_asc' ? 'selected' : ''}>Merchant (A-Z)</option>
+    <option value="alpha_desc" ${norm === 'alpha_desc' ? 'selected' : ''}>Merchant (Z-A)</option>
+    <option value="account_asc" ${norm === 'account_asc' ? 'selected' : ''}>Account (A-Z)</option>
+  `;
 }
 
 export function escapeHtml(val) {
@@ -217,10 +297,7 @@ export function openCategorizeExpenseModal(tx, onSuccess, preselectedCatId = und
           <div style="display:flex;align-items:center;gap:6px;">
             <label style="font-size:11px;color:#64748B;font-weight:600;">Sort List:
               <select id="catModalSortSelect" class="select-control" style="padding:3px 6px;font-size:11px;">
-                <option value="alpha_asc" ${state.categoryDropdownSort === 'alpha_asc' ? 'selected' : ''}>Alphabetical (A-Z)</option>
-                <option value="recent" ${state.categoryDropdownSort === 'recent' ? 'selected' : ''}>Recent Changes</option>
-                <option value="custom_order" ${state.categoryDropdownSort === 'custom_order' ? 'selected' : ''}>Custom Order</option>
-                <option value="budget_desc" ${state.categoryDropdownSort === 'budget_desc' ? 'selected' : ''}>Highest Budget ($)</option>
+                ${renderCategoryDropdownSortOptions(state.categoryDropdownSort)}
               </select>
             </label>
             <button type="button" class="btn btn-outline btn-sm" id="toggleNewCatInlineBtn">

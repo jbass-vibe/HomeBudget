@@ -5,6 +5,8 @@ import {
   escapeHtml,
   formatBackupStatus,
   sortCategories,
+  sortTransactions,
+  renderCategoryDropdownSortOptions,
   setSortPreference,
   showToast,
   openModal,
@@ -13,6 +15,25 @@ import {
 } from '../app.js';
 
 let currentStagingSession = null;
+
+export function sortStagingCandidates(candidates, sortMode = 'status_priority') {
+  const list = Array.isArray(candidates) ? [...candidates] : [];
+  if (sortMode === 'status_priority') {
+    const rank = (row) => {
+      if (row.dedupStatus === 'PotentialCollision') return 0;
+      if (row.requiresManualReview && row.dedupStatus === 'AutoApprove') return 1;
+      if (row.dedupStatus === 'AutoApprove') return 2;
+      return 3;
+    };
+    return list.sort((a, b) => {
+      const rDiff = rank(a) - rank(b);
+      if (rDiff !== 0) return rDiff;
+      return String(b.transactionDate || '').localeCompare(String(a.transactionDate || '')) ||
+        (Math.abs(Number(b.amount || 0)) - Math.abs(Number(a.amount || 0)));
+    });
+  }
+  return sortTransactions(list, sortMode);
+}
 
 export async function renderUploadView(container) {
   container.innerHTML = `
@@ -146,9 +167,31 @@ async function handleStageFiles(container, fileList) {
   }
 }
 
+function captureCurrentEditsToSession(stagingMount, session) {
+  if (!stagingMount || !session || !Array.isArray(session.candidates)) return;
+  stagingMount.querySelectorAll('tr[data-row-id]').forEach(tr => {
+    const rowId = tr.dataset.rowId;
+    const candidate = session.candidates.find(c => String(c.rowId) === String(rowId));
+    if (!candidate) return;
+    const actionSel = tr.querySelector('.row-action-select');
+    const merchantInput = tr.querySelector('.row-merchant-input');
+    const typeSel = tr.querySelector('.row-type-select');
+    const catSel = tr.querySelector('.row-cat-select');
+    const subcatInput = tr.querySelector('.row-subcat-input');
+
+    if (actionSel) candidate._selectedAction = actionSel.value;
+    if (merchantInput) candidate.cleanMerchantName = merchantInput.value.trim();
+    if (typeSel) candidate.transactionType = typeSel.value;
+    if (catSel) candidate.categoryId = catSel.value ? Number(catSel.value) : null;
+    if (subcatInput) candidate.subcategory = subcatInput.value.trim() || null;
+  });
+}
+
 function renderStagingTable(stagingMount, session) {
   const s = session.summary;
   const sortedCats = sortCategories(state.categories, state.categoryDropdownSort);
+  const sortedCandidates = sortStagingCandidates(session.candidates, state.uploadTransactionSort);
+
   const categoryOptionsHtml = (selectedId) => `
     <option value="">-- Uncategorized --</option>
     ${sortedCats.map(c => `
@@ -171,12 +214,21 @@ function renderStagingTable(stagingMount, session) {
         </div>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
           <label style="font-size:12px;font-weight:700;color:#475569;display:inline-flex;align-items:center;gap:6px;">
+            Sort Staged Rows:
+            <select id="uploadTxSortSelect" class="select-control" style="font-size:12px;padding:4px 8px;">
+              <option value="status_priority" ${state.uploadTransactionSort === 'status_priority' ? 'selected' : ''}>Review Priority (Collisions First)</option>
+              <option value="date_desc" ${state.uploadTransactionSort === 'date_desc' ? 'selected' : ''}>Newest Date</option>
+              <option value="date_asc" ${state.uploadTransactionSort === 'date_asc' ? 'selected' : ''}>Oldest Date</option>
+              <option value="amount_desc" ${state.uploadTransactionSort === 'amount_desc' ? 'selected' : ''}>Highest Amount ($)</option>
+              <option value="amount_asc" ${state.uploadTransactionSort === 'amount_asc' ? 'selected' : ''}>Lowest Amount ($)</option>
+              <option value="alpha_asc" ${state.uploadTransactionSort === 'alpha_asc' ? 'selected' : ''}>Merchant (A-Z)</option>
+              <option value="alpha_desc" ${state.uploadTransactionSort === 'alpha_desc' ? 'selected' : ''}>Merchant (Z-A)</option>
+            </select>
+          </label>
+          <label style="font-size:12px;font-weight:700;color:#475569;display:inline-flex;align-items:center;gap:6px;">
             Category List Order:
             <select id="uploadCatDropdownSort" class="select-control" style="font-size:12px;padding:4px 8px;">
-              <option value="alpha_asc" ${state.categoryDropdownSort === 'alpha_asc' ? 'selected' : ''}>Alphabetical (A-Z)</option>
-              <option value="recent" ${state.categoryDropdownSort === 'recent' ? 'selected' : ''}>Recent Changes</option>
-              <option value="custom_order" ${state.categoryDropdownSort === 'custom_order' ? 'selected' : ''}>Custom Order</option>
-              <option value="budget_desc" ${state.categoryDropdownSort === 'budget_desc' ? 'selected' : ''}>Highest Budget ($)</option>
+              ${renderCategoryDropdownSortOptions(state.categoryDropdownSort)}
             </select>
           </label>
           <button class="btn btn-primary" id="commitUploadBtn">&#10003; Commit Approved Rows to SQLite</button>
@@ -198,8 +250,8 @@ function renderStagingTable(stagingMount, session) {
             </tr>
           </thead>
           <tbody>
-            ${session.candidates.map(row => {
-              const defaultAction = row.dedupStatus === 'AutoApprove' ? 'Import' : 'Skip';
+            ${sortedCandidates.map(row => {
+              const defaultAction = row._selectedAction || (row.dedupStatus === 'AutoApprove' ? 'Import' : 'Skip');
               const rowClass = row.dedupStatus === 'PotentialCollision'
                 ? 'row-collision'
                 : row.requiresManualReview && row.dedupStatus === 'AutoApprove'
@@ -212,7 +264,7 @@ function renderStagingTable(stagingMount, session) {
                     <select class="select-control row-action-select" style="font-weight:700;">
                       <option value="Import" ${defaultAction === 'Import' ? 'selected' : ''}>Import</option>
                       <option value="Skip" ${defaultAction === 'Skip' ? 'selected' : ''}>Skip</option>
-                      <option value="TombstoneDelete">Delete &amp; Ignore Forever</option>
+                      <option value="TombstoneDelete" ${defaultAction === 'TombstoneDelete' ? 'selected' : ''}>Delete &amp; Ignore Forever</option>
                     </select>
                   </td>
                   <td>
@@ -248,6 +300,15 @@ function renderStagingTable(stagingMount, session) {
       </div>
     </div>
   `;
+
+  const uploadTxSortSelect = stagingMount.querySelector('#uploadTxSortSelect');
+  if (uploadTxSortSelect) {
+    uploadTxSortSelect.onchange = (e) => {
+      captureCurrentEditsToSession(stagingMount, session);
+      setSortPreference('uploadTransactionSort', e.target.value);
+      renderStagingTable(stagingMount, session);
+    };
+  }
 
   const uploadSortSel = stagingMount.querySelector('#uploadCatDropdownSort');
   if (uploadSortSel) {

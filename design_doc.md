@@ -224,12 +224,12 @@ Whenever a user or administrator assigns or changes the category of an expense:
 
 ---
 
-### 4.2 List Management & Multi-Mode Sorting Specification (New in v2.2)
+### 4.2 Unified List Management & Multi-Mode Sorting Specification (v2.2 $\rightarrow$ v2.4)
 
-To make navigating categories, visualizations, budgets, rules, and transactions fast on both mobile (iPhone) and desktop, the system provides standardized list-sorting controls across all views. User sort preferences are persisted in `state` (and `localStorage` so they survive page reloads).
+To make navigating categories, visualizations, budgets, rules, backups, and transaction lists fast and consistent on both mobile (iPhone) and desktop, the system provides a **Unified List Sorting Architecture** across every list in the application. All sort preferences are persisted in `state` and `localStorage` via `setSortPreference(stateKey, value)` so user choices survive view navigation and page reloads. In addition, expanded category drill-downs (`state.expandedCashflowCategories` and `state.expandedBudgetCategories`) remain open when changing sort modes or recategorizing items.
 
-#### A. Category Dropdown Menus & Pickers (`sortCategories` Helper)
-Applies to all `<select>` category menus across the application:
+#### A. Category Dropdown Menus & Pickers (`sortCategories` Helper in `app.js`)
+Applies consistently to all `<select>` category menus across the application:
 - Unified Categorize Expense Modal (`app.js`)
 - Cashflow Uncategorized Triage row/group dropdowns (`cashflowView.js`)
 - CSV Upload Staging row category dropdowns (`uploadView.js`)
@@ -240,56 +240,70 @@ Applies to all `<select>` category menus across the application:
 | Sort Mode Key | Label | Ordering Logic |
 | :--- | :--- | :--- |
 | `alpha_asc` *(Default)* | **Alphabetical (A $\rightarrow$ Z)** | `Name.localeCompare(b.Name)` (case-insensitive) so users can jump to any category by name in dropdown menus. |
-| `recent` | **Recent Changes** | `UpdatedAt DESC, Name ASC` — places categories that were most recently created, edited, or assigned to a transaction at the top of the dropdown. |
+| `alpha_desc` | **Alphabetical (Z $\rightarrow$ A)** | Reverse alphabetical `b.Name.localeCompare(a.Name)`. |
+| `recent` | **Recent Changes** | `COALESCE(LastActivityAt, UpdatedAt, CreatedAt) DESC, Name ASC` — places categories that were most recently created, edited, or assigned to a transaction at the top of the dropdown. |
 | `custom_order` | **Custom Sort Order** | `SortOrder ASC, Name ASC` — respects the manual numeric order configured in the Topology table. |
 | `budget_desc` | **Highest Budget ($)** | `MonthlyBudget DESC, Name ASC` — places major household budget categories at the top. |
 
-- **UI Control:** A compact **"Dropdown Order"** pill/selector is available in the Categorize Expense Modal (and in the Categories Topology header) allowing the user to switch between `A–Z`, `Recent Changes`, `Custom Order`, and `Highest Budget` at any time; changing it updates all category dropdowns app-wide.
+#### B. Unified Transaction List Sorting (`sortTransactions` Helper in `app.js`)
+Every transaction list in the application shares the canonical `sortTransactions(transactions, sortMode)` helper so users have the exact same sorting options wherever transactions are displayed:
 
-#### B. Cashflow Sankey Visualization & Tabular Breakdown Sorting (`cashflowView.js` & `sankeyChart.js`)
-On the **Cashflow & Sankey Visualization** page, a **`Sort Categories:`** selector in the page toolbar controls the vertical ordering of **both** the **Sankey Diagram Category Nodes (Column 2) & Subcategory Nodes (Column 3)** and the **Tabular Cashflow Breakdown rows**:
+| Sort Mode Key | Label | Ordering Logic |
+| :--- | :--- | :--- |
+| `date_desc` *(Default)* | **Newest Date First** | `TransactionDate DESC, TransactionId DESC` |
+| `date_asc` | **Oldest Date First** | `TransactionDate ASC, TransactionId ASC` |
+| `recent` / `recent_changes` | **Recent Changes** | `COALESCE(UpdatedAt, CreatedAt, TransactionDate) DESC, TransactionId DESC` — surfaces recently categorized, edited, or split transactions first. |
+| `amount_desc` | **Highest Amount ($)** | `ABS(Amount) DESC, TransactionDate DESC` |
+| `amount_asc` | **Lowest Amount ($)** | `ABS(Amount) ASC, TransactionDate DESC` |
+| `alpha_asc` / `merchant_asc` | **Merchant / Description (A $\rightarrow$ Z)** | `(CleanMerchantName \|\| RawDescription) COLLATE NOCASE ASC, TransactionDate DESC` |
+| `alpha_desc` / `merchant_desc` | **Merchant / Description (Z $\rightarrow$ A)** | `(CleanMerchantName \|\| RawDescription) COLLATE NOCASE DESC, TransactionDate DESC` |
+| `account_asc` | **Account (A $\rightarrow$ Z)** | `AccountName COLLATE NOCASE ASC, TransactionDate DESC` |
+
+**Surfaces Powered by `sortTransactions`:**
+1. **Cashflow & Sankey — Expanded Category Transaction Lists (`cashflowView.js`, `state.cashflowTransactionSort`):**
+   - Controlled via the **`Sort Transactions:` (`#cashflowTxSortSelect`)** selector in the **Tabular Cashflow & Account Source Breakdown** header **and** the inline **`.cat-detail-tx-sort`** selector inside each expanded category row (`#cat_detail_{idx}`).
+   - Expanding any category row shows its constituent transactions ordered by `state.cashflowTransactionSort` (with date, merchant, account, optional subcategory/notes, amount, and a `Recategorize` button). Changing either the table-level or inline sort selector immediately re-orders all expanded category transaction lists while keeping the expanded rows open.
+2. **Cashflow & Sankey — Uncategorized Expenses Triage (`cashflowView.js`, `state.triageSort`):**
+   - Controlled via **`Sort Triage:` (`#triageSortSelect`)**, supporting all standard transaction sort modes (`amount_desc`, `amount_asc`, `date_desc`, `date_asc`, `recent`, `alpha_asc`, `alpha_desc`) plus **`count_desc` (Most Frequent Merchant)** when grouped by merchant. Merchant groups can also be expanded inline to inspect individual charges sorted by `state.triageSort`.
+3. **Monthly Budgets — Category Card Transaction Drill-Downs & Uncategorized Banner (`budgetsView.js`, `state.budgetsTransactionSort`):**
+   - Controlled via **`Sort Transactions:` (`#budgetsTxSortSelect`)** in the Monthly Budgets toolbar **and** the inline **`.budget-drill-tx-sort`** selector inside each expanded category card (`#drill_{categoryId}`).
+   - Applies to both the uncategorized expenses banner for the selected month and every category card's expandable transaction list, preserving open drill-downs across sort changes.
+4. **CSV Upload Staging Review Table (`uploadView.js`, `state.uploadTransactionSort`):**
+   - Controlled via **`Sort Staged Rows:` (`#uploadTxSortSelect`)**, supporting **`status_priority` (Review / Collisions First — Default)** as well as `date_desc`, `date_asc`, `amount_desc`, `amount_asc`, `alpha_asc`, and `alpha_desc`, while preserving any in-progress user edits in the staging table.
+5. **Transaction Inspector (`inspectorView.js` & `GET /api/transactions`, `state.inspectorTransactionSort`):**
+   - Controlled via **`Sort Transactions:` (`#fltSort`)**, persisted across sessions and evaluated in SQL (`ORDER BY`) across all matching pages.
+6. **Rule Back-Propagation Dry-Run Preview (`topologyView.js`):**
+   - Controlled via **`#backPropSortSelect`** inside the dry-run preview panel so the Administrator can sort proposed historical rule changes by `date_desc`, `amount_desc`, `alpha_asc`, or ` category_asc` before committing.
+
+#### C. Cashflow Sankey Visualization & Category Breakdown Sorting (`cashflowView.js` & `sankeyChart.js`)
+On the **Cashflow & Sankey Visualization** page, the **`Sort Categories:` (`#cashflowCatSortSelect`)** selector in the page toolbar controls the vertical ordering of **both** the **Sankey Diagram Category Nodes (Column 2) & Subcategory Nodes (Column 3)** and the **Tabular Cashflow Breakdown category rows**:
 
 | Sort Mode Key | Label | Ordering Logic in Sankey & Table |
 | :--- | :--- | :--- |
 | `spend_desc` *(Default)* | **Highest Spend ($)** | `NetSpend DESC, CategoryName ASC` — largest spending flows appear at the top of the Sankey diagram and table. |
 | `spend_asc` | **Lowest Spend ($)** | `NetSpend ASC, CategoryName ASC` — smallest positive spending flows appear first. |
 | `alpha_asc` | **Alphabetical (A $\rightarrow$ Z)** | `CategoryName ASC` (with `Uncategorized` pinned at the bottom of the category list so named categories stay strictly A $\rightarrow$ Z). Subcategory nodes in Column 3 also sort alphabetically within each category. |
+| `alpha_desc` | **Alphabetical (Z $\rightarrow$ A)** | `CategoryName DESC` (with `Uncategorized` pinned at the bottom). |
 | `recent` | **Recent Changes** | Ordered by `LastActivityAt DESC` (the latest `UpdatedAt` across the category and its transactions in the window), surfacing categories that were recently recategorized or modified at the top of the visualization and table. |
 | `custom_order` | **Custom Order** | Ordered by `Categories.SortOrder ASC, CategoryName ASC`. |
 
-#### C. Uncategorized Expenses Triage List Sorting (`cashflowView.js`)
-Inside the **Uncategorized Expenses Triage Panel**, alongside the **Group by Merchant** vs. **Chronological List** toggle, a **`Sort Triage:`** dropdown/pill control orders the uncategorized groups or rows:
-1. **`amount_desc` (Highest Amount — Default in Merchant-Grouped mode):** Largest dollar impact first (`ABS(totalAmount) DESC`).
-2. **`date_desc` (Newest Date / Recent Activity — Default in List mode):** Most recent transaction date or `UpdatedAt` first.
-3. **`alpha_asc` (Merchant A $\rightarrow$ Z):** Alphabetical by `CleanMerchantName ASC`.
-4. **`count_desc` (Most Frequent Merchant):** Highest transaction count per merchant group first (`transactions.length DESC`).
-
 #### D. Monthly Budgets View Card Sorting (`budgetsView.js`)
-In the **Monthly Budgets** header, a **`Sort Categories:`** selector orders the budget progress cards:
+In the **Monthly Budgets** header, **`Sort Categories:` (`#budgetsSortSelect`)** orders the budget progress cards:
 1. **`custom_order` (Custom Order — Default):** `SortOrder ASC, Name ASC`.
 2. **`alpha_asc` (Alphabetical A $\rightarrow$ Z):** `Name ASC`.
-3. **`recent` (Recent Changes):** Ordered by most recent category/transaction modification (`UpdatedAt DESC`).
-4. **`pct_used_desc` (% Budget Used — High $\rightarrow$ Low):** Surfaces over-budget (`Red`) and warning (`Amber`) categories at the top.
-5. **`spend_desc` (Highest Spent $):** `NetSpent DESC`.
-6. **`remaining_asc` (Least Remaining $):** `Remaining ASC` (most over-budget or tightest remaining budget first).
+3. **`alpha_desc` (Alphabetical Z $\rightarrow$ A):** `Name DESC`.
+4. **`recent` (Recent Changes):** Ordered by most recent category/transaction modification (`LastActivityAt DESC`).
+5. **`pct_used_desc` (% Budget Used — High $\rightarrow$ Low):** Surfaces over-budget (`Red`) and warning (`Amber`) categories at the top.
+6. **`spend_desc` (Highest Spent $):** `NetSpent DESC`.
+7. **`remaining_asc` (Least Remaining $):** `Remaining ASC` (most over-budget or tightest remaining budget first).
 
-Within each budget card's expandable transaction drill-down list, transactions can also be toggled between **Newest Date (`date_desc`)**, **Recent Changes (`recent`)**, **Alphabetical (`alpha_asc`)**, and **Highest Amount (`amount_desc`)**.
-
-#### E. Categories Topology & Auto-Categorization Rules Sorting (`topologyView.js`)
-1. **Spending Category Topology Table:**
-   - Sortable via toolbar pills: **Custom Order (`SortOrder ASC`)**, **Alphabetical (`Name ASC`)**, **Recent Changes (`UpdatedAt DESC`)**, and **Highest Budget (`MonthlyBudget DESC`)**.
-2. **Auto-Categorization Rules Table:**
-   - Sortable via toolbar pills: **Rule Priority (`Priority ASC`)**, **Alphabetical Pattern (`MatchPattern ASC`)**, **Target Category (`CategoryName ASC`)**, and **Recent Changes (`UpdatedAt DESC`)**.
-
-#### F. Transaction Inspector Sorting (`inspectorView.js` & `GET /api/transactions`)
-The `Sort By` selector in the Transaction Inspector supports:
-- **`date_desc`:** Newest Transaction Date (`t.TransactionDate DESC, t.TransactionId DESC`)
-- **`date_asc`:** Oldest Transaction Date (`t.TransactionDate ASC, t.TransactionId ASC`)
-- **`recent_changes`:** **Recent Changes / Recently Edited (`t.UpdatedAt DESC, t.TransactionId DESC`)** — immediately surfaces transactions that were recently categorized, edited, or split.
-- **`merchant_asc`:** **Alphabetical Merchant (A $\rightarrow$ Z) (`t.CleanMerchantName ASC, t.TransactionDate DESC`)**
-- **`merchant_desc`:** **Alphabetical Merchant (Z $\rightarrow$ A) (`t.CleanMerchantName DESC, t.TransactionDate DESC`)**
-- **`amount_desc`:** Highest Amount (`ABS(t.Amount) DESC, t.TransactionDate DESC`)
-- **`amount_asc`:** Lowest Amount (`ABS(t.Amount) ASC, t.TransactionDate DESC`)
+#### E. Categories Topology, Auto-Categorization Rules & Backups Sorting (`topologyView.js`)
+1. **Spending Category Topology Table (`#topologyCatSortSelect`):**
+   - Sortable by **Custom Order (`custom_order`)**, **Alphabetical A–Z (`alpha_asc`)**, **Alphabetical Z–A (`alpha_desc`)**, **Recent Changes (`recent`)**, and **Highest Budget (`budget_desc`)**.
+2. **Auto-Categorization Rules Table (`#topologyRuleSortSelect`):**
+   - Sortable by **Evaluation Priority (`priority_asc`)**, **Match Pattern A–Z (`alpha_asc`)**, **Target Category A–Z (`category_asc`)**, and **Recent Changes (`recent`)**.
+3. **SQLite Backup Snapshots Table (`#backupSortSelect`):**
+   - Sortable by **Newest First (`date_desc`)**, **Oldest First (`date_asc`)**, **Largest Size (`size_desc`)**, **Smallest Size (`size_asc`)**, and **Trigger Reason A–Z (`reason_asc`)**.
 
 ---
 
@@ -439,12 +453,12 @@ The **Local SQLite Backup, Restore & Database Management** card in the Admin Pan
 +-----------------------------------------------------------------------+
 ```
 
-### 6.2 Visualization Page (`Cashflow & Sankey`) with Visualization & Triage Sorting
+### 6.2 Visualization Page (`Cashflow & Sankey`) with Category, Triage & Expanded Transaction Sorting
 ```
 +-----------------------------------------------------------------------+
 | Cashflow & Sankey Visualization                                       |
 | Window: [ Current MTD ] [ Prior Month ] [ Last 3M ] [ Custom ]        |
-| Sort Visualization & Table: [ Highest Spend ▼ ]  (A-Z | Recent | ...) |
+| Sort Categories: [ Highest Spend ▼ ]  (Lowest $ | A-Z | Z-A | Recent) |
 +-----------------------------------------------------------------------+
 |   [ S A N K E Y    D I A G R A M   (Nodes ordered by selected sort) ] |
 +-----------------------------------------------------------------------+
@@ -454,6 +468,16 @@ The **Local SQLite Backup, Restore & Database Management** card in the Admin Pan
 | CITY WATER UTILITY (1 charge • Mar 11)     | $137.51 | [ Categorize ] |
 | COSTCO GAS (2 charges • Mar 11 – Mar 18)   | $124.80 | [ Categorize ] |
 | APPLE.COM/BILL (1 charge • Mar 15)         |  $14.99 | [ Categorize ] |
++-----------------------------------------------------------------------+
+| Tabular Cashflow & Account Source Breakdown                           |
+| Sort Category Rows: [ Highest Spend ▼ ]  Sort Tx: [ Newest Date ▼ ]   |
+|-----------------------------------------------------------------------|
+| ▾ ● Groceries (6)                      | $542.18 | 28.4% | [ Edit ]   |
+|   +---------------------------------------------------------------+   |
+|   | 6 Transactions in Groceries      Sort List: [ Highest $ ▼ ]   |   |
+|   | 2026-03-14 • TRADER JOE'S (Chase Sapphire) | $142.80 | [Recat]|   |
+|   | 2026-03-08 • WHOLE FOODS (Chase Sapphire)  |  $98.40 | [Recat]|   |
+|   +---------------------------------------------------------------+   |
 +-----------------------------------------------------------------------+
 ```
 

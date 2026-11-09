@@ -4,6 +4,9 @@ import {
   formatCurrency,
   escapeHtml,
   sortCategories,
+  sortTransactions,
+  renderCategoryDropdownSortOptions,
+  renderTransactionSortOptions,
   setSortPreference,
   openCategorizeExpenseModal,
   openCategoryManagerModal
@@ -37,15 +40,36 @@ export function groupUncategorizedByMerchant(uncatTxs, sortMode = 'amount_desc')
     if (tx.accountName) group.accounts.add(tx.accountName);
   }
 
-  const groups = Array.from(map.values());
+  const groups = Array.from(map.values()).map(group => {
+    group.transactions = sortTransactions(group.transactions, sortMode === 'count_desc' ? 'date_desc' : sortMode);
+    if (group.transactions.length > 0) {
+      group.representativeTx = group.transactions[0];
+    }
+    return group;
+  });
+
   return groups.sort((a, b) => {
     switch (sortMode) {
       case 'date_desc':
         return String(b.maxDate || '').localeCompare(String(a.maxDate || '')) || (Math.abs(b.totalAmount) - Math.abs(a.totalAmount));
+      case 'date_asc':
+        return String(a.minDate || '').localeCompare(String(b.minDate || '')) || (Math.abs(b.totalAmount) - Math.abs(a.totalAmount));
       case 'recent':
+      case 'recent_changes':
         return String(b.lastUpdatedAt || '').localeCompare(String(a.lastUpdatedAt || '')) || (Math.abs(b.totalAmount) - Math.abs(a.totalAmount));
       case 'alpha_asc':
+      case 'merchant_asc':
         return String(a.merchantName || '').localeCompare(String(b.merchantName || ''), undefined, { sensitivity: 'base' });
+      case 'alpha_desc':
+      case 'merchant_desc':
+        return String(b.merchantName || '').localeCompare(String(a.merchantName || ''), undefined, { sensitivity: 'base' });
+      case 'account_asc': {
+        const accA = Array.from(a.accounts).sort().join(', ');
+        const accB = Array.from(b.accounts).sort().join(', ');
+        return accA.localeCompare(accB, undefined, { sensitivity: 'base' }) || (Math.abs(b.totalAmount) - Math.abs(a.totalAmount));
+      }
+      case 'amount_asc':
+        return (Math.abs(a.totalAmount) - Math.abs(b.totalAmount)) || String(a.merchantName || '').localeCompare(String(b.merchantName || ''));
       case 'count_desc':
         return (b.transactions.length - a.transactions.length) || (Math.abs(b.totalAmount) - Math.abs(a.totalAmount));
       case 'amount_desc':
@@ -56,29 +80,23 @@ export function groupUncategorizedByMerchant(uncatTxs, sortMode = 'amount_desc')
 }
 
 export function sortUncategorizedTransactions(uncatTxs, sortMode = 'amount_desc') {
-  const list = Array.isArray(uncatTxs) ? [...uncatTxs] : [];
-  return list.sort((a, b) => {
-    switch (sortMode) {
-      case 'date_desc':
-        return String(b.transactionDate || '').localeCompare(String(a.transactionDate || '')) || (Math.abs(b.amount) - Math.abs(a.amount));
-      case 'recent': {
-        const tsA = String(a.updatedAt || a.createdAt || a.transactionDate || '');
-        const tsB = String(b.updatedAt || b.createdAt || b.transactionDate || '');
-        return tsB.localeCompare(tsA) || (Math.abs(b.amount) - Math.abs(a.amount));
-      }
-      case 'alpha_asc':
-        return String(a.cleanMerchantName || a.rawDescription || '').localeCompare(
-          String(b.cleanMerchantName || b.rawDescription || ''),
-          undefined,
-          { sensitivity: 'base' }
-        );
-      case 'amount_desc':
-      case 'count_desc':
-      default:
-        return (Math.abs(Number(b.amount || 0)) - Math.abs(Number(a.amount || 0))) ||
-          String(b.transactionDate || '').localeCompare(String(a.transactionDate || ''));
+  if (sortMode === 'count_desc') {
+    const list = Array.isArray(uncatTxs) ? [...uncatTxs] : [];
+    const counts = new Map();
+    for (const tx of list) {
+      const key = (tx.cleanMerchantName || tx.rawDescription || 'Unknown').trim().toUpperCase();
+      counts.set(key, (counts.get(key) || 0) + 1);
     }
-  });
+    return list.sort((a, b) => {
+      const keyA = (a.cleanMerchantName || a.rawDescription || 'Unknown').trim().toUpperCase();
+      const keyB = (b.cleanMerchantName || b.rawDescription || 'Unknown').trim().toUpperCase();
+      const diff = (counts.get(keyB) || 0) - (counts.get(keyA) || 0);
+      if (diff !== 0) return diff;
+      return (Math.abs(Number(b.amount || 0)) - Math.abs(Number(a.amount || 0))) ||
+        String(b.transactionDate || '').localeCompare(String(a.transactionDate || ''));
+    });
+  }
+  return sortTransactions(uncatTxs, sortMode);
 }
 
 export async function renderCashflowView(container) {
@@ -124,6 +142,7 @@ export async function renderCashflowView(container) {
             <option value="spend_desc" ${state.cashflowCategorySort === 'spend_desc' ? 'selected' : ''}>Highest Spend ($)</option>
             <option value="spend_asc" ${state.cashflowCategorySort === 'spend_asc' ? 'selected' : ''}>Lowest Spend ($)</option>
             <option value="alpha_asc" ${state.cashflowCategorySort === 'alpha_asc' ? 'selected' : ''}>Alphabetical (A-Z)</option>
+            <option value="alpha_desc" ${state.cashflowCategorySort === 'alpha_desc' ? 'selected' : ''}>Alphabetical (Z-A)</option>
             <option value="recent" ${state.cashflowCategorySort === 'recent' ? 'selected' : ''}>Recent Changes</option>
             <option value="custom_order" ${state.cashflowCategorySort === 'custom_order' ? 'selected' : ''}>Custom Order</option>
           </select>
@@ -189,7 +208,7 @@ export async function renderCashflowView(container) {
     <div class="card-panel sankey-card-panel">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
         <h2 style="margin:0;font-size:16px;font-weight:700;">Cashflow Sankey Diagram</h2>
-        <span style="font-size:12px;color:#64748B;">Tap any flow ribbon or the Uncategorized node to categorize or inspect</span>
+        <span style="font-size:12px;color:#64748B;">Tap any flow ribbon or category node to expand and inspect its sorted transactions</span>
       </div>
       <div id="sankeyMount" class="sankey-wrapper"></div>
     </div>
@@ -215,19 +234,20 @@ export async function renderCashflowView(container) {
               Sort Triage:
               <select id="triageSortSelect" class="select-control" style="font-size:12px;padding:3px 6px;">
                 <option value="amount_desc" ${state.triageSort === 'amount_desc' ? 'selected' : ''}>Highest Amount ($)</option>
+                <option value="amount_asc" ${state.triageSort === 'amount_asc' ? 'selected' : ''}>Lowest Amount ($)</option>
                 <option value="date_desc" ${state.triageSort === 'date_desc' ? 'selected' : ''}>Newest Date</option>
+                <option value="date_asc" ${state.triageSort === 'date_asc' ? 'selected' : ''}>Oldest Date</option>
                 <option value="recent" ${state.triageSort === 'recent' ? 'selected' : ''}>Recent Changes</option>
                 <option value="alpha_asc" ${state.triageSort === 'alpha_asc' ? 'selected' : ''}>Merchant (A-Z)</option>
+                <option value="alpha_desc" ${state.triageSort === 'alpha_desc' ? 'selected' : ''}>Merchant (Z-A)</option>
+                <option value="account_asc" ${state.triageSort === 'account_asc' ? 'selected' : ''}>Account (A-Z)</option>
                 <option value="count_desc" ${state.triageSort === 'count_desc' ? 'selected' : ''}>Most Frequent</option>
               </select>
             </label>
             <label style="font-size:11px;font-weight:700;color:#92400E;display:inline-flex;align-items:center;gap:4px;">
               Dropdown Order:
               <select id="triageCatDropdownSort" class="select-control" style="font-size:12px;padding:3px 6px;">
-                <option value="alpha_asc" ${state.categoryDropdownSort === 'alpha_asc' ? 'selected' : ''}>Alphabetical (A-Z)</option>
-                <option value="recent" ${state.categoryDropdownSort === 'recent' ? 'selected' : ''}>Recent Changes</option>
-                <option value="custom_order" ${state.categoryDropdownSort === 'custom_order' ? 'selected' : ''}>Custom Order</option>
-                <option value="budget_desc" ${state.categoryDropdownSort === 'budget_desc' ? 'selected' : ''}>Highest Budget ($)</option>
+                ${renderCategoryDropdownSortOptions(state.categoryDropdownSort)}
               </select>
             </label>
             <div class="pill-group">
@@ -321,8 +341,33 @@ export async function renderCashflowView(container) {
       `) : ''}
     </div>
 
-    <div class="card-panel">
-      <h2 style="margin:0 0 14px 0;font-size:16px;font-weight:700;">Tabular Cashflow &amp; Account Source Breakdown</h2>
+    <div class="card-panel" id="cashflowTableCard">
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:10px;margin-bottom:14px;">
+        <div>
+          <h2 style="margin:0;font-size:16px;font-weight:700;">Tabular Cashflow &amp; Account Source Breakdown</h2>
+          <p style="margin:2px 0 0 0;font-size:12px;color:#64748B;">Click any category row to expand or collapse its individual transactions.</p>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px;">
+          <label style="font-size:12px;font-weight:700;color:#475569;display:inline-flex;align-items:center;gap:6px;">
+            Sort Category Rows:
+            <select id="cashflowTableCatSortSelect" class="select-control" style="font-size:12px;padding:4px 8px;">
+              <option value="spend_desc" ${state.cashflowCategorySort === 'spend_desc' ? 'selected' : ''}>Highest Spend ($)</option>
+              <option value="spend_asc" ${state.cashflowCategorySort === 'spend_asc' ? 'selected' : ''}>Lowest Spend ($)</option>
+              <option value="alpha_asc" ${state.cashflowCategorySort === 'alpha_asc' ? 'selected' : ''}>Alphabetical (A-Z)</option>
+              <option value="alpha_desc" ${state.cashflowCategorySort === 'alpha_desc' ? 'selected' : ''}>Alphabetical (Z-A)</option>
+              <option value="recent" ${state.cashflowCategorySort === 'recent' ? 'selected' : ''}>Recent Changes</option>
+              <option value="custom_order" ${state.cashflowCategorySort === 'custom_order' ? 'selected' : ''}>Custom Order</option>
+            </select>
+          </label>
+          <label style="font-size:12px;font-weight:700;color:#475569;display:inline-flex;align-items:center;gap:6px;">
+            Sort Transactions:
+            <select id="cashflowTxSortSelect" class="select-control" style="font-size:12px;padding:4px 8px;">
+              ${renderTransactionSortOptions(state.cashflowTransactionSort)}
+            </select>
+          </label>
+        </div>
+      </div>
+
       <div class="table-responsive">
         <table class="data-table">
           <thead>
@@ -338,37 +383,59 @@ export async function renderCashflowView(container) {
           <tbody>
             ${data.tableRows.length === 0 ? `
               <tr><td colspan="${5 + data.accounts.length}" style="text-align:center;color:#64748B;">No expenses recorded in this window.</td></tr>
-            ` : data.tableRows.map((row, idx) => `
-              <tr class="cat-summary-row" data-expand-row="${idx}" style="cursor:pointer;">
-                <td>
-                  <span class="cat-dot" style="background:${escapeHtml(row.colorHex)};display:inline-block;margin-right:8px;"></span>
-                  <strong>${escapeHtml(row.categoryName)}</strong>
-                  <span style="font-size:11px;color:#64748B;margin-left:6px;">(${row.transactions.length}) &#9662;</span>
-                </td>
-                ${data.accounts.map(a => `<td>${formatCurrency(row.spendByAccount[a.accountId] || 0)}</td>`).join('')}
-                <td class="amount-expense">${formatCurrency(row.netSpend)}</td>
-                <td>${row.pctOfTotalSpend}%</td>
-                <td>${row.pctOfIncome}%</td>
-                <td>
-                  ${row.categoryId ? `<button class="btn btn-outline btn-sm edit-cat-inline-btn" data-cat-id="${row.categoryId}">Edit / Delete</button>` : ''}
-                </td>
-              </tr>
-              <tr id="cat_detail_${idx}" style="display:none;background:#F8FAFC;">
-                <td colspan="${5 + data.accounts.length}" style="padding:12px 20px;">
-                  <div style="max-height:260px;overflow-y:auto;">
-                    ${row.transactions.map(t => `
-                      <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px dashed #E2E8F0;font-size:12px;">
-                        <span><strong>${escapeHtml(t.transactionDate)}</strong> &bull; ${escapeHtml(t.cleanMerchantName)} (${escapeHtml(t.accountName)})${t.subcategory ? ` [${escapeHtml(t.subcategory)}]` : ''}</span>
-                        <div style="display:flex;align-items:center;gap:10px;">
-                          <span class="${t.amount < 0 ? 'amount-refund' : 'amount-expense'}">${formatCurrency(t.amount)}</span>
-                          <button class="btn btn-outline btn-sm recat-tx-btn" data-tx-id="${t.transactionId}">Recategorize</button>
+            ` : data.tableRows.map((row, idx) => {
+              const rowKey = row.categoryId === null ? 'uncat' : String(row.categoryId);
+              const isExpanded = state.expandedCashflowCategories.includes(rowKey);
+              const sortedRowTxs = sortTransactions(row.transactions, state.cashflowTransactionSort);
+              return `
+                <tr class="cat-summary-row" data-expand-row="${idx}" data-row-key="${rowKey}" style="cursor:pointer;">
+                  <td>
+                    <span class="cat-dot" style="background:${escapeHtml(row.colorHex)};display:inline-block;margin-right:8px;"></span>
+                    <strong>${escapeHtml(row.categoryName)}</strong>
+                    <span class="cat-expand-indicator" style="font-size:11px;color:#64748B;margin-left:6px;">(${sortedRowTxs.length}) ${isExpanded ? '&#9652;' : '&#9662;'}</span>
+                  </td>
+                  ${data.accounts.map(a => `<td>${formatCurrency(row.spendByAccount[a.accountId] || 0)}</td>`).join('')}
+                  <td class="amount-expense">${formatCurrency(row.netSpend)}</td>
+                  <td>${row.pctOfTotalSpend}%</td>
+                  <td>${row.pctOfIncome}%</td>
+                  <td>
+                    ${row.categoryId ? `<button class="btn btn-outline btn-sm edit-cat-inline-btn" data-cat-id="${row.categoryId}">Edit / Delete</button>` : ''}
+                  </td>
+                </tr>
+                <tr id="cat_detail_${idx}" data-detail-key="${rowKey}" style="display:${isExpanded ? 'table-row' : 'none'};background:#F8FAFC;">
+                  <td colspan="${5 + data.accounts.length}" style="padding:12px 20px;">
+                    <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px;padding-bottom:8px;margin-bottom:6px;border-bottom:1px solid #E2E8F0;">
+                      <span style="font-size:12px;font-weight:700;color:#334155;">
+                        ${sortedRowTxs.length} Transaction${sortedRowTxs.length === 1 ? '' : 's'} in ${escapeHtml(row.categoryName)}
+                      </span>
+                      <label style="font-size:11px;font-weight:700;color:#475569;display:inline-flex;align-items:center;gap:6px;" onclick="event.stopPropagation();">
+                        Sort Transactions:
+                        <select class="select-control cat-detail-tx-sort" style="font-size:11px;padding:3px 6px;">
+                          ${renderTransactionSortOptions(state.cashflowTransactionSort)}
+                        </select>
+                      </label>
+                    </div>
+                    <div style="max-height:280px;overflow-y:auto;">
+                      ${sortedRowTxs.map(t => `
+                        <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px dashed #E2E8F0;font-size:12px;">
+                          <span>
+                            <strong>${escapeHtml(t.transactionDate)}</strong> &bull;
+                            <strong>${escapeHtml(t.cleanMerchantName)}</strong>
+                            <span style="color:#64748B;">(${escapeHtml(t.accountName)})</span>
+                            ${t.subcategory ? `<span class="bigbox-pill" style="margin-left:4px;">${escapeHtml(t.subcategory)}</span>` : ''}
+                            ${t.notes ? `<span style="color:#64748B;font-style:italic;margin-left:4px;">&mdash; ${escapeHtml(t.notes)}</span>` : ''}
+                          </span>
+                          <div style="display:flex;align-items:center;gap:10px;">
+                            <span class="${t.amount < 0 ? 'amount-refund' : 'amount-expense'}">${formatCurrency(t.amount)}</span>
+                            <button class="btn btn-outline btn-sm recat-tx-btn" data-tx-id="${t.transactionId}">Recategorize</button>
+                          </div>
                         </div>
-                      </div>
-                    `).join('')}
-                  </div>
-                </td>
-              </tr>
-            `).join('')}
+                      `).join('')}
+                    </div>
+                  </td>
+                </tr>
+              `;
+            }).join('')}
           </tbody>
         </table>
       </div>
@@ -385,6 +452,15 @@ export async function renderCashflowView(container) {
     if (clickedNode.id === 'cat_uncat') {
       const panel = container.querySelector('#uncategorizedTriagePanel');
       if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } else if (clickedNode.id && clickedNode.id.startsWith('cat_')) {
+      const catKey = clickedNode.id.replace('cat_', '');
+      if (!state.expandedCashflowCategories.includes(catKey)) {
+        state.expandedCashflowCategories.push(catKey);
+      }
+      renderCashflowView(container).then(() => {
+        const summaryRow = container.querySelector(`[data-row-key="${catKey}"]`);
+        if (summaryRow) summaryRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
     }
   });
 
@@ -392,13 +468,28 @@ export async function renderCashflowView(container) {
   container.querySelector('#cashflowAddCatBtn').onclick = openAddCat;
   container.querySelector('#triageNewCatBtn').onclick = openAddCat;
 
+  const handleCategorySortChange = (e) => {
+    setSortPreference('cashflowCategorySort', e.target.value);
+    renderCashflowView(container);
+  };
+
   const cashflowCatSortSelect = container.querySelector('#cashflowCatSortSelect');
-  if (cashflowCatSortSelect) {
-    cashflowCatSortSelect.onchange = (e) => {
-      setSortPreference('cashflowCategorySort', e.target.value);
-      renderCashflowView(container);
-    };
-  }
+  if (cashflowCatSortSelect) cashflowCatSortSelect.onchange = handleCategorySortChange;
+
+  const cashflowTableCatSortSelect = container.querySelector('#cashflowTableCatSortSelect');
+  if (cashflowTableCatSortSelect) cashflowTableCatSortSelect.onchange = handleCategorySortChange;
+
+  const handleTransactionSortChange = (e) => {
+    setSortPreference('cashflowTransactionSort', e.target.value);
+    renderCashflowView(container);
+  };
+
+  const cashflowTxSortSelect = container.querySelector('#cashflowTxSortSelect');
+  if (cashflowTxSortSelect) cashflowTxSortSelect.onchange = handleTransactionSortChange;
+
+  container.querySelectorAll('.cat-detail-tx-sort').forEach(sel => {
+    sel.onchange = handleTransactionSortChange;
+  });
 
   const triageSortSelect = container.querySelector('#triageSortSelect');
   if (triageSortSelect) {
@@ -511,9 +602,24 @@ export async function renderCashflowView(container) {
   container.querySelectorAll('[data-expand-row]').forEach(rowEl => {
     rowEl.onclick = () => {
       const idx = rowEl.dataset.expandRow;
+      const rowKey = rowEl.dataset.rowKey;
       const detailEl = container.querySelector(`#cat_detail_${idx}`);
       if (detailEl) {
-        detailEl.style.display = detailEl.style.display === 'none' ? 'table-row' : 'none';
+        const willExpand = detailEl.style.display === 'none';
+        detailEl.style.display = willExpand ? 'table-row' : 'none';
+        if (rowKey) {
+          if (willExpand && !state.expandedCashflowCategories.includes(rowKey)) {
+            state.expandedCashflowCategories.push(rowKey);
+          } else if (!willExpand) {
+            state.expandedCashflowCategories = state.expandedCashflowCategories.filter(k => k !== rowKey);
+          }
+        }
+        const indicator = rowEl.querySelector('.cat-expand-indicator');
+        if (indicator) {
+          const countMatch = indicator.textContent.match(/\(\d+\)/);
+          const countPart = countMatch ? countMatch[0] : '';
+          indicator.innerHTML = `${countPart} ${willExpand ? '&#9652;' : '&#9662;'}`;
+        }
       }
     };
   });
