@@ -784,6 +784,14 @@ export async function renderTopologyView(container) {
     };
   }
 
+  // Reset All Information — Start from Clean History (preserves backup databases)
+  const resetAllDatabaseAdminBtn = container.querySelector('#resetAllDatabaseAdminBtn');
+  if (resetAllDatabaseAdminBtn) {
+    resetAllDatabaseAdminBtn.onclick = () => {
+      openResetAllDatabaseModal(() => renderTopologyView(container));
+    };
+  }
+
   // Top-level Restore Database Modal (Local Snapshot or Upload External .db)
   const restoreDatabaseModalBtn = container.querySelector('#restoreDatabaseModalBtn');
   if (restoreDatabaseModalBtn) {

@@ -573,6 +573,16 @@ app.MapPost("/api/transactions/clear-history", async (
     return Results.Ok(result);
 });
 
+app.MapPost("/api/admin/reset-all", async (
+    ResetAllDatabaseRequest? req,
+    CategorizationService catService,
+    CancellationToken ct) =>
+{
+    var result = await catService.ResetAllDatabaseAsync(req ?? new ResetAllDatabaseRequest(), ct);
+    return Results.Ok(result);
+});
+
+
 // ============================================================================
 // 5. SETTINGS, INCOME OVERRIDES & LOCAL BACKUP MANAGEMENT
 // ============================================================================

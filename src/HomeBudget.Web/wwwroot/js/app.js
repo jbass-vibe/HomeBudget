@@ -663,6 +663,102 @@ export function openClearTransactionHistoryModal(onSuccess) {
 }
 
 /**
+ * Reset All Information Modal — Start from Clean History (v2.5)
+ * Resets all live database tables while strictly preserving all SQLite backup databases in Backups/.
+ */
+export function openResetAllDatabaseModal(onSuccess) {
+  openModal(`
+    <h3 style="margin-top:0;color:#DC2626;">&#9888;&#65039; Reset All Information (Start from Clean History)</h3>
+    <div style="background:#FEF2F2;border:1px solid #FECACA;border-radius:10px;padding:12px;margin-bottom:12px;font-size:13px;color:#991B1B;">
+      <strong>Complete Live Database Reset:</strong> Clears all <strong>Transactions</strong>, <strong>Deleted Transaction Tombstones</strong>, <strong>Staging Sessions</strong>, <strong>Income Overrides</strong>, <strong>Categories</strong>, and <strong>Auto-Categorization Rules</strong> so you can start from a clean history.
+    </div>
+    <div style="background:#ECFDF5;border:1px solid #A7F3D0;border-radius:10px;padding:10px 12px;margin-bottom:14px;font-size:12px;color:#065F46;">
+      &#128737;&#65039; <strong>Backup Databases Preserved:</strong> Existing SQLite backup snapshots in <code>Backups/</code> are <strong>never</strong> deleted by this reset. You can restore any backup snapshot at any time.
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:12px;margin:14px 0;">
+      <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;background:#EFF6FF;border:1px solid #BFDBFE;border-radius:10px;padding:10px 12px;cursor:pointer;">
+        <input type="checkbox" id="resetAllBackupCheck" checked style="margin-top:3px;" />
+        <div>
+          <strong style="color:#1E40AF;">Back up current database before resetting (<code>pre_reset_all</code> safety snapshot)</strong>
+          <div style="font-size:11px;color:#475569;margin-top:2px;">
+            Saves a verified SQLite snapshot of your current state into <code>Backups/</code> before resetting.
+          </div>
+        </div>
+      </label>
+
+      <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;cursor:pointer;">
+        <input type="checkbox" id="resetAllReseedCheck" checked style="margin-top:3px;" />
+        <div>
+          <strong>Re-seed default starter Categories (12) &amp; Auto-Categorization Rules (15)</strong>
+          <div style="font-size:11px;color:#64748B;">Uncheck if you want to start with zero categories and zero rules. Default household accounts and settings are always initialized.</div>
+        </div>
+      </label>
+
+      <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;background:#FFFBEB;border:1px solid #FDE68A;border-radius:10px;padding:10px 12px;cursor:pointer;">
+        <input type="checkbox" id="resetAllConfirmCheck" style="margin-top:3px;" />
+        <div>
+          <strong style="color:#92400E;">I confirm I want to reset all live database information and start from a clean history (backup databases will NOT be deleted)</strong>
+        </div>
+      </label>
+    </div>
+
+    <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px;">
+      <button class="btn btn-outline" id="cancelResetAllBtn">Cancel</button>
+      <button class="btn btn-danger" id="confirmResetAllBtn" disabled>Backup &amp; Reset All Information</button>
+    </div>
+  `, (m) => {
+    const backupCheck = m.querySelector('#resetAllBackupCheck');
+    const reseedCheck = m.querySelector('#resetAllReseedCheck');
+    const confirmCheck = m.querySelector('#resetAllConfirmCheck');
+    const confirmBtn = m.querySelector('#confirmResetAllBtn');
+
+    function syncResetButtonState() {
+      confirmBtn.disabled = !confirmCheck.checked;
+      confirmBtn.textContent = backupCheck.checked
+        ? 'Backup & Reset All Information'
+        : 'Reset All Information (Keep Existing Backups)';
+    }
+
+    backupCheck.onchange = syncResetButtonState;
+    confirmCheck.onchange = syncResetButtonState;
+
+    m.querySelector('#cancelResetAllBtn').onclick = closeModal;
+    confirmBtn.onclick = async () => {
+      if (!confirmCheck.checked) return;
+
+      const createBackupFirst = backupCheck.checked;
+      const reseedDefaultCategoriesAndRules = reseedCheck.checked;
+
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = 'Resetting...';
+
+      try {
+        const res = await apiFetch('/api/admin/reset-all', {
+          method: 'POST',
+          body: JSON.stringify({
+            createBackupFirst,
+            reseedDefaultCategoriesAndRules
+          })
+        });
+        await refreshReferenceData();
+        closeModal();
+        const backupMsg = res.preResetBackupFile
+          ? `Safety backup: ${res.preResetBackupFile}`
+          : `${res.retainedBackupFilesCount} backup(s) preserved`;
+        showToast(`Reset complete (cleared ${res.deletedTransactionsCount} tx, ${res.deletedCategoriesCount} categories, ${res.deletedRulesCount} rules • ${backupMsg})`);
+        if (onSuccess) await onSuccess(res);
+      } catch (err) {
+        confirmBtn.disabled = false;
+        syncResetButtonState();
+        alert(`Failed to reset database: ${err.message}`);
+      }
+    };
+  });
+}
+
+
+/**
  * Unified Database Restore Modal (v2.4)
  * Supports restoring either from a local snapshot in Backups/ or by uploading an external .db file,
  * with an option to create an automatic pre_restore safety snapshot first.

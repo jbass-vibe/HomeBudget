@@ -541,6 +541,7 @@ public sealed class BackupService
             "csv_upload" => "CSV Import",
             "pre_restore" => "Pre-Restore Safety",
             "pre_clear_history" => "Pre-Clear History Safety",
+            "pre_reset_all" => "Pre-Reset Safety",
             "uploaded_restore" => "Uploaded Snapshot",
             "category_delete" => "Category Delete",
             "category_merge" => "Category Merge",

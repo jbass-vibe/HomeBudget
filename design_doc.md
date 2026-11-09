@@ -1,15 +1,15 @@
-# Local Home Budgeting & Cashflow System — Design Document (v2.4)
+# Local Home Budgeting & Cashflow System — Design Document (v2.5)
 
-**Document Version:** 2.4  
+**Document Version:** 2.5  
 **Target Platform:** Windows 11 IIS + ASP.NET Core (.NET 10 Minimal APIs) + SQLite (WAL Mode)  
 **Network Scope:** Strictly LAN-Only (`LocalSubnet` via Windows Defender Firewall, Port 8080)  
 **Primary Personas:**
 - **User (Spouse / Mobile-First on iPhone):** Reviews monthly budgets, explores the Cashflow Sankey visualization, manages categories (add/edit/delete), and rapidly categorizes or recategorizes expenses directly from the Visualization and Budgets views with automated forward/backward rule propagation prompts and flexible list sorting.
-- **Administrator (Desktop on Windows 11 PC):** Performs multi-file CSV statement ingestion (Chase & Wells Fargo), manages full category topology, rules, and local SQLite backup/restore lifecycle & policies, clears transaction history with pre-clear backup protection while iterating on topology/rules, and uses the filtered Transaction Inspector to edit, annotate (`Notes`), split, or delete income and expense entries (with tombstone hash protection).
+- **Administrator (Desktop on Windows 11 PC):** Performs multi-file CSV statement ingestion (Chase & Wells Fargo), manages full category topology, rules, and local SQLite backup/restore lifecycle & policies, clears transaction history or resets all live database information to a clean state while preserving backup databases, and uses the filtered Transaction Inspector to edit, annotate (`Notes`), split, or delete income and expense entries (with tombstone hash protection).
 
 ---
 
-## 1. Summary of Requirements & Architecture Evolution (v2.0 $\rightarrow$ v2.4)
+## 1. Summary of Requirements & Architecture Evolution (v2.0 $\rightarrow$ v2.5)
 
 ### 1.1 Core Product Capabilities
 1. **Full Category Lifecycle & Dual-Persona Access (Add, Edit, Delete):**
@@ -33,18 +33,20 @@
      - **Search Query:** Instant substring filter across `RawDescription`, `CleanMerchantName`, `Subcategory`, and `Notes`.
    - When deleting an income or expense record (individually or in bulk), the Administrator can choose whether to record its `DedupHash` in `DeletedTransactionHashes` (Tombstone table, enabled by default) so future overlapping CSV uploads do not resurrect the deleted entry.
 
-4. **Visualization Page (`Uncategorized` Triage & Inline Categorization Workflow):**
+4. **Visualization Page (`Uncategorized` Triage, Simplified Top-Level Category Table & Account Spend Summary):**
    - On the **Cashflow & Sankey Visualization** page, if any expenses in the active time window are marked **`Uncategorized`**, the `Uncategorized` node in the Sankey diagram and a dedicated **"Uncategorized Expenses Triage"** card below the diagram are highlighted.
    - Supports toggling between **Merchant-Grouped View** (aggregating repeated uncategorized charges by `CleanMerchantName` with item counts and group subtotals) and **Chronological List View**.
-   - Categorizing from the triage panel updates the transaction(s), applies selected forward/past propagation options, requests a coalesced database backup, and live-refreshes the Sankey diagram in real time.
+   - The **Tabular Cashflow Breakdown** table keeps top-level category summary rows clean and focused (`Category`, `Net Spend`, `% of Spend`, `% of Income`, `Manage`) without separate `"Wells Fargo Checking"` and `"Chase Credit Card"` columns, while keeping account-level spend totals in the dashboard Account Spend Summary and inside expanded category drill-downs.
 
 5. **Comprehensive List Management & Multi-Mode Sorting (v2.2):**
    - Every major list, dropdown menu, visualization node column, and table across the application provides consistent, user-controllable sorting options—including **Alphabetical (A $\rightarrow$ Z / Z $\rightarrow$ A)**, **Recent Changes (`UpdatedAt DESC`)**, **Amount / Spend (High $\rightarrow$ Low / Low $\rightarrow$ High)**, and **Custom / Priority Order**.
 
-6. **Smart Coalesced SQLite Backup Policy, Full Database Restore & Clear Transaction History (v2.3 $\rightarrow$ v2.4):**
+6. **Smart Coalesced SQLite Backup Policy, Full Database Restore, Clear History & Clean-Slate Reset (v2.3 $\rightarrow$ v2.5):**
    - **Preventing Backup Sprawl (Debounce + Cooldown + Tiered Triggers):** Replaces naive synchronous per-click snapshots with a configurable policy engine (`BackupService.RequestBackupAsync`). By default (`BackupAutoMode = 'Coalesced'`), rapid interactive edits (triage categorizations, budget tweaks, rule edits, transaction edits) are coalesced across a sliding quiet window (`BackupDebounceSeconds = 30s`) and a minimum interval cooldown (`BackupMinIntervalMinutes = 10m`) so a 20-item categorization session produces **one** consolidated snapshot instead of 20 separate `.db` files. Nested duplicate snapshots inside composite service operations are also eliminated.
    - **Full Admin Backup & Database Restore Suite (`topologyView.js`):** Allows the Administrator to configure auto-backup mode (`Coalesced`, `MajorOnly`, `ManualOnly`, `EveryChange`), retention count (`MaxRetainedBackups`, default `15`), debounce/cooldown timers, flush pending coalesced backups on demand, sort/inspect snapshots with trigger-reason badges, delete individual or bulk-selected snapshots, prune old snapshots, and safely **restore** the live database either from any local snapshot (`POST /api/backups/restore/{fileName}`) or by uploading an external `.db` snapshot file (`POST /api/backups/restore-upload`)—with automatic `pre_restore` safety backup and `PRAGMA integrity_check` verification.
-   - **Clear Transaction History with Pre-Clear Backup (`POST /api/transactions/clear-history`):** Enables rapid design and rule iteration by allowing the Administrator to wipe all transaction history (or a specific account's transactions) while preserving all Categories, Auto-Categorization Rules, Accounts, Monthly Budgets, and Income Settings. Before clearing, the modal offers a pre-checked option to create an immediate `pre_clear_history` database backup snapshot, as well as options to clear `DeletedTransactionHashes` tombstones and `StagingSessions` so CSV statements can be cleanly re-imported from scratch.
+   - **Clear Transaction History (`POST /api/transactions/clear-history`) & Reset All Information (`POST /api/admin/reset-all`):**
+     - **Clear Transaction History:** Wipes imported transactions (and optionally `DeletedTransactionHashes` tombstones and `StagingSessions`) while preserving all Categories, Auto-Categorization Rules, Accounts, Monthly Budgets, and Income Settings, with a pre-checked option to create a `pre_clear_history` backup first.
+     - **Reset All Information (Start from Clean History):** Resets the entire live database (transactions, tombstones, staging sessions, income overrides, categories, rules, accounts, and settings) back to a clean initial state via a confirmation modal (`openResetAllDatabaseModal`), while **strictly preserving all SQLite backup databases in `Backups/`** (and optionally taking a `pre_reset_all` snapshot before resetting).
 
 ### 1.2 Operational Safety & Data Integrity Refinements
 1. **Canonical Transaction Type Vocabulary:**
@@ -379,10 +381,18 @@ The **Local SQLite Backup, Restore & Database Management** card in the Admin Pan
      - **`[x] Create a database backup snapshot ("pre_clear_history") before clearing`** *(Checked by default)*: Immediately writes a verified SQLite snapshot before deleting any rows so the user can restore with one click.
      - **`[x] Also reset deleted transaction tombstones (DeletedTransactionHashes)`** *(Checked by default)*: Clears tombstone hashes so previously deleted transactions do not block re-importing the same CSV files.
      - **`[x] Clear uncommitted CSV upload staging sessions (StagingSessions)`** *(Checked by default)*.
+6. **Reset All Information — Start from Clean History (`POST /api/admin/reset-all`):**
+   - Available in the **Admin Panel (Section 4)** via the **`⚠️ Reset All Information...`** button (`openResetAllDatabaseModal`).
+   - Provides a complete clean-slate factory reset of all live SQLite tables (`Transactions`, `DeletedTransactionHashes`, `StagingSessions`, `IncomeOverrides`, `CategorizationRules`, `Categories`, `Accounts`, and `Settings`), re-seeding the default household accounts and settings (and optionally the starter categories and auto-categorization rules).
+   - **Strict Backup Preservation Guarantee:** Resetting all live database information **never deletes or modifies any backup `.db` files** in `Backups/`.
+   - Presents a dedicated confirmation modal with:
+     - **`[x] Back up database before resetting ("pre_reset_all" snapshot)`** *(Checked by default)*.
+     - **`[x] Re-seed default starter Categories (12) & Auto-Categorization Rules (15)`** *(Checked by default; unchecking starts with 0 categories and 0 rules)*.
+     - **Explicit Confirmation Checkbox (`#resetAllConfirmCheck`):** Requires the administrator to check *"I understand this will reset all live database information (backup databases will NOT be deleted)"* before the reset button is enabled.
 
 ---
 
-## 5. Updated API Contract Summary (v2.4)
+## 5. Updated API Contract Summary (v2.5)
 
 | Method & Route | Persona | Description | Backup Behavior (`Coalesced` Default) |
 | :--- | :--- | :--- | :--- |
@@ -409,6 +419,7 @@ The **Local SQLite Backup, Restore & Database Management** card in the Admin Pan
 | `DELETE /api/transactions/{id}` | Admin | Delete an income or expense transaction (with `?addToTombstone=true/false`). | Coalesced (`transaction_delete`) |
 | `POST /api/transactions/bulk-delete` | Admin | Bulk-delete selected income/expense transactions in one atomic transaction. | **Major** (`bulk_delete`) |
 | `POST /api/transactions/clear-history` | Admin | Clear all transactions (or a single account's transactions), optionally resetting `DeletedTransactionHashes` and `StagingSessions`, with an optional pre-clear backup (`createBackupFirst = true`). | **Immediate Pre-Clear** (`pre_clear_history`) |
+| `POST /api/admin/reset-all` | Admin | Reset all live database tables to a clean state (optionally creating a `pre_reset_all` snapshot first and optionally re-seeding default starter categories/rules) while preserving all backup databases in `Backups/`. | **Immediate Pre-Reset** (`pre_reset_all`) |
 | `GET /api/cashflow` | Both | Returns cashflow summary, Sankey nodes/links, `uncategorizedTransactions`, and `?categorySort=` ordering. | None |
 | `GET /api/budgets/{yearMonth?}` | Both | Returns monthly budget summary, category progress cards, and uncategorized transactions for the month. | None |
 | `GET /api/settings` | Both | Returns income configuration and monthly overrides. | None |
@@ -453,7 +464,7 @@ The **Local SQLite Backup, Restore & Database Management** card in the Admin Pan
 +-----------------------------------------------------------------------+
 ```
 
-### 6.2 Visualization Page (`Cashflow & Sankey`) with Category, Triage & Expanded Transaction Sorting
+### 6.2 Visualization Page (`Cashflow & Sankey`) — Simplified Top-Level Table + Account Spend Summary
 ```
 +-----------------------------------------------------------------------+
 | Cashflow & Sankey Visualization                                       |
@@ -469,24 +480,27 @@ The **Local SQLite Backup, Restore & Database Management** card in the Admin Pan
 | COSTCO GAS (2 charges • Mar 11 – Mar 18)   | $124.80 | [ Categorize ] |
 | APPLE.COM/BILL (1 charge • Mar 15)         |  $14.99 | [ Categorize ] |
 +-----------------------------------------------------------------------+
-| Tabular Cashflow & Account Source Breakdown                           |
+| Tabular Cashflow Breakdown                                            |
 | Sort Category Rows: [ Highest Spend ▼ ]  Sort Tx: [ Newest Date ▼ ]   |
+| Account Spend Summary: [ Wells Fargo Checking: $3,200 ] [ Chase: $980]|
 |-----------------------------------------------------------------------|
-| ▾ ● Groceries (6)                      | $542.18 | 28.4% | [ Edit ]   |
+| Category                 | Net Spend | % Spend | % Income | Manage    |
+|-----------------------------------------------------------------------|
+| ▾ ● Groceries (6)        |   $542.18 |   28.4% |     5.4% | [ Edit ]  |
 |   +---------------------------------------------------------------+   |
-|   | 6 Transactions in Groceries      Sort List: [ Highest $ ▼ ]   |   |
-|   | 2026-03-14 • TRADER JOE'S (Chase Sapphire) | $142.80 | [Recat]|   |
-|   | 2026-03-08 • WHOLE FOODS (Chase Sapphire)  |  $98.40 | [Recat]|   |
+|   | 6 Transactions • Account Breakdown: Chase Credit Card: $542.18|   |
+|   | 2026-03-14 • TRADER JOE'S (Chase Credit Card) | $142.80 |[Rec]|   |
+|   | 2026-03-08 • WHOLE FOODS (Chase Credit Card)  |  $98.40 |[Rec]|   |
 |   +---------------------------------------------------------------+   |
 +-----------------------------------------------------------------------+
 ```
 
-### 6.3 Admin Backup, Restore & Transaction History Management Panel
+### 6.3 Admin Backup, Restore, Transaction History & Clean-Slate Reset Panel
 ```
 +-----------------------------------------------------------------------+
 | 4. Local SQLite Backup, Restore & Database Management                 |
-|    [ 🗑 Clear Transaction History... ] [ ↺ Restore Database... ]       |
-|    [ + Create Manual Snapshot Now ]                                   |
+|    [ 🗑 Clear Transaction History... ] [ ⚠️ Reset All Information... ] |
+|    [ ↺ Restore Database... ]          [ + Create Manual Snapshot Now ]|
 |-----------------------------------------------------------------------|
 | Snapshots: 8 / 15 Max  | Disk Used: 1.4 MB | Pending Edits: 0 Queued  |
 |-----------------------------------------------------------------------|
@@ -525,4 +539,29 @@ The **Local SQLite Backup, Restore & Database Management** card in the Admin Pan
 |                      [ Cancel ]  [ Backup & Clear Transaction History ]|
 +-----------------------------------------------------------------------+
 ```
+
+### 6.5 Reset All Information — Start from Clean History Modal
+```
++-----------------------------------------------------------------------+
+| ⚠️ Reset All Information (Start from Clean History)               [X] |
++-----------------------------------------------------------------------+
+| Resets all live database information (Transactions, Tombstones,       |
+| Staging Sessions, Categories, Rules, and Income Overrides) to start   |
+| from a clean slate.                                                   |
+|                                                                       |
+| 🛡️ Backup Databases Preserved: Existing SQLite backup snapshots in   |
+|    Backups/ are NEVER deleted by this operation.                      |
+|                                                                       |
+| [x] Back up current database first ("pre_reset_all" safety snapshot)  |
+|                                                                       |
+| [x] Re-seed default starter Categories (12) & Rules (15)              |
+|     (Uncheck to start with zero categories and zero rules)            |
+|                                                                       |
+| [x] I understand this will reset all live database information        |
+|     (backup databases will NOT be deleted)                            |
+|                                                                       |
+|                      [ Cancel ]  [ Backup & Reset All Information ]   |
++-----------------------------------------------------------------------+
+```
+
 

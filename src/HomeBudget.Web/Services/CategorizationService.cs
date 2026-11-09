@@ -873,6 +873,125 @@ public sealed class CategorizationService(
         };
     }
 
+    public async Task<ResetAllDatabaseResultDto> ResetAllDatabaseAsync(
+        ResetAllDatabaseRequest request,
+        CancellationToken ct = default)
+    {
+        string? preResetBackupFile = null;
+        if (request.CreateBackupFirst)
+        {
+            preResetBackupFile = await backupService.FlushPendingSnapshotAsync("pre_reset_all", ct);
+        }
+
+        await using var conn = await connectionFactory.CreateOpenConnectionAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+
+        int deletedTransactions = await conn.ExecuteAsync("DELETE FROM Transactions;", transaction: tx);
+        int deletedTombstones = await conn.ExecuteAsync("DELETE FROM DeletedTransactionHashes;", transaction: tx);
+        int deletedStaging = await conn.ExecuteAsync("DELETE FROM StagingSessions;", transaction: tx);
+        int deletedOverrides = await conn.ExecuteAsync("DELETE FROM IncomeOverrides;", transaction: tx);
+        int deletedRules = await conn.ExecuteAsync("DELETE FROM CategorizationRules;", transaction: tx);
+        int deletedCategories = await conn.ExecuteAsync("DELETE FROM Categories;", transaction: tx);
+        await conn.ExecuteAsync("DELETE FROM Accounts;", transaction: tx);
+        await conn.ExecuteAsync("DELETE FROM Settings;", transaction: tx);
+        await conn.ExecuteAsync("DELETE FROM sqlite_sequence;", transaction: tx);
+
+        // Re-seed default Household Accounts
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO Accounts (AccountName, Institution, AccountType, IsActive) VALUES
+            ('Wells Fargo Household Checking', 'WellsFargo', 'Checking', 1),
+            ('Chase Household Credit Card', 'Chase', 'CreditCard', 1);
+            """,
+            transaction: tx);
+
+        // Re-seed default Settings (preserving clean defaults)
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO Settings (Key, Value) VALUES
+            ('PersistentMonthlyIncome', '10000.00'),
+            ('GooglePayrollMatchPattern', 'GOOGLE'),
+            ('CurrentMonthIncomeMode', 'Auto'),
+            ('GeminiApiKey', ''),
+            ('BackupAutoMode', 'Coalesced'),
+            ('BackupDebounceSeconds', '30'),
+            ('BackupMinIntervalMinutes', '10'),
+            ('MaxRetainedBackups', '15');
+            """,
+            transaction: tx);
+
+        if (request.ReseedDefaultCategoriesAndRules)
+        {
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO Categories (Name, IsBigBoxMerchantCategory, MonthlyBudget, SortOrder, ColorHex, IsActive) VALUES
+                ('Housing & Utilities',  0, 3200.00,  10, '#2563EB', 1),
+                ('Groceries',            0, 1000.00,  20, '#10B981', 1),
+                ('Costco',               1,  600.00,  30, '#E11D48', 1),
+                ('Amazon',               1,  400.00,  40, '#F59E0B', 1),
+                ('Target',               1,  300.00,  50, '#DC2626', 1),
+                ('Walmart',              1,  200.00,  60, '#0284C7', 1),
+                ('Dining & Coffee',      0,  500.00,  70, '#8B5CF6', 1),
+                ('Transportation & Gas', 0,  350.00,  80, '#14B8A6', 1),
+                ('Subscriptions',        0,  150.00,  90, '#6366F1', 1),
+                ('Healthcare',           0,  250.00, 100, '#EC4899', 1),
+                ('Shopping & Household', 0,  400.00, 110, '#0EA5E9', 1),
+                ('Entertainment & Misc', 0,  300.00, 120, '#64748B', 1);
+                """,
+                transaction: tx);
+
+            var catMap = (await conn.QueryAsync<(int CategoryId, string Name)>(
+                "SELECT CategoryId, Name FROM Categories;",
+                transaction: tx))
+                .ToDictionary(x => x.Name, x => x.CategoryId, StringComparer.OrdinalIgnoreCase);
+
+            async Task AddDefaultRule(string pattern, string catName, int priority)
+            {
+                if (catMap.TryGetValue(catName, out int catId))
+                {
+                    await conn.ExecuteAsync(
+                        "INSERT INTO CategorizationRules (MatchPattern, IsRegex, CategoryId, Priority) VALUES (@Pattern, 0, @CatId, @Priority);",
+                        new { Pattern = pattern, CatId = catId, Priority = priority },
+                        tx);
+                }
+            }
+
+            await AddDefaultRule("COSTCO", "Costco", 10);
+            await AddDefaultRule("AMZN", "Amazon", 15);
+            await AddDefaultRule("AMAZON", "Amazon", 15);
+            await AddDefaultRule("TARGET", "Target", 20);
+            await AddDefaultRule("WAL-MART", "Walmart", 25);
+            await AddDefaultRule("WALMART", "Walmart", 25);
+            await AddDefaultRule("WHOLEFDS", "Groceries", 30);
+            await AddDefaultRule("TRADER JOE", "Groceries", 30);
+            await AddDefaultRule("SAFEWAY", "Groceries", 30);
+            await AddDefaultRule("MORTGAGE", "Housing & Utilities", 40);
+            await AddDefaultRule("PG&E", "Housing & Utilities", 40);
+            await AddDefaultRule("CHEVRON", "Transportation & Gas", 50);
+            await AddDefaultRule("SHELL", "Transportation & Gas", 50);
+            await AddDefaultRule("NETFLIX", "Subscriptions", 60);
+            await AddDefaultRule("COFFEE", "Dining & Coffee", 70);
+        }
+
+        await tx.CommitAsync(ct);
+
+        int retainedBackupsCount = backupService.ListBackups().Count;
+
+        return new ResetAllDatabaseResultDto
+        {
+            DeletedTransactionsCount = deletedTransactions,
+            DeletedCategoriesCount = deletedCategories,
+            DeletedRulesCount = deletedRules,
+            DeletedTombstonesCount = deletedTombstones,
+            DeletedStagingSessionsCount = deletedStaging,
+            DeletedIncomeOverridesCount = deletedOverrides,
+            ReseededDefaults = request.ReseedDefaultCategoriesAndRules,
+            PreResetBackupFile = preResetBackupFile,
+            RetainedBackupFilesCount = retainedBackupsCount
+        };
+    }
+
+
     private static void ValidateCategoryRequest(UpsertCategoryRequest req)
     {
         if (string.IsNullOrWhiteSpace(req.Name))

@@ -119,6 +119,12 @@ export async function renderCashflowView(container) {
   const uncatTxs = sortUncategorizedTransactions(rawUncatTxs, state.triageSort);
   const merchantGroups = groupUncategorizedByMerchant(rawUncatTxs, state.triageSort);
   const sortedDropdownCategories = sortCategories(state.categories, state.categoryDropdownSort);
+  const accountTotals = (data.accounts || []).map(a => ({
+    ...a,
+    totalSpend: Math.round(
+      (data.tableRows || []).reduce((sum, r) => sum + Number((r.spendByAccount && r.spendByAccount[a.accountId]) || 0), 0) * 100
+    ) / 100
+  }));
 
   container.innerHTML = `
     <div class="portrait-rotate-banner">
@@ -342,10 +348,10 @@ export async function renderCashflowView(container) {
     </div>
 
     <div class="card-panel" id="cashflowTableCard">
-      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:10px;margin-bottom:14px;">
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px;">
         <div>
-          <h2 style="margin:0;font-size:16px;font-weight:700;">Tabular Cashflow &amp; Account Source Breakdown</h2>
-          <p style="margin:2px 0 0 0;font-size:12px;color:#64748B;">Click any category row to expand or collapse its individual transactions.</p>
+          <h2 style="margin:0;font-size:16px;font-weight:700;">Tabular Cashflow Breakdown</h2>
+          <p style="margin:2px 0 0 0;font-size:12px;color:#64748B;">Click any category row to expand its transactions and per-account spend breakdown.</p>
         </div>
         <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px;">
           <label style="font-size:12px;font-weight:700;color:#475569;display:inline-flex;align-items:center;gap:6px;">
@@ -368,12 +374,23 @@ export async function renderCashflowView(container) {
         </div>
       </div>
 
+      ${accountTotals.length > 0 ? `
+        <div id="accountSpendSummaryBar" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:10px 12px;margin-bottom:14px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;font-size:12px;">
+          <span style="font-weight:700;color:#475569;">Account Spend in Window:</span>
+          ${accountTotals.map(a => `
+            <span style="display:inline-flex;align-items:center;gap:6px;background:#FFFFFF;border:1px solid #CBD5E1;border-radius:999px;padding:3px 10px;">
+              <strong style="color:#0F172A;">${escapeHtml(a.accountName)}:</strong>
+              <span class="${a.totalSpend < 0 ? 'amount-refund' : 'amount-expense'}">${formatCurrency(a.totalSpend)}</span>
+            </span>
+          `).join('')}
+        </div>
+      ` : ''}
+
       <div class="table-responsive">
         <table class="data-table">
           <thead>
             <tr>
               <th>Category</th>
-              ${data.accounts.map(a => `<th>${escapeHtml(a.accountName)}</th>`).join('')}
               <th>Net Spend</th>
               <th>% of Spend</th>
               <th>% of Income</th>
@@ -382,11 +399,15 @@ export async function renderCashflowView(container) {
           </thead>
           <tbody>
             ${data.tableRows.length === 0 ? `
-              <tr><td colspan="${5 + data.accounts.length}" style="text-align:center;color:#64748B;">No expenses recorded in this window.</td></tr>
+              <tr><td colspan="5" style="text-align:center;color:#64748B;">No expenses recorded in this window.</td></tr>
             ` : data.tableRows.map((row, idx) => {
               const rowKey = row.categoryId === null ? 'uncat' : String(row.categoryId);
               const isExpanded = state.expandedCashflowCategories.includes(rowKey);
               const sortedRowTxs = sortTransactions(row.transactions, state.cashflowTransactionSort);
+              const rowAccountBreakdown = (data.accounts || [])
+                .filter(a => Number((row.spendByAccount && row.spendByAccount[a.accountId]) || 0) !== 0)
+                .map(a => `${escapeHtml(a.accountName)}: <strong>${formatCurrency(row.spendByAccount[a.accountId] || 0)}</strong>`)
+                .join(' &bull; ');
               return `
                 <tr class="cat-summary-row" data-expand-row="${idx}" data-row-key="${rowKey}" style="cursor:pointer;">
                   <td>
@@ -394,7 +415,6 @@ export async function renderCashflowView(container) {
                     <strong>${escapeHtml(row.categoryName)}</strong>
                     <span class="cat-expand-indicator" style="font-size:11px;color:#64748B;margin-left:6px;">(${sortedRowTxs.length}) ${isExpanded ? '&#9652;' : '&#9662;'}</span>
                   </td>
-                  ${data.accounts.map(a => `<td>${formatCurrency(row.spendByAccount[a.accountId] || 0)}</td>`).join('')}
                   <td class="amount-expense">${formatCurrency(row.netSpend)}</td>
                   <td>${row.pctOfTotalSpend}%</td>
                   <td>${row.pctOfIncome}%</td>
@@ -403,11 +423,18 @@ export async function renderCashflowView(container) {
                   </td>
                 </tr>
                 <tr id="cat_detail_${idx}" data-detail-key="${rowKey}" style="display:${isExpanded ? 'table-row' : 'none'};background:#F8FAFC;">
-                  <td colspan="${5 + data.accounts.length}" style="padding:12px 20px;">
+                  <td colspan="5" style="padding:12px 20px;">
                     <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px;padding-bottom:8px;margin-bottom:6px;border-bottom:1px solid #E2E8F0;">
-                      <span style="font-size:12px;font-weight:700;color:#334155;">
-                        ${sortedRowTxs.length} Transaction${sortedRowTxs.length === 1 ? '' : 's'} in ${escapeHtml(row.categoryName)}
-                      </span>
+                      <div>
+                        <span style="font-size:12px;font-weight:700;color:#334155;">
+                          ${sortedRowTxs.length} Transaction${sortedRowTxs.length === 1 ? '' : 's'} in ${escapeHtml(row.categoryName)}
+                        </span>
+                        ${rowAccountBreakdown ? `
+                          <span style="font-size:11px;color:#64748B;margin-left:10px;">
+                            (${rowAccountBreakdown})
+                          </span>
+                        ` : ''}
+                      </div>
                       <label style="font-size:11px;font-weight:700;color:#475569;display:inline-flex;align-items:center;gap:6px;" onclick="event.stopPropagation();">
                         Sort Transactions:
                         <select class="select-control cat-detail-tx-sort" style="font-size:11px;padding:3px 6px;">

@@ -344,6 +344,25 @@ public sealed class ClearTransactionHistoryResultDto
     public string? PreClearBackupFile { get; set; }
 }
 
+public sealed class ResetAllDatabaseRequest
+{
+    public bool CreateBackupFirst { get; set; } = true;
+    public bool ReseedDefaultCategoriesAndRules { get; set; } = true;
+}
+
+public sealed class ResetAllDatabaseResultDto
+{
+    public int DeletedTransactionsCount { get; set; }
+    public int DeletedCategoriesCount { get; set; }
+    public int DeletedRulesCount { get; set; }
+    public int DeletedTombstonesCount { get; set; }
+    public int DeletedStagingSessionsCount { get; set; }
+    public int DeletedIncomeOverridesCount { get; set; }
+    public bool ReseededDefaults { get; set; }
+    public string? PreResetBackupFile { get; set; }
+    public int RetainedBackupFilesCount { get; set; }
+}
+
 
 public sealed class StagingCandidateDto
 {

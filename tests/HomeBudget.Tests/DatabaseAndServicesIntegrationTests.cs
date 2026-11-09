@@ -255,7 +255,22 @@ public sealed class DatabaseAndServicesIntegrationTests : IDisposable
         await using var connRestored = await _connectionFactory.CreateOpenConnectionAsync();
         Assert.Equal(1, await connRestored.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM Transactions WHERE DedupHash = 'CLEAR_TEST_HASH';"));
 
-        // 6. Prune & delete snapshots
+        // 6. Reset all information (clean history) while preserving all backup databases
+        int backupsBeforeReset = _backupService.ListBackups().Count;
+        var resetRes = await _categorizationService.ResetAllDatabaseAsync(new ResetAllDatabaseRequest
+        {
+            CreateBackupFirst = true,
+            ReseedDefaultCategoriesAndRules = true
+        });
+        Assert.Equal(1, resetRes.DeletedTransactionsCount);
+        Assert.True(resetRes.ReseededDefaults);
+        Assert.False(string.IsNullOrWhiteSpace(resetRes.PreResetBackupFile));
+        Assert.Equal(backupsBeforeReset + 1, resetRes.RetainedBackupFilesCount);
+        Assert.Equal(0, await connRestored.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM Transactions;"));
+        Assert.Equal(12, await connRestored.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM Categories;"));
+        Assert.Equal(15, await connRestored.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM CategorizationRules;"));
+
+        // 7. Prune & delete snapshots
         int pruned = _backupService.PruneBackupsToCount(1);
         Assert.True(pruned >= 1);
         Assert.Single(_backupService.ListBackups());
