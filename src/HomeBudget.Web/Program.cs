@@ -15,7 +15,6 @@ builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(o =>
     o.MultipartBodyLengthLimit = 104857600;
 });
 
-
 builder.Services.AddSingleton<SqliteConnectionFactory>();
 builder.Services.AddSingleton<DatabaseInitializer>();
 builder.Services.AddSingleton<BackupService>();
@@ -33,7 +32,7 @@ app.UseDefaultFiles();
 app.UseStaticFiles();
 
 // ============================================================================
-// 1. ACCOUNTS & CATEGORIES / TOPOLOGY ENDPOINTS
+// 1. ACCOUNTS & CATEGORIES / TOPOLOGY ENDPOINTS (WITH AUTOMATIC DB BACKUPS)
 // ============================================================================
 
 app.MapGet("/api/accounts", async (SqliteConnectionFactory db) =>
@@ -43,12 +42,13 @@ app.MapGet("/api/accounts", async (SqliteConnectionFactory db) =>
     return Results.Ok(accounts);
 });
 
-app.MapPost("/api/accounts", async (Account req, SqliteConnectionFactory db) =>
+app.MapPost("/api/accounts", async (Account req, SqliteConnectionFactory db, BackupService backupService, CancellationToken ct) =>
 {
-    await using var conn = await db.CreateOpenConnectionAsync();
+    await using var conn = await db.CreateOpenConnectionAsync(ct);
     int id = await conn.ExecuteScalarAsync<int>(
         "INSERT INTO Accounts (AccountName, Institution, AccountType, IsActive) VALUES (@AccountName, @Institution, @AccountType, 1); SELECT last_insert_rowid();", req);
     req.AccountId = id;
+    await backupService.CreateSnapshotImmediateAsync("account_create", ct);
     return Results.Ok(req);
 });
 
@@ -70,6 +70,12 @@ app.MapPut("/api/categories/{id:int}", async (int id, UpsertCategoryRequest req,
 {
     var updated = await catService.UpdateCategoryAsync(id, req, ct);
     return updated is not null ? Results.Ok(updated) : Results.NotFound();
+});
+
+app.MapDelete("/api/categories/{id:int}", async (int id, int? replacementCategoryId, CategorizationService catService, CancellationToken ct) =>
+{
+    var res = await catService.DeleteCategoryAsync(id, replacementCategoryId, ct);
+    return res is not null ? Results.Ok(res) : Results.NotFound();
 });
 
 app.MapPut("/api/categories/{id:int}/budget", async (int id, UpdateBudgetRequest req, BudgetService budgetService, CancellationToken ct) =>
@@ -203,8 +209,28 @@ app.MapPost("/api/uploads/commit", async (
 });
 
 // ============================================================================
-// 4. TRANSACTION INSPECTOR, INLINE EDIT, SPLIT & TOMBSTONE DELETE
+// 4. TRANSACTION INSPECTOR, CATEGORIZATION PROMPTS, EDIT, SPLIT & DELETE
 // ============================================================================
+
+app.MapGet("/api/transactions/similar-count", async (
+    string? pattern,
+    int? excludeTransactionId,
+    CategorizationService catService,
+    CancellationToken ct) =>
+{
+    var res = await catService.GetSimilarTransactionsCountAsync(pattern, excludeTransactionId, ct);
+    return Results.Ok(res);
+});
+
+app.MapPost("/api/transactions/{id:int}/categorize", async (
+    int id,
+    CategorizeTransactionRequest req,
+    CategorizationService catService,
+    CancellationToken ct) =>
+{
+    var res = await catService.CategorizeTransactionWithOptionsAsync(id, req, ct);
+    return res is not null ? Results.Ok(res) : Results.NotFound();
+});
 
 app.MapGet("/api/transactions", async (
     string? startDate,
@@ -213,7 +239,10 @@ app.MapGet("/api/transactions", async (
     int? categoryId,
     bool? uncategorizedOnly,
     string? transactionType,
+    decimal? minAmount,
+    decimal? maxAmount,
     string? search,
+    string? sortBy,
     int? page,
     int? pageSize,
     SqliteConnectionFactory db,
@@ -250,8 +279,26 @@ app.MapGet("/api/transactions", async (
     }
     if (!string.IsNullOrWhiteSpace(transactionType))
     {
-        conditions.Add("t.TransactionType = @TransactionType");
-        parameters.Add("TransactionType", transactionType.Trim());
+        string tt = transactionType.Trim();
+        if (tt.Equals("ExpenseOrRefund", StringComparison.OrdinalIgnoreCase))
+        {
+            conditions.Add("t.TransactionType IN ('Expense', 'Refund')");
+        }
+        else
+        {
+            conditions.Add("t.TransactionType = @TransactionType");
+            parameters.Add("TransactionType", tt);
+        }
+    }
+    if (minAmount.HasValue)
+    {
+        conditions.Add("ABS(t.Amount) >= @MinAmount");
+        parameters.Add("MinAmount", (double)minAmount.Value);
+    }
+    if (maxAmount.HasValue)
+    {
+        conditions.Add("ABS(t.Amount) <= @MaxAmount");
+        parameters.Add("MaxAmount", (double)maxAmount.Value);
     }
     if (!string.IsNullOrWhiteSpace(search))
     {
@@ -259,8 +306,17 @@ app.MapGet("/api/transactions", async (
         parameters.Add("Search", $"%{search.Trim()}%");
     }
 
+    string orderByClause = (sortBy ?? "date_desc").ToLowerInvariant() switch
+    {
+        "date_asc" => "t.TransactionDate ASC, t.TransactionId ASC",
+        "amount_desc" => "ABS(t.Amount) DESC, t.TransactionDate DESC",
+        "amount_asc" => "ABS(t.Amount) ASC, t.TransactionDate DESC",
+        "merchant_asc" => "t.CleanMerchantName ASC, t.TransactionDate DESC",
+        _ => "t.TransactionDate DESC, t.TransactionId DESC"
+    };
+
     string whereClause = string.Join(" AND ", conditions);
-    int limit = Math.Clamp(pageSize ?? 100, 1, 500);
+    int limit = Math.Clamp(pageSize ?? 200, 1, 1000);
     int offset = (Math.Max(page ?? 1, 1) - 1) * limit;
     parameters.Add("Limit", limit);
     parameters.Add("Offset", offset);
@@ -269,16 +325,13 @@ app.MapGet("/api/transactions", async (
         $"SELECT COUNT(*) FROM Transactions t WHERE {whereClause};", parameters);
 
     var items = await conn.QueryAsync<TransactionDto>(
-        """
-        SELECT t.*, a.AccountName, c.Name AS CategoryName
-        FROM Transactions t
-        JOIN Accounts a ON t.AccountId = a.AccountId
-        LEFT JOIN Categories c ON t.CategoryId = c.CategoryId
-        WHERE 
-        """ + whereClause + """
-        ORDER BY t.TransactionDate DESC, t.TransactionId DESC
-        LIMIT @Limit OFFSET @Offset;
-        """,
+        $"SELECT t.*, a.AccountName, c.Name AS CategoryName " +
+        $"FROM Transactions t " +
+        $"JOIN Accounts a ON t.AccountId = a.AccountId " +
+        $"LEFT JOIN Categories c ON t.CategoryId = c.CategoryId " +
+        $"WHERE {whereClause} " +
+        $"ORDER BY {orderByClause} " +
+        $"LIMIT @Limit OFFSET @Offset;",
         parameters);
 
     return Results.Ok(new { totalCount, page = page ?? 1, pageSize = limit, items });
@@ -333,8 +386,52 @@ app.MapDelete("/api/transactions/{id:int}", async (
     await conn.ExecuteAsync("DELETE FROM Transactions WHERE TransactionId = @Id;", new { Id = id }, sqlTx);
     await sqlTx.CommitAsync(ct);
 
-    await backupService.CreateSnapshotImmediateAsync("data_edit", ct);
+    await backupService.CreateSnapshotImmediateAsync("transaction_delete", ct);
     return Results.NoContent();
+});
+
+app.MapPost("/api/transactions/bulk-delete", async (
+    BulkDeleteTransactionsRequest req,
+    SqliteConnectionFactory db,
+    BackupService backupService,
+    CancellationToken ct) =>
+{
+    if (req.TransactionIds is null || req.TransactionIds.Count == 0)
+    {
+        return Results.BadRequest(new { error = "No transactionIds provided." });
+    }
+
+    await using var conn = await db.CreateOpenConnectionAsync(ct);
+    var rows = (await conn.QueryAsync<TransactionEntity>(
+        "SELECT * FROM Transactions WHERE TransactionId IN @Ids;",
+        new { Ids = req.TransactionIds })).ToList();
+
+    if (rows.Count == 0)
+    {
+        return Results.Ok(new { deletedCount = 0 });
+    }
+
+    await using var sqlTx = await conn.BeginTransactionAsync(ct);
+    if (req.AddToTombstone)
+    {
+        foreach (var txRow in rows)
+        {
+            await conn.ExecuteAsync(
+                "INSERT OR IGNORE INTO DeletedTransactionHashes (DedupHash, RawDescription, TransactionDate, Amount) VALUES (@DedupHash, @RawDescription, @TransactionDate, @Amount);",
+                txRow,
+                sqlTx);
+        }
+    }
+
+    int deletedCount = await conn.ExecuteAsync(
+        "DELETE FROM Transactions WHERE TransactionId IN @Ids;",
+        new { Ids = req.TransactionIds },
+        sqlTx);
+
+    await sqlTx.CommitAsync(ct);
+    string backupFile = await backupService.CreateSnapshotImmediateAsync("transaction_delete", ct);
+
+    return Results.Ok(new { deletedCount, backupFileCreated = backupFile });
 });
 
 // ============================================================================
@@ -360,10 +457,10 @@ app.MapGet("/api/settings", async (SqliteConnectionFactory db) =>
     });
 });
 
-app.MapPut("/api/settings", async (SettingsDto req, SqliteConnectionFactory db) =>
+app.MapPut("/api/settings", async (SettingsDto req, SqliteConnectionFactory db, BackupService backupService, CancellationToken ct) =>
 {
-    await using var conn = await db.CreateOpenConnectionAsync();
-    await using var tx = await conn.BeginTransactionAsync();
+    await using var conn = await db.CreateOpenConnectionAsync(ct);
+    await using var tx = await conn.BeginTransactionAsync(ct);
 
     async Task UpsertSetting(string key, string val)
     {
@@ -381,23 +478,26 @@ app.MapPut("/api/settings", async (SettingsDto req, SqliteConnectionFactory db) 
         await UpsertSetting("GeminiApiKey", req.GeminiApiKey.Trim());
     }
 
-    await tx.CommitAsync();
+    await tx.CommitAsync(ct);
+    await backupService.CreateSnapshotImmediateAsync("settings_update", ct);
     return Results.Ok(new { updated = true });
 });
 
-app.MapPut("/api/settings/income-overrides", async (IncomeOverrideDto req, SqliteConnectionFactory db) =>
+app.MapPut("/api/settings/income-overrides", async (IncomeOverrideDto req, SqliteConnectionFactory db, BackupService backupService, CancellationToken ct) =>
 {
-    await using var conn = await db.CreateOpenConnectionAsync();
+    await using var conn = await db.CreateOpenConnectionAsync(ct);
     await conn.ExecuteAsync(
         "INSERT INTO IncomeOverrides (YearMonth, IncomeAmount, Notes) VALUES (@YearMonth, @IncomeAmount, @Notes) ON CONFLICT(YearMonth) DO UPDATE SET IncomeAmount = @IncomeAmount, Notes = @Notes;",
         req);
+    await backupService.CreateSnapshotImmediateAsync("income_override", ct);
     return Results.Ok(req);
 });
 
-app.MapDelete("/api/settings/income-overrides/{yearMonth}", async (string yearMonth, SqliteConnectionFactory db) =>
+app.MapDelete("/api/settings/income-overrides/{yearMonth}", async (string yearMonth, SqliteConnectionFactory db, BackupService backupService, CancellationToken ct) =>
 {
-    await using var conn = await db.CreateOpenConnectionAsync();
+    await using var conn = await db.CreateOpenConnectionAsync(ct);
     await conn.ExecuteAsync("DELETE FROM IncomeOverrides WHERE YearMonth = @YearMonth;", new { YearMonth = yearMonth });
+    await backupService.CreateSnapshotImmediateAsync("income_override_delete", ct);
     return Results.NoContent();
 });
 
@@ -426,4 +526,3 @@ app.MapGet("/api/backups/download/{fileName}", (string fileName, BackupService b
 });
 
 app.Run();
-

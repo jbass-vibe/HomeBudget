@@ -14,6 +14,9 @@ public sealed class CashflowResponse
     public decimal UnspentCashflow { get; set; }
     public decimal OverIncomeDeficit { get; set; }
     public decimal CreditCardPayoffsTotal { get; set; }
+    public int UncategorizedCount { get; set; }
+    public decimal UncategorizedTotalAmount { get; set; }
+    public List<TransactionDto> UncategorizedTransactions { get; set; } = [];
     public SankeyGraphDto Sankey { get; set; } = new();
     public List<AccountHeaderDto> Accounts { get; set; } = [];
     public List<CashflowTableRowDto> TableRows { get; set; } = [];
@@ -34,7 +37,7 @@ public sealed class MonthlyIncomeBreakdownDto
     public decimal ProRatedWindowIncome { get; set; }
     public int ActiveDays { get; set; }
     public int TotalDaysInMonth { get; set; }
-    public string SourceType { get; set; } = ""; // 'ActualGoogleDeposits' | 'MonthlyOverride' | 'PersistentFallback'
+    public string SourceType { get; set; } = "";
     public int DepositCount { get; set; }
 }
 
@@ -51,7 +54,7 @@ public sealed class SankeyNodeDto
     public string Name { get; set; } = "";
     public string ColorHex { get; set; } = "#4F46E5";
     public decimal Amount { get; set; }
-    public string NodeType { get; set; } = ""; // 'Income' | 'Deficit' | 'Summary' | 'Category' | 'Subcategory'
+    public string NodeType { get; set; } = "";
 }
 
 public sealed class SankeyLinkDto
@@ -90,6 +93,7 @@ public sealed class MonthlyBudgetViewDto
     public decimal TotalNetSpent { get; set; }
     public decimal TotalRemaining { get; set; }
     public decimal CreditCardPayoffsTotal { get; set; }
+    public List<TransactionDto> UncategorizedTransactions { get; set; } = [];
     public List<CategoryBudgetCardDto> Categories { get; set; } = [];
 }
 
@@ -98,12 +102,13 @@ public sealed class CategoryBudgetCardDto
     public int CategoryId { get; set; }
     public string Name { get; set; } = "";
     public bool IsBigBoxMerchantCategory { get; set; }
+    public int SortOrder { get; set; } = 100;
     public string ColorHex { get; set; } = "#4F46E5";
     public decimal MonthlyBudget { get; set; }
     public decimal NetSpent { get; set; }
     public decimal Remaining { get; set; }
     public decimal PctUsed { get; set; }
-    public string StatusLevel { get; set; } = "Green"; // 'Green' (<80%), 'Amber' (80-100%), 'Red' (>100%), 'Unbudgeted'
+    public string StatusLevel { get; set; } = "Green";
     public List<TransactionDto> Transactions { get; set; } = [];
 }
 
@@ -128,7 +133,10 @@ public sealed class TransactionDto
 
 public sealed class UpdateTransactionRequest
 {
+    public string? TransactionDate { get; set; }
+    public decimal? Amount { get; set; }
     public int? CategoryId { get; set; }
+    public bool ClearCategory { get; set; }
     public string? Subcategory { get; set; }
     public string? CleanMerchantName { get; set; }
     public string? TransactionType { get; set; }
@@ -137,6 +145,27 @@ public sealed class UpdateTransactionRequest
     public string? CreateRulePattern { get; set; }
     public int? CreateRulePriority { get; set; }
     public bool BackPropagateRule { get; set; }
+}
+
+public sealed class CategorizeTransactionRequest
+{
+    public int? CategoryId { get; set; }
+    public string? NewCategoryName { get; set; }
+    public decimal? NewCategoryMonthlyBudget { get; set; }
+    public string? NewCategoryColorHex { get; set; }
+    public bool NewCategoryIsBigBox { get; set; }
+    public string? Subcategory { get; set; }
+    public string? CleanMerchantName { get; set; }
+    public string? MatchPattern { get; set; }
+    public bool ApplyMovingForward { get; set; }
+    public bool ApplyToPast { get; set; }
+    public bool IncludeManuallyLockedInPast { get; set; } = true;
+}
+
+public sealed class BulkDeleteTransactionsRequest
+{
+    public List<int> TransactionIds { get; set; } = [];
+    public bool AddToTombstone { get; set; } = true;
 }
 
 public sealed class SplitTransactionRequest
@@ -217,4 +246,51 @@ public sealed class IncomeOverrideDto
     public string YearMonth { get; set; } = "";
     public decimal IncomeAmount { get; set; }
     public string? Notes { get; set; }
+}
+
+public sealed class BackupFileInfoDto
+{
+    public string FileName { get; set; } = "";
+    public DateTime CreatedAtUtc { get; set; }
+    public long SizeBytes { get; set; }
+}
+
+public sealed class StagingCandidateDto
+{
+    public string RowId { get; set; } = "";
+    public string TransactionDate { get; set; } = "";
+    public string? PostDate { get; set; }
+    public string RawDescription { get; set; } = "";
+    public string CleanMerchantName { get; set; } = "";
+    public decimal Amount { get; set; }
+    public string TransactionType { get; set; } = "Expense";
+    public int? CategoryId { get; set; }
+    public string? Subcategory { get; set; }
+    public string DedupHash { get; set; } = "";
+    public string DedupStatus { get; set; } = "AutoApprove";
+    public bool RequiresManualReview { get; set; }
+}
+
+public sealed class StagingSessionDto
+{
+    public string StagingSessionId { get; set; } = "";
+    public int AccountId { get; set; }
+    public List<string> FileNames { get; set; } = [];
+    public List<StagingCandidateDto> Candidates { get; set; } = [];
+}
+
+public sealed class CommitStagingRequest
+{
+    public string StagingSessionId { get; set; } = "";
+    public List<StagingDecisionDto> Decisions { get; set; } = [];
+}
+
+public sealed class StagingDecisionDto
+{
+    public string RowId { get; set; } = "";
+    public string Action { get; set; } = "Import";
+    public int? CategoryId { get; set; }
+    public string? Subcategory { get; set; }
+    public string CleanMerchantName { get; set; } = "";
+    public string TransactionType { get; set; } = "Expense";
 }

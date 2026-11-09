@@ -31,7 +31,7 @@ public sealed class SqliteBoolHandler : SqlMapper.TypeHandler<bool>
         bool b => b,
         long l => l != 0,
         int i => i != 0,
-        string s => s == "1" || bool.TryParse(s, out var b) && b,
+        string s => s == "1" || (bool.TryParse(s, out var b) && b),
         _ => Convert.ToBoolean(value)
     };
 }

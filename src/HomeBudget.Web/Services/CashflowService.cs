@@ -133,7 +133,7 @@ public sealed class CashflowService(SqliteConnectionFactory connectionFactory)
             {
                 CategoryId = null,
                 CategoryName = "Uncategorized",
-                ColorHex = "#64748B",
+                ColorHex = "#F59E0B",
                 NetSpend = netUncat,
                 SpendByAccount = spendByAcct,
                 Subcategories = [],
@@ -179,6 +179,9 @@ public sealed class CashflowService(SqliteConnectionFactory connectionFactory)
             UnspentCashflow = unspent,
             OverIncomeDeficit = deficit,
             CreditCardPayoffsTotal = Math.Round(creditCardPayoffsTotal, 2),
+            UncategorizedCount = uncategorizedTxs.Count,
+            UncategorizedTotalAmount = Math.Round(uncategorizedTxs.Sum(t => t.Amount), 2),
+            UncategorizedTransactions = uncategorizedTxs,
             Sankey = sankey,
             Accounts = accounts,
             TableRows = tableRows

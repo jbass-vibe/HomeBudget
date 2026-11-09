@@ -8,29 +8,40 @@ using HomeBudget.Web.Models;
 
 namespace HomeBudget.Web.Services;
 
-public sealed partial class CsvParserService
+public sealed class ParsedCsvRow
 {
-    public List<StagedCandidateRow> ParseCsv(
-        Stream csvStream,
-        string fileName,
+    public string TransactionDate { get; set; } = "";
+    public string? PostDate { get; set; }
+    public string RawDescription { get; set; } = "";
+    public string CleanMerchantName { get; set; } = "";
+    public decimal Amount { get; set; }
+    public string TransactionType { get; set; } = "Expense";
+    public string BaseDedupHash { get; set; } = "";
+}
+
+public sealed class CsvParserService
+{
+    public List<ParsedCsvRow> ParseCsvStream(
+        Stream stream,
         Account account,
         string googlePayrollPattern)
     {
-        using var reader = new StreamReader(csvStream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, leaveOpen: true);
         string content = reader.ReadToEnd();
-        if (string.IsNullOrWhiteSpace(content))
-        {
-            return [];
-        }
+        if (string.IsNullOrWhiteSpace(content)) return [];
 
-        return account.Institution.Equals("WellsFargo", StringComparison.OrdinalIgnoreCase)
-            ? ParseWellsFargoCsv(content, fileName, account.AccountId, googlePayrollPattern)
-            : ParseChaseCsv(content, fileName, account.AccountId);
+        bool isWellsFargo = account.Institution.Equals("WellsFargo", StringComparison.OrdinalIgnoreCase)
+            || (!content.StartsWith("Transaction Date", StringComparison.OrdinalIgnoreCase)
+                && content.TrimStart().StartsWith('"'));
+
+        return isWellsFargo
+            ? ParseWellsFargoCsv(content, account.AccountId, googlePayrollPattern)
+            : ParseChaseCsv(content, account.AccountId, googlePayrollPattern);
     }
 
-    private static List<StagedCandidateRow> ParseChaseCsv(string csvContent, string fileName, int accountId)
+    private static List<ParsedCsvRow> ParseChaseCsv(string content, int accountId, string googlePayrollPattern)
     {
-        var results = new List<StagedCandidateRow>();
+        var results = new List<ParsedCsvRow>();
         var config = new CsvConfiguration(CultureInfo.InvariantCulture)
         {
             HasHeaderRecord = true,
@@ -39,84 +50,73 @@ public sealed partial class CsvParserService
             TrimOptions = TrimOptions.Trim
         };
 
-        using var stringReader = new StringReader(csvContent);
-        using var csv = new CsvReader(stringReader, config);
+        using var sr = new StringReader(content);
+        using var csv = new CsvReader(sr, config);
 
-        if (!csv.Read() || !csv.ReadHeader())
-        {
-            return results;
-        }
+        if (!csv.Read() || !csv.ReadHeader()) return results;
 
         while (csv.Read())
         {
-            string rawTxDate = csv.GetField("Transaction Date") ?? "";
-            if (string.IsNullOrWhiteSpace(rawTxDate)) continue;
+            string? txDateRaw = csv.GetField("Transaction Date") ?? csv.GetField(0);
+            string? postDateRaw = csv.GetField("Post Date") ?? csv.GetField(1);
+            string? descRaw = csv.GetField("Description") ?? csv.GetField(2);
+            string? typeRaw = csv.GetField("Type") ?? csv.GetField(4);
+            string? amtRaw = csv.GetField("Amount") ?? csv.GetField(5);
 
-            string rawPostDate = csv.GetField("Post Date") ?? "";
-            string rawDesc = csv.GetField("Description") ?? "";
-            string nativeCat = csv.GetField("Category") ?? "";
-            string rawType = csv.GetField("Type") ?? "";
-            string rawAmountStr = csv.GetField("Amount") ?? "0";
-
-            if (!decimal.TryParse(rawAmountStr, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal rawAmount))
-            {
+            if (string.IsNullOrWhiteSpace(txDateRaw) || string.IsNullOrWhiteSpace(amtRaw) || string.IsNullOrWhiteSpace(descRaw))
                 continue;
-            }
 
-            string isoTxDate = NormalizeDate(rawTxDate);
-            string? isoPostDate = string.IsNullOrWhiteSpace(rawPostDate) ? null : NormalizeDate(rawPostDate);
+            if (!TryParseDate(txDateRaw, out string isoTxDate)) continue;
+            TryParseDate(postDateRaw, out string isoPostDate);
 
+            if (!decimal.TryParse(amtRaw, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal csvAmt))
+                continue;
+
+            string rawDesc = descRaw.Trim();
+            string cleanMerchant = CleanMerchant(rawDesc);
+
+            // In Chase Credit Card CSV: negative = Sale/Expense, positive = Payment or Return/Refund
             string txType;
-            decimal normalizedAmount;
+            decimal normalizedAmt;
 
-            bool isCardPayoff = rawType.Equals("Payment", StringComparison.OrdinalIgnoreCase)
+            bool isPayment = (typeRaw?.Equals("Payment", StringComparison.OrdinalIgnoreCase) == true)
                 || rawDesc.Contains("PAYMENT THANK YOU", StringComparison.OrdinalIgnoreCase)
                 || rawDesc.Contains("AUTOMATIC PAYMENT", StringComparison.OrdinalIgnoreCase);
 
-            if (isCardPayoff)
+            if (isPayment)
             {
                 txType = "CreditCardPayoff";
-                normalizedAmount = Math.Abs(rawAmount);
+                normalizedAmt = Math.Abs(csvAmt);
             }
-            else if (rawAmount < 0)
+            else if (csvAmt < 0m)
             {
                 txType = "Expense";
-                normalizedAmount = Math.Abs(rawAmount);
+                normalizedAmt = Math.Abs(csvAmt);
             }
             else
             {
                 txType = "Refund";
-                normalizedAmount = -Math.Abs(rawAmount);
+                normalizedAmt = -Math.Abs(csvAmt);
             }
 
-            bool isP2P = ContainsP2PKeyword(rawDesc);
-
-            results.Add(new StagedCandidateRow
+            results.Add(new ParsedCsvRow
             {
-                AccountId = accountId,
-                SourceFileName = fileName,
                 TransactionDate = isoTxDate,
-                PostDate = isoPostDate,
+                PostDate = string.IsNullOrEmpty(isoPostDate) ? null : isoPostDate,
                 RawDescription = rawDesc,
-                CleanMerchantName = CleanMerchantDescription(rawDesc),
-                NativeCsvCategory = string.IsNullOrWhiteSpace(nativeCat) ? null : nativeCat,
-                Amount = normalizedAmount,
+                CleanMerchantName = cleanMerchant,
+                Amount = Math.Round(normalizedAmt, 2),
                 TransactionType = txType,
-                RequiresManualReview = isP2P,
-                DedupHash = ComputeDedupHash(accountId, isoTxDate, normalizedAmount, rawDesc)
+                BaseDedupHash = ComputeBaseHash(accountId, isoTxDate, rawDesc, normalizedAmt)
             });
         }
 
         return results;
     }
 
-    private static List<StagedCandidateRow> ParseWellsFargoCsv(
-        string csvContent,
-        string fileName,
-        int accountId,
-        string googlePayrollPattern)
+    private static List<ParsedCsvRow> ParseWellsFargoCsv(string content, int accountId, string googlePayrollPattern)
     {
-        var results = new List<StagedCandidateRow>();
+        var results = new List<ParsedCsvRow>();
         var config = new CsvConfiguration(CultureInfo.InvariantCulture)
         {
             HasHeaderRecord = false,
@@ -124,108 +124,94 @@ public sealed partial class CsvParserService
             TrimOptions = TrimOptions.Trim
         };
 
-        using var stringReader = new StringReader(csvContent);
-        using var csv = new CsvReader(stringReader, config);
+        using var sr = new StringReader(content);
+        using var csv = new CsvReader(sr, config);
 
         while (csv.Read())
         {
-            string rawDate = csv.GetField(0) ?? "";
-            string rawAmountStr = csv.GetField(1) ?? "";
-            string rawDesc = csv.TryGetField<string>(4, out var col4) && !string.IsNullOrWhiteSpace(col4)
-                ? col4
-                : (csv.GetField(2) ?? "");
+            string? dateRaw = csv.GetField(0);
+            string? amtRaw = csv.GetField(1);
+            string? descRaw = csv.GetField(4) ?? csv.GetField(2);
 
-            if (!DateTime.TryParse(rawDate, CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
-            {
+            if (string.IsNullOrWhiteSpace(dateRaw) || string.IsNullOrWhiteSpace(amtRaw) || string.IsNullOrWhiteSpace(descRaw))
                 continue;
-            }
 
-            if (!decimal.TryParse(rawAmountStr, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal rawAmount))
-            {
+            if (!TryParseDate(dateRaw, out string isoDate)) continue;
+            if (!decimal.TryParse(amtRaw, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal csvAmt))
                 continue;
-            }
 
-            string isoTxDate = NormalizeDate(rawDate);
+            string rawDesc = descRaw.Trim();
+            string cleanMerchant = CleanMerchant(rawDesc);
+
             string txType;
-            decimal normalizedAmount;
-            bool requiresManualReview = false;
+            decimal normalizedAmt;
 
-            bool isCardPayoff = rawDesc.Contains("CHASE CREDIT CRD", StringComparison.OrdinalIgnoreCase)
-                || rawDesc.Contains("AUTOPAY", StringComparison.OrdinalIgnoreCase) && rawDesc.Contains("CRD", StringComparison.OrdinalIgnoreCase);
+            bool isCcPayoff = rawDesc.Contains("CHASE CREDIT CRD", StringComparison.OrdinalIgnoreCase)
+                || rawDesc.Contains("CREDIT CARD", StringComparison.OrdinalIgnoreCase)
+                || rawDesc.Contains("EPAY", StringComparison.OrdinalIgnoreCase) && rawDesc.Contains("CHASE", StringComparison.OrdinalIgnoreCase);
 
-            bool isGooglePayroll = rawAmount > 0
-                && !string.IsNullOrWhiteSpace(googlePayrollPattern)
-                && rawDesc.Contains(googlePayrollPattern, StringComparison.OrdinalIgnoreCase);
+            bool isGooglePayroll = csvAmt > 0m && !string.IsNullOrWhiteSpace(googlePayrollPattern)
+                && rawDesc.Contains(googlePayrollPattern.Trim(), StringComparison.OrdinalIgnoreCase);
 
-            if (isCardPayoff)
+            if (isCcPayoff)
             {
                 txType = "CreditCardPayoff";
-                normalizedAmount = Math.Abs(rawAmount);
+                normalizedAmt = Math.Abs(csvAmt);
             }
-            else if (isGooglePayroll)
+            else if (isGooglePayroll || csvAmt > 0m)
             {
                 txType = "IncomeDeposit";
-                normalizedAmount = Math.Abs(rawAmount);
-            }
-            else if (rawAmount < 0)
-            {
-                txType = "Expense";
-                normalizedAmount = Math.Abs(rawAmount);
-                requiresManualReview = ContainsP2PKeyword(rawDesc);
+                normalizedAmt = Math.Abs(csvAmt);
             }
             else
             {
-                txType = "Refund";
-                normalizedAmount = -Math.Abs(rawAmount);
-                requiresManualReview = true;
+                txType = "Expense";
+                normalizedAmt = Math.Abs(csvAmt);
             }
 
-            results.Add(new StagedCandidateRow
+            results.Add(new ParsedCsvRow
             {
-                AccountId = accountId,
-                SourceFileName = fileName,
-                TransactionDate = isoTxDate,
-                PostDate = null,
+                TransactionDate = isoDate,
+                PostDate = isoDate,
                 RawDescription = rawDesc,
-                CleanMerchantName = CleanMerchantDescription(rawDesc),
-                Amount = normalizedAmount,
+                CleanMerchantName = cleanMerchant,
+                Amount = Math.Round(normalizedAmt, 2),
                 TransactionType = txType,
-                RequiresManualReview = requiresManualReview,
-                DedupHash = ComputeDedupHash(accountId, isoTxDate, normalizedAmount, rawDesc)
+                BaseDedupHash = ComputeBaseHash(accountId, isoDate, rawDesc, normalizedAmt)
             });
         }
 
         return results;
     }
 
-    public static string ComputeDedupHash(int accountId, string isoTransactionDate, decimal normalizedAmount, string rawDescription)
+    private static bool TryParseDate(string? input, out string isoDate)
     {
-        string normalizedDesc = MultiSpaceRegex().Replace(rawDescription.Trim().ToUpperInvariant(), " ");
-        string payload = $"{accountId}|{isoTransactionDate}|{normalizedAmount:F2}|{normalizedDesc}";
-        byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(payload));
-        return Convert.ToHexString(hashBytes);
-    }
+        isoDate = "";
+        if (string.IsNullOrWhiteSpace(input)) return false;
 
-    private static string NormalizeDate(string rawDate)
-    {
-        if (DateTime.TryParse(rawDate.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime dt))
+        string[] formats = ["MM/dd/yyyy", "M/d/yyyy", "yyyy-MM-dd", "MM-dd-yyyy"];
+        if (DateOnly.TryParseExact(input.Trim(), formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt)
+            || DateOnly.TryParse(input.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None, out dt))
         {
-            return dt.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            isoDate = dt.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            return true;
         }
-        return rawDate.Trim();
+        return false;
     }
 
-    private static bool ContainsP2PKeyword(string desc) =>
-        desc.Contains("ZELLE", StringComparison.OrdinalIgnoreCase) ||
-        desc.Contains("VENMO", StringComparison.OrdinalIgnoreCase) ||
-        desc.Contains("PAYPAL", StringComparison.OrdinalIgnoreCase);
-
-    private static string CleanMerchantDescription(string rawDesc)
+    public static string CleanMerchant(string raw)
     {
-        string cleaned = MultiSpaceRegex().Replace(rawDesc.Trim(), " ");
-        return cleaned.Length > 60 ? cleaned[..60].Trim() : cleaned;
+        if (string.IsNullOrWhiteSpace(raw)) return "Unknown Merchant";
+        string cleaned = Regex.Replace(raw.ToUpperInvariant(), @"[#*]\S+", "");
+        cleaned = Regex.Replace(cleaned, @"\d{4,}", "");
+        cleaned = Regex.Replace(cleaned, @"\s{2,}", " ").Trim();
+        return string.IsNullOrWhiteSpace(cleaned) ? raw.Trim() : cleaned;
     }
 
-    [GeneratedRegex(@"\s+")]
-    private static partial Regex MultiSpaceRegex();
+    public static string ComputeBaseHash(int accountId, string isoDate, string rawDesc, decimal amount)
+    {
+        string canonical = $"{accountId}|{isoDate}|{rawDesc.Trim().ToUpperInvariant()}|{amount.ToString("F2", CultureInfo.InvariantCulture)}";
+        byte[] bytes = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
+        return Convert.ToHexString(bytes)[..24];
+    }
 }

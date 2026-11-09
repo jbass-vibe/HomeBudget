@@ -1,4 +1,4 @@
-import { apiFetch, formatCurrency, showToast, openModal, closeModal, refreshReferenceData } from '../app.js';
+import { apiFetch, formatCurrency, showToast, openModal, closeModal, refreshReferenceData, openCategoryManagerModal } from '../app.js';
 
 export async function renderTopologyView(container) {
   const [topology, settings, backupInfo] = await Promise.all([
@@ -41,7 +41,7 @@ export async function renderTopologyView(container) {
               <th>Category Name</th>
               <th>Big-Box Merchant?</th>
               <th>Fixed Monthly Budget</th>
-              <th>Save</th>
+              <th>Actions (Save / Delete)</th>
             </tr>
           </thead>
           <tbody>
@@ -52,7 +52,10 @@ export async function renderTopologyView(container) {
                 <td><input type="text" class="input-control cat-name" value="${c.name}" style="width:200px;font-weight:700;" /></td>
                 <td><input type="checkbox" class="cat-bigbox" ${c.isBigBoxMerchantCategory ? 'checked' : ''} /></td>
                 <td><input type="number" step="10" class="input-control cat-budget" value="${c.monthlyBudget}" style="width:120px;" /></td>
-                <td><button class="btn btn-primary btn-sm save-cat-btn">Save</button></td>
+                <td style="white-space:nowrap;">
+                  <button class="btn btn-primary btn-sm save-cat-btn">Save</button>
+                  <button class="btn btn-danger btn-sm del-cat-btn" data-cat-id="${c.categoryId}">Delete</button>
+                </td>
               </tr>
             `).join('')}
           </tbody>
@@ -188,6 +191,17 @@ export async function renderTopologyView(container) {
       });
       await refreshReferenceData();
       showToast(`Updated category ${name}`);
+    };
+  });
+
+  // Delete Category Handler
+  container.querySelectorAll('.del-cat-btn').forEach(btn => {
+    btn.onclick = () => {
+      const catId = Number(btn.dataset.catId);
+      const catObj = categories.find(c => c.categoryId === catId);
+      if (catObj) {
+        openCategoryManagerModal(catObj, () => renderTopologyView(container));
+      }
     };
   });
 

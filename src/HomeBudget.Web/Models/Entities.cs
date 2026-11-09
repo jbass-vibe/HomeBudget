@@ -4,9 +4,10 @@ public sealed class Account
 {
     public int AccountId { get; set; }
     public string AccountName { get; set; } = "";
-    public string Institution { get; set; } = "";
-    public string AccountType { get; set; } = "";
+    public string Institution { get; set; } = "Chase";
+    public string AccountType { get; set; } = "CreditCard";
     public bool IsActive { get; set; } = true;
+    public string CreatedAt { get; set; } = "";
 }
 
 public sealed class Category
@@ -15,8 +16,8 @@ public sealed class Category
     public string Name { get; set; } = "";
     public bool IsBigBoxMerchantCategory { get; set; }
     public decimal MonthlyBudget { get; set; }
-    public int SortOrder { get; set; }
-    public string ColorHex { get; set; } = "#4F46E5";
+    public int SortOrder { get; set; } = 100;
+    public string ColorHex { get; set; } = "#3B82F6";
     public bool IsActive { get; set; } = true;
 }
 
@@ -27,7 +28,7 @@ public sealed class CategorizationRule
     public bool IsRegex { get; set; }
     public int CategoryId { get; set; }
     public string? DefaultSubcategory { get; set; }
-    public int Priority { get; set; }
+    public int Priority { get; set; } = 100;
 }
 
 public sealed class TransactionEntity
@@ -45,50 +46,7 @@ public sealed class TransactionEntity
     public bool IsCategoryManuallyLocked { get; set; }
     public int? ParentTransactionId { get; set; }
     public string DedupHash { get; set; } = "";
-    public int? UploadBatchId { get; set; }
+    public string? UploadBatchId { get; set; }
     public string? Notes { get; set; }
-}
-
-public sealed class StagedCandidateRow
-{
-    public string RowId { get; set; } = Guid.NewGuid().ToString("N");
-    public int AccountId { get; set; }
-    public string SourceFileName { get; set; } = "";
-    public string TransactionDate { get; set; } = "";
-    public string? PostDate { get; set; }
-    public string RawDescription { get; set; } = "";
-    public string CleanMerchantName { get; set; } = "";
-    public string? NativeCsvCategory { get; set; }
-    public decimal Amount { get; set; }
-    public string TransactionType { get; set; } = "Expense";
-    public int? CategoryId { get; set; }
-    public string? Subcategory { get; set; }
-    public string DedupHash { get; set; } = "";
-    public bool RequiresManualReview { get; set; }
-    public string DedupStatus { get; set; } = "AutoApprove";
-}
-
-public sealed class StagedUploadSession
-{
-    public string StagingSessionId { get; set; } = Guid.NewGuid().ToString("N");
-    public int AccountId { get; set; }
-    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
-    public List<string> FileNames { get; set; } = [];
-    public List<StagedCandidateRow> Candidates { get; set; } = [];
-}
-
-public sealed class CommitStagingRequest
-{
-    public string StagingSessionId { get; set; } = "";
-    public List<CommitRowDecision> Decisions { get; set; } = [];
-}
-
-public sealed class CommitRowDecision
-{
-    public string RowId { get; set; } = "";
-    public string Action { get; set; } = "Import";
-    public int? CategoryId { get; set; }
-    public string? Subcategory { get; set; }
-    public string? CleanMerchantName { get; set; }
-    public string? TransactionType { get; set; }
+    public string? CreatedAt { get; set; }
 }

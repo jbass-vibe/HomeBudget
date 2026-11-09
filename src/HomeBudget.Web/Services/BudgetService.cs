@@ -5,7 +5,7 @@ using HomeBudget.Web.Models;
 
 namespace HomeBudget.Web.Services;
 
-public sealed class BudgetService(SqliteConnectionFactory connectionFactory)
+public sealed class BudgetService(SqliteConnectionFactory connectionFactory, BackupService backupService)
 {
     public async Task<MonthlyBudgetViewDto> GetMonthlyBudgetAsync(string? yearMonth, CancellationToken ct = default)
     {
@@ -88,6 +88,7 @@ public sealed class BudgetService(SqliteConnectionFactory connectionFactory)
                 CategoryId = cat.CategoryId,
                 Name = cat.Name,
                 IsBigBoxMerchantCategory = cat.IsBigBoxMerchantCategory,
+                SortOrder = cat.SortOrder,
                 ColorHex = cat.ColorHex,
                 MonthlyBudget = budget,
                 NetSpent = netSpent,
@@ -110,6 +111,7 @@ public sealed class BudgetService(SqliteConnectionFactory connectionFactory)
             TotalNetSpent = totalNetSpent,
             TotalRemaining = Math.Round(totalBudgeted - totalNetSpent, 2),
             CreditCardPayoffsTotal = Math.Round(creditCardPayoffsTotal, 2),
+            UncategorizedTransactions = spendTxs.Where(t => !t.CategoryId.HasValue).ToList(),
             Categories = cards
         };
     }
@@ -122,6 +124,7 @@ public sealed class BudgetService(SqliteConnectionFactory connectionFactory)
             new { CategoryId = categoryId, MonthlyBudget = Math.Max(0m, monthlyBudget) });
 
         if (updated == 0) return null;
+        await backupService.CreateSnapshotImmediateAsync("budget_edit", ct);
         return await conn.QuerySingleAsync<Category>(
             "SELECT * FROM Categories WHERE CategoryId = @CategoryId;",
             new { CategoryId = categoryId });

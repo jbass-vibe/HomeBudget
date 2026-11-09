@@ -11,84 +11,116 @@ public sealed class IngestionStagingService(
     CsvParserService csvParser,
     BackupService backupService)
 {
-    private readonly ConcurrentDictionary<string, StagedUploadSession> _sessions = new();
+    private readonly ConcurrentDictionary<string, StagingSessionDto> _sessions = new();
 
-    private static readonly Dictionary<string, string> ChaseNativeCategoryMap = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["Groceries"] = "Groceries",
-        ["Food & Drink"] = "Dining & Bars",
-        ["Gas"] = "Auto & Gas",
-        ["Automotive"] = "Auto & Gas",
-        ["Bills & Utilities"] = "Housing & Utilities",
-        ["Home"] = "Home & Garden",
-        ["Entertainment"] = "Entertainment",
-        ["Health & Wellness"] = "Health & Medical",
-        ["Travel"] = "Travel"
-    };
-
-    public async Task<StagedUploadSession> StageFilesAsync(
+    public async Task<StagingSessionDto> StageFilesAsync(
         int accountId,
         IFormFileCollection files,
         CancellationToken ct = default)
     {
-        PruneExpiredSessions();
-
         await using var conn = await connectionFactory.CreateOpenConnectionAsync(ct);
 
         var account = await conn.QuerySingleOrDefaultAsync<Account>(
-            "SELECT * FROM Accounts WHERE AccountId = @AccountId;",
-            new { AccountId = accountId })
+            "SELECT * FROM Accounts WHERE AccountId = @Id;", new { Id = accountId })
             ?? throw new InvalidOperationException($"Account {accountId} not found.");
 
         string googlePattern = await conn.ExecuteScalarAsync<string?>(
             "SELECT Value FROM Settings WHERE Key = 'GooglePayrollMatchPattern';") ?? "GOOGLE";
 
-        var categories = (await conn.QueryAsync<Category>("SELECT * FROM Categories WHERE IsActive = 1;")).ToList();
-        var categoryByName = categories.ToDictionary(c => c.Name, c => c.CategoryId, StringComparer.OrdinalIgnoreCase);
-
         var rules = (await conn.QueryAsync<CategorizationRule>(
             "SELECT * FROM CategorizationRules ORDER BY Priority ASC, RuleId ASC;")).ToList();
 
-        var existingHashes = (await conn.QueryAsync<string>("SELECT DedupHash FROM Transactions;"))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var existingHashes = (await conn.QueryAsync<string>(
+            "SELECT DedupHash FROM Transactions WHERE AccountId = @AccountId;",
+            new { AccountId = accountId })).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        var tombstoneHashes = (await conn.QueryAsync<string>("SELECT DedupHash FROM DeletedTransactionHashes;"))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var deletedHashes = (await conn.QueryAsync<string>(
+            "SELECT DedupHash FROM DeletedTransactionHashes;")).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        var session = new StagedUploadSession { AccountId = accountId };
-        var seenInBatch = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var session = new StagingSessionDto
+        {
+            StagingSessionId = Guid.NewGuid().ToString("N"),
+            AccountId = accountId,
+            FileNames = files.Select(f => f.FileName).ToList()
+        };
+
+        var occurrenceCounter = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var file in files)
         {
-            session.FileNames.Add(file.FileName);
             await using var stream = file.OpenReadStream();
-            var parsedRows = csvParser.ParseCsv(stream, file.FileName, account, googlePattern);
+            var parsedRows = csvParser.ParseCsvStream(stream, account, googlePattern);
 
             foreach (var row in parsedRows)
             {
-                if (row.TransactionType is "Expense" or "Refund")
-                {
-                    ApplyAutoCategorization(row, rules, categoryByName);
-                }
+                occurrenceCounter.TryGetValue(row.BaseDedupHash, out int countSoFar);
+                countSoFar++;
+                occurrenceCounter[row.BaseDedupHash] = countSoFar;
 
-                if (tombstoneHashes.Contains(row.DedupHash))
+                string candidateHash = countSoFar == 1
+                    ? row.BaseDedupHash
+                    : $"{row.BaseDedupHash}_OCC_{countSoFar}";
+
+                string dedupStatus;
+                if (deletedHashes.Contains(candidateHash) || deletedHashes.Contains(row.BaseDedupHash))
                 {
-                    row.DedupStatus = "SkippedDeleted";
+                    dedupStatus = "SkippedDeleted";
                 }
-                else if (existingHashes.Contains(row.DedupHash))
+                else if (existingHashes.Contains(candidateHash))
                 {
-                    row.DedupStatus = "SkippedDuplicate";
+                    dedupStatus = "SkippedDuplicate";
                 }
-                else if (!seenInBatch.Add(row.DedupHash))
+                else if (countSoFar > 1)
                 {
-                    row.DedupStatus = "PotentialCollision";
+                    dedupStatus = "PotentialCollision";
                 }
                 else
                 {
-                    row.DedupStatus = "AutoApprove";
+                    dedupStatus = "AutoApprove";
                 }
 
-                session.Candidates.Add(row);
+                int? matchedCategoryId = null;
+                string? matchedSubcat = null;
+                bool requiresManualReview = false;
+
+                if (row.TransactionType is "Expense" or "Refund")
+                {
+                    foreach (var rule in rules)
+                    {
+                        bool isMatch = rule.IsRegex
+                            ? Regex.IsMatch(row.RawDescription, rule.MatchPattern, RegexOptions.IgnoreCase)
+                            : row.RawDescription.Contains(rule.MatchPattern, StringComparison.OrdinalIgnoreCase)
+                              || row.CleanMerchantName.Contains(rule.MatchPattern, StringComparison.OrdinalIgnoreCase);
+
+                        if (isMatch)
+                        {
+                            matchedCategoryId = rule.CategoryId;
+                            matchedSubcat = rule.DefaultSubcategory;
+                            break;
+                        }
+                    }
+
+                    if (!matchedCategoryId.HasValue)
+                    {
+                        requiresManualReview = true;
+                    }
+                }
+
+                session.Candidates.Add(new StagingCandidateDto
+                {
+                    RowId = Guid.NewGuid().ToString("N")[..12],
+                    TransactionDate = row.TransactionDate,
+                    PostDate = row.PostDate,
+                    RawDescription = row.RawDescription,
+                    CleanMerchantName = row.CleanMerchantName,
+                    Amount = row.Amount,
+                    TransactionType = row.TransactionType,
+                    CategoryId = matchedCategoryId,
+                    Subcategory = matchedSubcat,
+                    DedupHash = candidateHash,
+                    DedupStatus = dedupStatus,
+                    RequiresManualReview = requiresManualReview
+                });
             }
         }
 
@@ -103,137 +135,98 @@ public sealed class IngestionStagingService(
             throw new InvalidOperationException("Staging session not found or already committed.");
         }
 
-        var decisionsById = request.Decisions.ToDictionary(d => d.RowId, StringComparer.OrdinalIgnoreCase);
-
-        await using var conn = await connectionFactory.CreateOpenConnectionAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
+        var decisionMap = request.Decisions.ToDictionary(d => d.RowId, StringComparer.OrdinalIgnoreCase);
+        string batchId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
 
         int importedCount = 0;
         int skippedCount = 0;
         int tombstonedCount = 0;
 
-        int batchId = await conn.ExecuteScalarAsync<int>(
-            "INSERT INTO UploadBatches (AccountId, FileName, ImportedRowCount, SkippedDuplicateCount) VALUES (@AccountId, @FileName, 0, 0); SELECT last_insert_rowid();",
-            new
-            {
-                session.AccountId,
-                FileName = string.Join(", ", session.FileNames)
-            },
-            tx);
+        await using var conn = await connectionFactory.CreateOpenConnectionAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
 
-        foreach (var row in session.Candidates)
+        foreach (var candidate in session.Candidates)
         {
-            string action = row.DedupStatus == "AutoApprove" ? "Import" : "Skip";
-            if (decisionsById.TryGetValue(row.RowId, out var decision))
-            {
-                action = decision.Action;
-                if (decision.CategoryId.HasValue) row.CategoryId = decision.CategoryId;
-                if (decision.Subcategory is not null) row.Subcategory = decision.Subcategory;
-                if (!string.IsNullOrWhiteSpace(decision.CleanMerchantName)) row.CleanMerchantName = decision.CleanMerchantName;
-                if (!string.IsNullOrWhiteSpace(decision.TransactionType)) row.TransactionType = decision.TransactionType;
-            }
-
-            if (action.Equals("TombstoneDelete", StringComparison.OrdinalIgnoreCase))
-            {
-                await conn.ExecuteAsync(
-                    "INSERT OR IGNORE INTO DeletedTransactionHashes (DedupHash, RawDescription, TransactionDate, Amount) VALUES (@DedupHash, @RawDescription, @TransactionDate, @Amount);",
-                    row,
-                    tx);
-                tombstonedCount++;
-            }
-            else if (action.Equals("Import", StringComparison.OrdinalIgnoreCase))
-            {
-                await conn.ExecuteAsync(
-                    "INSERT INTO Transactions (AccountId, TransactionDate, PostDate, RawDescription, CleanMerchantName, Amount, TransactionType, CategoryId, Subcategory, IsCategoryManuallyLocked, DedupHash, UploadBatchId) VALUES (@AccountId, @TransactionDate, @PostDate, @RawDescription, @CleanMerchantName, @Amount, @TransactionType, @CategoryId, @Subcategory, 0, @DedupHash, @BatchId);",
-                    new
-                    {
-                        row.AccountId,
-                        row.TransactionDate,
-                        row.PostDate,
-                        row.RawDescription,
-                        row.CleanMerchantName,
-                        row.Amount,
-                        row.TransactionType,
-                        row.CategoryId,
-                        row.Subcategory,
-                        row.DedupHash,
-                        BatchId = batchId
-                    },
-                    tx);
-                importedCount++;
-            }
-            else
+            if (!decisionMap.TryGetValue(candidate.RowId, out var decision))
             {
                 skippedCount++;
+                continue;
             }
-        }
 
-        await conn.ExecuteAsync(
-            "UPDATE UploadBatches SET ImportedRowCount = @ImportedCount, SkippedDuplicateCount = @SkippedCount WHERE UploadBatchId = @BatchId;",
-            new { ImportedCount = importedCount, SkippedCount = skippedCount, BatchId = batchId },
-            tx);
+            if (decision.Action.Equals("TombstoneDelete", StringComparison.OrdinalIgnoreCase))
+            {
+                await conn.ExecuteAsync(
+                    """
+                    INSERT OR IGNORE INTO DeletedTransactionHashes (DedupHash, RawDescription, TransactionDate, Amount)
+                    VALUES (@DedupHash, @RawDescription, @TransactionDate, @Amount);
+                    """,
+                    candidate,
+                    tx);
+                tombstonedCount++;
+                continue;
+            }
+
+            if (!decision.Action.Equals("Import", StringComparison.OrdinalIgnoreCase))
+            {
+                skippedCount++;
+                continue;
+            }
+
+            string cleanName = !string.IsNullOrWhiteSpace(decision.CleanMerchantName)
+                ? decision.CleanMerchantName.Trim()
+                : candidate.CleanMerchantName;
+            string txType = !string.IsNullOrWhiteSpace(decision.TransactionType)
+                ? decision.TransactionType.Trim()
+                : candidate.TransactionType;
+            int? catId = txType is "Expense" or "Refund" ? decision.CategoryId : null;
+            string? subcat = string.IsNullOrWhiteSpace(decision.Subcategory) ? null : decision.Subcategory.Trim();
+
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO Transactions (
+                    AccountId, TransactionDate, PostDate, RawDescription, CleanMerchantName,
+                    Amount, TransactionType, CategoryId, Subcategory, IsCategoryManuallyLocked,
+                    ParentTransactionId, DedupHash, UploadBatchId
+                ) VALUES (
+                    @AccountId, @TransactionDate, @PostDate, @RawDescription, @CleanMerchantName,
+                    @Amount, @TransactionType, @CategoryId, @Subcategory, @IsLocked,
+                    NULL, @DedupHash, @UploadBatchId
+                );
+                """,
+                new
+                {
+                    session.AccountId,
+                    candidate.TransactionDate,
+                    candidate.PostDate,
+                    candidate.RawDescription,
+                    CleanMerchantName = cleanName,
+                    candidate.Amount,
+                    TransactionType = txType,
+                    CategoryId = catId,
+                    Subcategory = subcat,
+                    IsLocked = (catId != candidate.CategoryId) ? 1 : 0,
+                    candidate.DedupHash,
+                    UploadBatchId = batchId
+                },
+                tx);
+
+            importedCount++;
+        }
 
         await tx.CommitAsync(ct);
 
         string? backupFile = null;
         if (importedCount > 0 || tombstonedCount > 0)
         {
-            backupFile = await backupService.CreateSnapshotImmediateAsync("upload", ct);
+            backupFile = await backupService.CreateSnapshotImmediateAsync("csv_upload", ct);
         }
 
         return new
         {
-            uploadBatchId = batchId,
             importedCount,
             skippedCount,
             tombstonedCount,
             backupFileCreated = backupFile
         };
-    }
-
-    private static void ApplyAutoCategorization(
-        StagedCandidateRow row,
-        List<CategorizationRule> rules,
-        Dictionary<string, int> categoryByName)
-    {
-        foreach (var rule in rules)
-        {
-            bool matched = rule.IsRegex
-                ? Regex.IsMatch(row.RawDescription, rule.MatchPattern, RegexOptions.IgnoreCase)
-                : row.RawDescription.Contains(rule.MatchPattern, StringComparison.OrdinalIgnoreCase);
-
-            if (matched)
-            {
-                row.CategoryId = rule.CategoryId;
-                row.Subcategory = rule.DefaultSubcategory;
-                row.RequiresManualReview = false;
-                return;
-            }
-        }
-
-        if (!string.IsNullOrWhiteSpace(row.NativeCsvCategory)
-            && ChaseNativeCategoryMap.TryGetValue(row.NativeCsvCategory, out string? mappedCategoryName)
-            && categoryByName.TryGetValue(mappedCategoryName, out int mappedCatId))
-        {
-            row.CategoryId = mappedCatId;
-            return;
-        }
-
-        if (!row.CategoryId.HasValue)
-        {
-            row.RequiresManualReview = true;
-        }
-    }
-
-    private void PruneExpiredSessions()
-    {
-        DateTime cutoff = DateTime.UtcNow.AddMinutes(-30);
-        foreach (var kvp in _sessions)
-        {
-            if (kvp.Value.CreatedAtUtc < cutoff)
-            {
-                _sessions.TryRemove(kvp.Key, out _);
-            }
-        }
     }
 }

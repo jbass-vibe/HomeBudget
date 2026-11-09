@@ -1,4 +1,12 @@
-import { state, apiFetch, formatCurrency, showToast, openModal, closeModal } from '../app.js';
+import {
+  state,
+  apiFetch,
+  formatCurrency,
+  showToast,
+  openModal,
+  closeModal,
+  openCategorizeExpenseModal
+} from '../app.js';
 
 const filterState = {
   startDate: '',
@@ -7,6 +15,9 @@ const filterState = {
   categoryId: '',
   uncategorizedOnly: false,
   transactionType: '',
+  minAmount: '',
+  maxAmount: '',
+  sortBy: 'date_desc',
   search: ''
 };
 
@@ -14,12 +25,31 @@ export async function renderInspectorView(container) {
   container.innerHTML = `
     <div class="page-header">
       <div>
-        <h1 class="page-title">Transaction Data Store Inspector</h1>
-        <p class="page-subtitle">Inspect, recategorize, split multi-category purchases, or tombstone-delete irrelevant entries</p>
+        <h1 class="page-title">Transaction Inspector (Income &amp; Expenses)</h1>
+        <p class="page-subtitle">Filter, recategorize with forward/past automation, edit, split, or delete income and expense entries</p>
       </div>
     </div>
 
     <div class="card-panel">
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;margin-bottom:14px;">
+        <div class="pill-group">
+          <button class="pill-btn ${!filterState.transactionType && !filterState.uncategorizedOnly ? 'active' : ''}" data-qtype="all">All Records</button>
+          <button class="pill-btn ${filterState.transactionType === 'Expense' && !filterState.uncategorizedOnly ? 'active' : ''}" data-qtype="Expense">Expenses Only</button>
+          <button class="pill-btn ${filterState.transactionType === 'IncomeDeposit' ? 'active' : ''}" data-qtype="IncomeDeposit">Income (Deposits)</button>
+          <button class="pill-btn ${filterState.uncategorizedOnly ? 'active' : ''}" data-qtype="uncat">&#9888;&#65039; Uncategorized</button>
+          <button class="pill-btn ${filterState.transactionType === 'Refund' ? 'active' : ''}" data-qtype="Refund">Refunds</button>
+          <button class="pill-btn ${filterState.transactionType === 'CreditCardPayoff' ? 'active' : ''}" data-qtype="CreditCardPayoff">CC Payoffs</button>
+        </div>
+
+        <div class="pill-group">
+          <button class="pill-btn" data-qdate="all">All Dates</button>
+          <button class="pill-btn" data-qdate="mtd">This Month</button>
+          <button class="pill-btn" data-qdate="prev">Last Month</button>
+          <button class="pill-btn" data-qdate="3m">Last 3M</button>
+          <button class="pill-btn" data-qdate="ytd">YTD</button>
+        </div>
+      </div>
+
       <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;">
         <div>
           <label style="font-size:11px;font-weight:700;display:block;">Start Date</label>
@@ -49,23 +79,42 @@ export async function renderInspectorView(container) {
           <select id="fltType" class="select-control">
             <option value="">All Types</option>
             <option value="Expense" ${filterState.transactionType === 'Expense' ? 'selected' : ''}>Expense</option>
+            <option value="IncomeDeposit" ${filterState.transactionType === 'IncomeDeposit' ? 'selected' : ''}>IncomeDeposit (Income)</option>
             <option value="Refund" ${filterState.transactionType === 'Refund' ? 'selected' : ''}>Refund</option>
-            <option value="IncomeDeposit" ${filterState.transactionType === 'IncomeDeposit' ? 'selected' : ''}>Google Income Deposit</option>
             <option value="CreditCardPayoff" ${filterState.transactionType === 'CreditCardPayoff' ? 'selected' : ''}>Credit Card Payoff</option>
           </select>
         </div>
-        <div style="flex:1;min-width:180px;">
-          <label style="font-size:11px;font-weight:700;display:block;">Search Merchant / Notes</label>
-          <input type="text" id="fltSearch" class="input-control" style="width:100%;" placeholder="Search description..." value="${filterState.search}" />
+        <div>
+          <label style="font-size:11px;font-weight:700;display:block;">Min $</label>
+          <input type="number" step="1" id="fltMinAmt" class="input-control" style="width:85px;" placeholder="0" value="${filterState.minAmount}" />
         </div>
-        <button class="btn btn-primary" id="applyFiltersBtn">Filter</button>
+        <div>
+          <label style="font-size:11px;font-weight:700;display:block;">Max $</label>
+          <input type="number" step="1" id="fltMaxAmt" class="input-control" style="width:85px;" placeholder="Any" value="${filterState.maxAmount}" />
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:700;display:block;">Sort By</label>
+          <select id="fltSort" class="select-control">
+            <option value="date_desc" ${filterState.sortBy === 'date_desc' ? 'selected' : ''}>Newest First</option>
+            <option value="date_asc" ${filterState.sortBy === 'date_asc' ? 'selected' : ''}>Oldest First</option>
+            <option value="amount_desc" ${filterState.sortBy === 'amount_desc' ? 'selected' : ''}>Highest Amount</option>
+            <option value="amount_asc" ${filterState.sortBy === 'amount_asc' ? 'selected' : ''}>Lowest Amount</option>
+            <option value="merchant_asc" ${filterState.sortBy === 'merchant_asc' ? 'selected' : ''}>Merchant (A-Z)</option>
+          </select>
+        </div>
+        <div style="flex:1;min-width:180px;">
+          <label style="font-size:11px;font-weight:700;display:block;">Search Merchant / Raw Description</label>
+          <input type="text" id="fltSearch" class="input-control" style="width:100%;" placeholder="Search merchant, description, notes..." value="${filterState.search}" />
+        </div>
+        <button class="btn btn-primary" id="applyFiltersBtn">Apply Filters</button>
+        <button class="btn btn-outline" id="resetFiltersBtn">Reset</button>
       </div>
     </div>
 
     <div id="inspectorTableMount" class="card-panel">Loading transactions...</div>
   `;
 
-  const triggerReload = () => {
+  const syncInputsAndReload = () => {
     filterState.startDate = container.querySelector('#fltStart').value;
     filterState.endDate = container.querySelector('#fltEnd').value;
     filterState.accountId = container.querySelector('#fltAccount').value;
@@ -78,22 +127,93 @@ export async function renderInspectorView(container) {
       filterState.categoryId = catVal;
     }
     filterState.transactionType = container.querySelector('#fltType').value;
+    filterState.minAmount = container.querySelector('#fltMinAmt').value;
+    filterState.maxAmount = container.querySelector('#fltMaxAmt').value;
+    filterState.sortBy = container.querySelector('#fltSort').value;
     filterState.search = container.querySelector('#fltSearch').value.trim();
     loadTransactionsTable(container.querySelector('#inspectorTableMount'));
   };
 
-  container.querySelector('#applyFiltersBtn').onclick = triggerReload;
+  container.querySelector('#applyFiltersBtn').onclick = syncInputsAndReload;
+  container.querySelector('#fltSearch').onkeydown = (e) => {
+    if (e.key === 'Enter') syncInputsAndReload();
+  };
+
+  container.querySelector('#resetFiltersBtn').onclick = () => {
+    Object.assign(filterState, {
+      startDate: '',
+      endDate: '',
+      accountId: '',
+      categoryId: '',
+      uncategorizedOnly: false,
+      transactionType: '',
+      minAmount: '',
+      maxAmount: '',
+      sortBy: 'date_desc',
+      search: ''
+    });
+    renderInspectorView(container);
+  };
+
+  container.querySelectorAll('[data-qtype]').forEach(btn => {
+    btn.onclick = () => {
+      const qt = btn.dataset.qtype;
+      if (qt === 'all') {
+        filterState.transactionType = '';
+        filterState.uncategorizedOnly = false;
+      } else if (qt === 'uncat') {
+        filterState.uncategorizedOnly = true;
+        filterState.transactionType = '';
+        filterState.categoryId = '';
+      } else {
+        filterState.uncategorizedOnly = false;
+        filterState.transactionType = qt;
+      }
+      renderInspectorView(container);
+    };
+  });
+
+  container.querySelectorAll('[data-qdate]').forEach(btn => {
+    btn.onclick = () => {
+      const qd = btn.dataset.qdate;
+      const now = new Date();
+      const iso = (d) => d.toISOString().slice(0, 10);
+      if (qd === 'all') {
+        filterState.startDate = '';
+        filterState.endDate = '';
+      } else if (qd === 'mtd') {
+        filterState.startDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+        filterState.endDate = iso(now);
+      } else if (qd === 'prev') {
+        const firstPrev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        const lastPrev = new Date(now.getFullYear(), now.getMonth(), 0);
+        filterState.startDate = iso(firstPrev);
+        filterState.endDate = iso(lastPrev);
+      } else if (qd === '3m') {
+        const first3m = new Date(now.getFullYear(), now.getMonth() - 2, 1);
+        filterState.startDate = iso(first3m);
+        filterState.endDate = iso(now);
+      } else if (qd === 'ytd') {
+        filterState.startDate = `${now.getFullYear()}-01-01`;
+        filterState.endDate = iso(now);
+      }
+      renderInspectorView(container);
+    };
+  });
+
   await loadTransactionsTable(container.querySelector('#inspectorTableMount'));
 }
 
 async function loadTransactionsTable(mountEl) {
-  const params = new URLSearchParams({ pageSize: '200' });
+  const params = new URLSearchParams({ pageSize: '300', sortBy: filterState.sortBy });
   if (filterState.startDate) params.set('startDate', filterState.startDate);
   if (filterState.endDate) params.set('endDate', filterState.endDate);
   if (filterState.accountId) params.set('accountId', filterState.accountId);
   if (filterState.uncategorizedOnly) params.set('uncategorizedOnly', 'true');
   else if (filterState.categoryId) params.set('categoryId', filterState.categoryId);
   if (filterState.transactionType) params.set('transactionType', filterState.transactionType);
+  if (filterState.minAmount) params.set('minAmount', filterState.minAmount);
+  if (filterState.maxAmount) params.set('maxAmount', filterState.maxAmount);
   if (filterState.search) params.set('search', filterState.search);
 
   const data = await apiFetch(`/api/transactions?${params.toString()}`);
@@ -101,22 +221,31 @@ async function loadTransactionsTable(mountEl) {
   const catOptions = (selectedId) => `
     <option value="">-- Uncategorized --</option>
     ${state.categories.map(c => `<option value="${c.categoryId}" ${c.categoryId === selectedId ? 'selected' : ''}>${c.name}</option>`).join('')}
+    <option value="__NEW__">+ Add New Category...</option>
   `;
 
   mountEl.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-      <strong>Showing ${data.items.length} of ${data.totalCount} transactions</strong>
-      <span style="font-size:12px;color:#64748B;">Inline edits trigger a 60s coalesced SQLite backup automatically</span>
+    <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px;">
+      <div>
+        <strong>Showing ${data.items.length} of ${data.totalCount} matching income &amp; expense records</strong>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button class="btn btn-danger btn-sm" id="bulkDeleteSelectedBtn" style="display:none;">
+          &#128465; Delete Selected (<span id="selectedTxCount">0</span>)
+        </button>
+      </div>
     </div>
+
     <div class="table-responsive">
       <table class="data-table">
         <thead>
           <tr>
+            <th><input type="checkbox" id="selectAllTxCheck" title="Select all visible rows" /></th>
             <th>Date</th>
             <th>Account</th>
-            <th>Merchant / Raw Description</th>
-            <th>Type</th>
-            <th>Amount</th>
+            <th>Merchant / Description</th>
+            <th>Type (Income / Expense)</th>
+            <th>Amount ($)</th>
             <th>Category</th>
             <th>Subcategory</th>
             <th>Actions</th>
@@ -124,37 +253,42 @@ async function loadTransactionsTable(mountEl) {
         </thead>
         <tbody>
           ${data.items.length === 0 ? `
-            <tr><td colspan="8" style="text-align:center;color:#64748B;">No matching transactions found.</td></tr>
+            <tr><td colspan="9" style="text-align:center;color:#64748B;">No matching income or expense transactions found.</td></tr>
           ` : data.items.map(tx => `
             <tr data-tx-id="${tx.transactionId}">
-              <td style="white-space:nowrap;">${tx.transactionDate}</td>
+              <td><input type="checkbox" class="tx-row-check" value="${tx.transactionId}" /></td>
+              <td>
+                <input type="date" class="input-control tx-date" value="${tx.transactionDate}" style="width:132px;" />
+              </td>
               <td>${tx.accountName}</td>
               <td>
-                <input type="text" class="input-control tx-merchant" value="${tx.cleanMerchantName.replace(/"/g, '&quot;')}" style="width:180px;" />
+                <input type="text" class="input-control tx-merchant" value="${tx.cleanMerchantName.replace(/"/g, '&quot;')}" style="width:175px;" />
                 <div style="font-size:11px;color:#64748B;">${tx.rawDescription}</div>
               </td>
               <td>
                 <select class="select-control tx-type">
                   <option value="Expense" ${tx.transactionType === 'Expense' ? 'selected' : ''}>Expense</option>
+                  <option value="IncomeDeposit" ${tx.transactionType === 'IncomeDeposit' ? 'selected' : ''}>IncomeDeposit (Income)</option>
                   <option value="Refund" ${tx.transactionType === 'Refund' ? 'selected' : ''}>Refund</option>
-                  <option value="IncomeDeposit" ${tx.transactionType === 'IncomeDeposit' ? 'selected' : ''}>IncomeDeposit</option>
                   <option value="CreditCardPayoff" ${tx.transactionType === 'CreditCardPayoff' ? 'selected' : ''}>CreditCardPayoff</option>
                 </select>
               </td>
-              <td class="${tx.amount < 0 ? 'amount-refund' : 'amount-expense'}">${formatCurrency(tx.amount)}</td>
               <td>
-                <select class="select-control tx-cat">
+                <input type="number" step="0.01" class="input-control tx-amount" value="${tx.amount}" style="width:100px;font-weight:700;" />
+              </td>
+              <td>
+                <select class="select-control tx-cat" data-orig-cat="${tx.categoryId || ''}">
                   ${catOptions(tx.categoryId)}
                 </select>
               </td>
               <td>
-                <input type="text" class="input-control tx-subcat" value="${tx.subcategory || ''}" placeholder="None" style="width:110px;" />
+                <input type="text" class="input-control tx-subcat" value="${tx.subcategory || ''}" placeholder="None" style="width:105px;" />
               </td>
               <td style="white-space:nowrap;">
-                <button class="btn btn-primary btn-sm tx-save-btn">Save</button>
-                <button class="btn btn-outline btn-sm tx-rule-btn" title="Create Rule & Back-Propagate">+Rule</button>
+                <button class="btn btn-primary btn-sm tx-save-btn" title="Save field edits">Save</button>
+                <button class="btn btn-outline btn-sm tx-cat-modal-btn" title="Categorize with Forward/Past options">Categorize</button>
                 <button class="btn btn-outline btn-sm tx-split-btn" title="Split Transaction">Split</button>
-                <button class="btn btn-danger btn-sm tx-del-btn" title="Delete & Tombstone">&#128465;</button>
+                <button class="btn btn-danger btn-sm tx-del-btn" title="Delete Income or Expense from DB">&#128465;</button>
               </td>
             </tr>
           `).join('')}
@@ -163,91 +297,106 @@ async function loadTransactionsTable(mountEl) {
     </div>
   `;
 
-  // Inline Save Handler
+  const selectAllCheck = mountEl.querySelector('#selectAllTxCheck');
+  const rowChecks = Array.from(mountEl.querySelectorAll('.tx-row-check'));
+  const bulkDelBtn = mountEl.querySelector('#bulkDeleteSelectedBtn');
+  const selCountSpan = mountEl.querySelector('#selectedTxCount');
+
+  const updateBulkBar = () => {
+    const selectedIds = rowChecks.filter(c => c.checked).map(c => Number(c.value));
+    selCountSpan.textContent = String(selectedIds.length);
+    bulkDelBtn.style.display = selectedIds.length > 0 ? 'inline-flex' : 'none';
+  };
+
+  if (selectAllCheck) {
+    selectAllCheck.onchange = () => {
+      rowChecks.forEach(c => { c.checked = selectAllCheck.checked; });
+      updateBulkBar();
+    };
+  }
+  rowChecks.forEach(c => { c.onchange = updateBulkBar; });
+
+  bulkDelBtn.onclick = () => {
+    const selectedIds = rowChecks.filter(c => c.checked).map(c => Number(c.value));
+    if (selectedIds.length === 0) return;
+
+    openModal(`
+      <h3 style="margin-top:0;color:#DC2626;">Delete ${selectedIds.length} Selected Transaction(s)?</h3>
+      <p style="font-size:13px;color:#475569;">
+        This will permanently remove the selected income and/or expense records from your SQLite database and create a backup snapshot.
+      </p>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;margin:14px 0;">
+        <input type="checkbox" id="bulkTombstoneCheck" checked />
+        <span>Add to Tombstone list so future CSV uploads do not re-import these deleted records</span>
+      </label>
+      <div style="display:flex;justify-content:flex-end;gap:10px;">
+        <button class="btn btn-outline" id="cancelBulkDelBtn">Cancel</button>
+        <button class="btn btn-danger" id="confirmBulkDelBtn">Delete ${selectedIds.length} Record(s)</button>
+      </div>
+    `, (modalEl) => {
+      modalEl.querySelector('#cancelBulkDelBtn').onclick = closeModal;
+      modalEl.querySelector('#confirmBulkDelBtn').onclick = async () => {
+        const addToTombstone = modalEl.querySelector('#bulkTombstoneCheck').checked;
+        const res = await apiFetch('/api/transactions/bulk-delete', {
+          method: 'POST',
+          body: JSON.stringify({ transactionIds: selectedIds, addToTombstone })
+        });
+        closeModal();
+        showToast(`Deleted ${res.deletedCount} transaction(s) • Backup created`);
+        loadTransactionsTable(mountEl);
+      };
+    });
+  };
+
+  mountEl.querySelectorAll('.tx-cat').forEach(sel => {
+    sel.onchange = () => {
+      const tr = sel.closest('tr');
+      const txId = Number(tr.dataset.txId);
+      const tx = data.items.find(x => x.transactionId === txId);
+      if (!tx) return;
+      openCategorizeExpenseModal(tx, () => loadTransactionsTable(mountEl), sel.value);
+    };
+  });
+
+  mountEl.querySelectorAll('.tx-cat-modal-btn').forEach(btn => {
+    btn.onclick = () => {
+      const tr = btn.closest('tr');
+      const txId = Number(tr.dataset.txId);
+      const tx = data.items.find(x => x.transactionId === txId);
+      if (tx) {
+        openCategorizeExpenseModal(tx, () => loadTransactionsTable(mountEl));
+      }
+    };
+  });
+
   mountEl.querySelectorAll('.tx-save-btn').forEach(btn => {
     btn.onclick = async () => {
       const tr = btn.closest('tr');
       const txId = Number(tr.dataset.txId);
+      const transactionDate = tr.querySelector('.tx-date').value;
       const cleanMerchantName = tr.querySelector('.tx-merchant').value.trim();
       const transactionType = tr.querySelector('.tx-type').value;
+      const amount = Number(tr.querySelector('.tx-amount').value || 0);
       const catVal = tr.querySelector('.tx-cat').value;
       const subcategory = tr.querySelector('.tx-subcat').value.trim();
 
       await apiFetch(`/api/transactions/${txId}`, {
         method: 'PUT',
         body: JSON.stringify({
-          categoryId: catVal ? Number(catVal) : null,
+          transactionDate,
+          amount,
+          categoryId: (catVal && catVal !== '__NEW__') ? Number(catVal) : null,
+          clearCategory: !catVal,
           subcategory,
           cleanMerchantName,
           transactionType
         })
       });
-      showToast(`Saved transaction #${txId}`);
+      showToast(`Saved transaction #${txId} (Backup created)`);
+      loadTransactionsTable(mountEl);
     };
   });
 
-  // Create Permanent Rule & Back-Propagate Modal
-  mountEl.querySelectorAll('.tx-rule-btn').forEach(btn => {
-    btn.onclick = () => {
-      const tr = btn.closest('tr');
-      const txId = Number(tr.dataset.txId);
-      const tx = data.items.find(x => x.transactionId === txId);
-      const selectedCatId = Number(tr.querySelector('.tx-cat').value || tx.categoryId || state.categories[0]?.categoryId);
-      const subcat = tr.querySelector('.tx-subcat').value.trim();
-
-      openModal(`
-        <h3 style="margin-top:0;">Create Auto-Categorization Rule &amp; Back-Propagate</h3>
-        <p style="font-size:13px;color:#64748B;">Raw description: <code>${tx.rawDescription}</code></p>
-        <div style="display:flex;flex-direction:column;gap:12px;margin:14px 0;">
-          <div>
-            <label style="font-size:12px;font-weight:700;display:block;">Match Substring Keyword</label>
-            <input type="text" id="ruleKeywordInput" class="input-control" style="width:100%;" value="${tx.cleanMerchantName}" />
-          </div>
-          <div>
-            <label style="font-size:12px;font-weight:700;display:block;">Target Category</label>
-            <select id="ruleCatSelect" class="select-control" style="width:100%;">
-              ${state.categories.map(c => `<option value="${c.categoryId}" ${c.categoryId === selectedCatId ? 'selected' : ''}>${c.name}</option>`).join('')}
-            </select>
-          </div>
-          <div>
-            <label style="font-size:12px;font-weight:700;display:block;">Default Subcategory (Optional)</label>
-            <input type="text" id="ruleSubcatInput" class="input-control" style="width:100%;" value="${subcat}" />
-          </div>
-          <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;">
-            <input type="checkbox" id="ruleBackPropCheck" checked />
-            <span>Retroactively back-propagate this rule to all historical transactions</span>
-          </label>
-        </div>
-        <div style="display:flex;justify-content:flex-end;gap:10px;">
-          <button class="btn btn-outline" id="cancelRuleModal">Cancel</button>
-          <button class="btn btn-primary" id="confirmRuleModal">Save &amp; Back-Propagate</button>
-        </div>
-      `, (modalEl) => {
-        modalEl.querySelector('#cancelRuleModal').onclick = closeModal;
-        modalEl.querySelector('#confirmRuleModal').onclick = async () => {
-          const pattern = modalEl.querySelector('#ruleKeywordInput').value.trim();
-          const catId = Number(modalEl.querySelector('#ruleCatSelect').value);
-          const defaultSub = modalEl.querySelector('#ruleSubcatInput').value.trim();
-          const backProp = modalEl.querySelector('#ruleBackPropCheck').checked;
-
-          const res = await apiFetch(`/api/transactions/${txId}`, {
-            method: 'PUT',
-            body: JSON.stringify({
-              categoryId: catId,
-              subcategory: defaultSub,
-              createRulePattern: pattern,
-              backPropagateRule: backProp
-            })
-          });
-          closeModal();
-          showToast(`Rule created! Back-propagated to ${res.backPropagatedCount} historical transactions.`);
-          loadTransactionsTable(mountEl);
-        };
-      });
-    };
-  });
-
-  // Split Transaction Modal
   mountEl.querySelectorAll('.tx-split-btn').forEach(btn => {
     btn.onclick = () => {
       const tr = btn.closest('tr');
@@ -319,17 +468,38 @@ async function loadTransactionsTable(mountEl) {
     };
   });
 
-  // Tombstone Delete Handler
   mountEl.querySelectorAll('.tx-del-btn').forEach(btn => {
-    btn.onclick = async () => {
+    btn.onclick = () => {
       const tr = btn.closest('tr');
       const txId = Number(tr.dataset.txId);
-      if (!confirm('Delete this transaction and add its hash to the Tombstone store so future CSV uploads never re-import it?')) {
-        return;
-      }
-      await apiFetch(`/api/transactions/${txId}?addToTombstone=true`, { method: 'DELETE' });
-      showToast(`Deleted & tombstoned transaction #${txId}`);
-      loadTransactionsTable(mountEl);
+      const tx = data.items.find(x => x.transactionId === txId);
+      if (!tx) return;
+
+      openModal(`
+        <h3 style="margin-top:0;color:#DC2626;">Delete ${tx.transactionType === 'IncomeDeposit' ? 'Income Deposit' : 'Expense'}?</h3>
+        <div style="background:#FEF2F2;border:1px solid #FECACA;border-radius:10px;padding:12px;font-size:13px;margin-bottom:12px;">
+          <div><strong>${tx.cleanMerchantName}</strong> (${tx.transactionType})</div>
+          <div>Date: ${tx.transactionDate} &bull; Amount: <strong>${formatCurrency(tx.amount)}</strong></div>
+          <div style="font-size:11px;color:#64748B;">Raw: ${tx.rawDescription}</div>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;margin:14px 0;">
+          <input type="checkbox" id="singleDelTombstoneCheck" checked />
+          <span>Add hash to Tombstone table so future CSV uploads never re-import this record</span>
+        </label>
+        <div style="display:flex;justify-content:flex-end;gap:10px;">
+          <button class="btn btn-outline" id="cancelSingleDelBtn">Cancel</button>
+          <button class="btn btn-danger" id="confirmSingleDelBtn">Delete from Database</button>
+        </div>
+      `, (modalEl) => {
+        modalEl.querySelector('#cancelSingleDelBtn').onclick = closeModal;
+        modalEl.querySelector('#confirmSingleDelBtn').onclick = async () => {
+          const tomb = modalEl.querySelector('#singleDelTombstoneCheck').checked;
+          await apiFetch(`/api/transactions/${txId}?addToTombstone=${tomb}`, { method: 'DELETE' });
+          closeModal();
+          showToast(`Deleted ${tx.transactionType} #${txId} • Backup created`);
+          loadTransactionsTable(mountEl);
+        };
+      });
     };
   });
 }

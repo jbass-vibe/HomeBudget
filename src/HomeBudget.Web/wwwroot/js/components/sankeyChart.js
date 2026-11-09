@@ -8,7 +8,7 @@ import { formatCurrency } from '../app.js';
  *   Col 2: Primary Spending Categories
  *   Col 3 (Optional): Subcategories (strictly for categories with non-null subcategory data)
  */
-export function renderSankeyDiagram(containerEl, sankeyData, totalIncome) {
+export function renderSankeyDiagram(containerEl, sankeyData, totalIncome, onNodeClick = null) {
   containerEl.innerHTML = '';
 
   if (!sankeyData || !sankeyData.nodes || sankeyData.nodes.length === 0 || sankeyData.links.length === 0) {
@@ -178,6 +178,10 @@ export function renderSankeyDiagram(containerEl, sankeyData, totalIncome) {
     const tipHtml = `<strong>${n.name}</strong><br/>${formatCurrency(n.amount)} (${pctIncome}% of Income)`;
     rect.addEventListener('mousemove', e => showTip(e, tipHtml));
     rect.addEventListener('mouseleave', hideTip);
+    if (onNodeClick) {
+      g.style.cursor = 'pointer';
+      g.addEventListener('click', () => onNodeClick(n));
+    }
     rect.addEventListener('touchstart', e => {
       const touch = e.touches[0];
       showTip(touch, tipHtml);

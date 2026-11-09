@@ -54,7 +54,7 @@ export function showToast(message) {
   toast.className = 'toast';
   toast.textContent = message;
   container.appendChild(toast);
-  setTimeout(() => toast.remove(), 3500);
+  setTimeout(() => toast.remove(), 4000);
 }
 
 export function openModal(htmlContent, onMount) {
@@ -82,6 +82,286 @@ export async function refreshReferenceData() {
   ]);
   state.accounts = accounts;
   state.categories = categories;
+}
+
+/**
+ * Unified Categorization & Recategorization Modal (Requirement 1 & 3)
+ * Prompts the user with non-mutually exclusive options:
+ *   a) Categorize similar expenses moving forward (creates/updates rule)
+ *   b) Recategorize similar expenses in the past
+ * Also allows creating a new category inline.
+ */
+export function openCategorizeExpenseModal(tx, onSuccess, preselectedCatId = undefined) {
+  const initialCatId = preselectedCatId !== undefined ? preselectedCatId : (tx.categoryId || state.categories[0]?.categoryId || '');
+  const startInNewCatMode = preselectedCatId === '__NEW__';
+
+  openModal(`
+    <h3 style="margin-top:0;">Categorize Expense</h3>
+    <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:13px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <strong>${tx.cleanMerchantName || tx.rawDescription}</strong>
+        <strong class="${tx.amount < 0 ? 'amount-refund' : 'amount-expense'}">${formatCurrency(tx.amount)}</strong>
+      </div>
+      <div style="font-size:11px;color:#64748B;margin-top:3px;">
+        ${tx.transactionDate} &bull; ${tx.accountName || ''} &bull; Raw: <code>${tx.rawDescription}</code>
+      </div>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+          <label style="font-size:12px;font-weight:700;">1. Select Category</label>
+          <button type="button" class="btn btn-outline btn-sm" id="toggleNewCatInlineBtn">
+            ${startInNewCatMode ? 'Choose Existing Category' : '+ New Category'}
+          </button>
+        </div>
+
+        <div id="existingCatSelectWrap" style="display:${startInNewCatMode ? 'none' : 'block'};">
+          <select id="catModalSelect" class="select-control" style="width:100%;font-size:14px;font-weight:600;">
+            <option value="">-- Uncategorized --</option>
+            ${state.categories.map(c => `
+              <option value="${c.categoryId}" ${String(c.categoryId) === String(initialCatId) ? 'selected' : ''}>
+                ${c.name} (Budget: ${formatCurrency(c.monthlyBudget)})
+              </option>
+            `).join('')}
+          </select>
+        </div>
+
+        <div id="newCatInlineWrap" style="display:${startInNewCatMode ? 'flex' : 'none'};flex-direction:column;gap:8px;background:#EFF6FF;border:1px solid #BFDBFE;padding:12px;border-radius:10px;">
+          <div style="font-size:12px;font-weight:700;color:#1E40AF;">Create New Category (Triggers automatic DB backup)</div>
+          <input type="text" id="inlineNewCatName" class="input-control" placeholder="New Category Name (e.g., Pet Care)" />
+          <div style="display:flex;gap:8px;align-items:center;">
+            <input type="number" step="10" id="inlineNewCatBudget" class="input-control" placeholder="Monthly Budget ($)" value="200" style="flex:1;" />
+            <input type="color" id="inlineNewCatColor" value="#2563EB" style="width:48px;height:36px;border:none;cursor:pointer;" />
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Subcategory (Optional)</label>
+        <input type="text" id="catModalSubcat" class="input-control" style="width:100%;" placeholder="Optional subcategory..." value="${tx.subcategory || ''}" />
+      </div>
+
+      <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:12px;">
+        <div style="font-size:12px;font-weight:700;margin-bottom:8px;">
+          2. Similar Expenses Automation (Check one, both, or neither)
+        </div>
+        <div style="margin-bottom:10px;">
+          <label style="font-size:11px;font-weight:600;color:#64748B;display:block;margin-bottom:4px;">
+            Merchant Match Keyword / Pattern:
+          </label>
+          <input type="text" id="catModalPattern" class="input-control" style="width:100%;" value="${(tx.cleanMerchantName || tx.rawDescription).replace(/"/g, '&quot;')}" />
+        </div>
+
+        <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;font-weight:600;margin-bottom:8px;cursor:pointer;">
+          <input type="checkbox" id="optMovingForward" checked style="margin-top:3px;" />
+          <span>
+            <strong>a) Moving Forward:</strong> Automatically categorize similar expenses matching this pattern in future CSV uploads
+          </span>
+        </label>
+
+        <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;font-weight:600;cursor:pointer;">
+          <input type="checkbox" id="optInThePast" checked style="margin-top:3px;" />
+          <span>
+            <strong>b) In the Past:</strong> Recategorize similar expenses already in the database
+            <span id="pastMatchCountBadge" style="font-size:11px;color:#2563EB;font-weight:700;">(checking...)</span>
+          </span>
+        </label>
+      </div>
+    </div>
+
+    <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px;">
+      <button class="btn btn-outline" id="cancelCatModalBtn">Cancel</button>
+      <button class="btn btn-primary" id="saveCatModalBtn">Save &amp; Apply</button>
+    </div>
+  `, (modalEl) => {
+    let isCreatingNew = startInNewCatMode;
+    const toggleBtn = modalEl.querySelector('#toggleNewCatInlineBtn');
+    const existingWrap = modalEl.querySelector('#existingCatSelectWrap');
+    const newWrap = modalEl.querySelector('#newCatInlineWrap');
+    const patternInput = modalEl.querySelector('#catModalPattern');
+    const badgeEl = modalEl.querySelector('#pastMatchCountBadge');
+
+    const updateSimilarCount = async () => {
+      const p = patternInput.value.trim();
+      if (!p) {
+        badgeEl.textContent = '(0 past matches)';
+        return;
+      }
+      try {
+        const res = await apiFetch(`/api/transactions/similar-count?pattern=${encodeURIComponent(p)}&excludeTransactionId=${tx.transactionId}`);
+        badgeEl.textContent = `(${res.matchingPastCount} similar past expense${res.matchingPastCount === 1 ? '' : 's'} found)`;
+      } catch {
+        badgeEl.textContent = '';
+      }
+    };
+
+    updateSimilarCount();
+    patternInput.oninput = updateSimilarCount;
+
+    toggleBtn.onclick = () => {
+      isCreatingNew = !isCreatingNew;
+      existingWrap.style.display = isCreatingNew ? 'none' : 'block';
+      newWrap.style.display = isCreatingNew ? 'flex' : 'none';
+      toggleBtn.textContent = isCreatingNew ? 'Choose Existing Category' : '+ New Category';
+    };
+
+    modalEl.querySelector('#cancelCatModalBtn').onclick = closeModal;
+    modalEl.querySelector('#saveCatModalBtn').onclick = async () => {
+      const catVal = modalEl.querySelector('#catModalSelect').value;
+      const newCatName = modalEl.querySelector('#inlineNewCatName').value.trim();
+      const newCatBudget = Number(modalEl.querySelector('#inlineNewCatBudget').value || 0);
+      const newCatColor = modalEl.querySelector('#inlineNewCatColor').value;
+
+      if (isCreatingNew && !newCatName) {
+        alert('Please enter a name for the new category.');
+        return;
+      }
+
+      const payload = {
+        categoryId: isCreatingNew ? null : (catVal ? Number(catVal) : null),
+        newCategoryName: isCreatingNew ? newCatName : null,
+        newCategoryMonthlyBudget: isCreatingNew ? newCatBudget : null,
+        newCategoryColorHex: isCreatingNew ? newCatColor : null,
+        newCategoryIsBigBox: false,
+        subcategory: modalEl.querySelector('#catModalSubcat').value.trim() || null,
+        cleanMerchantName: tx.cleanMerchantName,
+        matchPattern: patternInput.value.trim(),
+        applyMovingForward: modalEl.querySelector('#optMovingForward').checked,
+        applyToPast: modalEl.querySelector('#optInThePast').checked,
+        includeManuallyLockedInPast: true
+      };
+
+      const res = await apiFetch(`/api/transactions/${tx.transactionId}/categorize`, {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+
+      await refreshReferenceData();
+      closeModal();
+
+      const parts = ['Expense categorized'];
+      if (res.createdCategory) parts.push(`created "${res.createdCategory.name}"`);
+      if (res.ruleSaved) parts.push('saved forward rule');
+      if (res.pastUpdatedCount > 0) parts.push(`updated ${res.pastUpdatedCount} past expense(s)`);
+      parts.push('DB backed up');
+      showToast(parts.join(' • '));
+
+      if (onSuccess) await onSuccess(res);
+    };
+  });
+}
+
+/**
+ * Reusable Modal for Adding, Editing, or Deleting a Category (Accessible to both User and Admin)
+ */
+export function openCategoryManagerModal(categoryToEdit = null, onSuccess = null) {
+  const isEdit = Boolean(categoryToEdit);
+  const otherCategories = state.categories.filter(c => !isEdit || c.categoryId !== categoryToEdit.categoryId);
+
+  openModal(`
+    <h3 style="margin-top:0;">${isEdit ? `Edit / Delete Category: ${categoryToEdit.name}` : 'Add New Category'}</h3>
+    <p style="font-size:12px;color:#64748B;margin-top:0;">All category changes automatically trigger a local SQLite database backup.</p>
+
+    <div style="display:flex;flex-direction:column;gap:12px;margin:14px 0;">
+      <div>
+        <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Category Name</label>
+        <input type="text" id="mgrCatName" class="input-control" style="width:100%;" value="${isEdit ? categoryToEdit.name.replace(/"/g, '&quot;') : ''}" placeholder="e.g., Childcare, Home Improvement" />
+      </div>
+      <div style="display:flex;gap:10px;">
+        <div style="flex:1;">
+          <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Monthly Budget ($)</label>
+          <input type="number" step="10" min="0" id="mgrCatBudget" class="input-control" style="width:100%;" value="${isEdit ? categoryToEdit.monthlyBudget : 200}" />
+        </div>
+        <div style="width:100px;">
+          <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Sort Order</label>
+          <input type="number" id="mgrCatOrder" class="input-control" style="width:100%;" value="${isEdit ? (categoryToEdit.sortOrder || 100) : 100}" />
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Color</label>
+          <input type="color" id="mgrCatColor" value="${isEdit ? categoryToEdit.colorHex : '#2563EB'}" style="width:52px;height:36px;border:none;cursor:pointer;" />
+        </div>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;">
+        <input type="checkbox" id="mgrCatBigBox" ${isEdit && categoryToEdit.isBigBoxMerchantCategory ? 'checked' : ''} />
+        <span>Big-Box Merchant Category (e.g., Costco, Amazon, Target)</span>
+      </label>
+    </div>
+
+    ${isEdit ? `
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid #FECACA;">
+        <div style="font-size:12px;font-weight:700;color:#DC2626;margin-bottom:6px;">Delete This Category</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+          <select id="mgrDeleteReassign" class="select-control" style="flex:1;">
+            <option value="">Mark existing expenses in this category as Uncategorized</option>
+            ${otherCategories.map(c => `<option value="${c.categoryId}">Move existing expenses to: ${c.name}</option>`).join('')}
+          </select>
+          <button type="button" class="btn btn-danger btn-sm" id="mgrDeleteCatBtn">Delete Category</button>
+        </div>
+      </div>
+    ` : ''}
+
+    <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:18px;">
+      <button class="btn btn-outline" id="mgrCancelBtn">Cancel</button>
+      <button class="btn btn-primary" id="mgrSaveBtn">${isEdit ? 'Save Changes' : 'Create Category'}</button>
+    </div>
+  `, (modalEl) => {
+    modalEl.querySelector('#mgrCancelBtn').onclick = closeModal;
+
+    modalEl.querySelector('#mgrSaveBtn').onclick = async () => {
+      const name = modalEl.querySelector('#mgrCatName').value.trim();
+      if (!name) {
+        alert('Category name is required.');
+        return;
+      }
+      const payload = {
+        name,
+        monthlyBudget: Number(modalEl.querySelector('#mgrCatBudget').value || 0),
+        sortOrder: Number(modalEl.querySelector('#mgrCatOrder').value || 100),
+        colorHex: modalEl.querySelector('#mgrCatColor').value,
+        isBigBoxMerchantCategory: modalEl.querySelector('#mgrCatBigBox').checked
+      };
+
+      if (isEdit) {
+        await apiFetch(`/api/categories/${categoryToEdit.categoryId}`, {
+          method: 'PUT',
+          body: JSON.stringify(payload)
+        });
+        showToast(`Updated category "${name}" (Backup created)`);
+      } else {
+        await apiFetch('/api/categories', {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
+        showToast(`Created category "${name}" (Backup created)`);
+      }
+
+      await refreshReferenceData();
+      closeModal();
+      if (onSuccess) await onSuccess();
+    };
+
+    const delBtn = modalEl.querySelector('#mgrDeleteCatBtn');
+    if (delBtn) {
+      delBtn.onclick = async () => {
+        const repVal = modalEl.querySelector('#mgrDeleteReassign').value;
+        const msg = repVal
+          ? `Delete "${categoryToEdit.name}" and move its expenses to the selected category?`
+          : `Delete "${categoryToEdit.name}" and mark its existing expenses as Uncategorized?`;
+        if (!confirm(msg)) return;
+
+        const q = repVal ? `?replacementCategoryId=${encodeURIComponent(repVal)}` : '';
+        const res = await apiFetch(`/api/categories/${categoryToEdit.categoryId}${q}`, {
+          method: 'DELETE'
+        });
+
+        await refreshReferenceData();
+        closeModal();
+        showToast(`Deleted "${categoryToEdit.name}" (${res.affectedTransactionsCount} expenses updated • Backup created)`);
+        if (onSuccess) await onSuccess();
+      };
+    }
+  });
 }
 
 const viewTitles = {

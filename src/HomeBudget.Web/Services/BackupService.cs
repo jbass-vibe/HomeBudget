@@ -1,4 +1,6 @@
+using Dapper;
 using HomeBudget.Web.Data;
+using HomeBudget.Web.Models;
 
 namespace HomeBudget.Web.Services;
 
@@ -6,90 +8,109 @@ public sealed class BackupService
 {
     private readonly SqliteConnectionFactory _connectionFactory;
     private readonly ILogger<BackupService> _logger;
-    private readonly SemaphoreSlim _backupLock = new(1, 1);
+    private readonly int _maxRetainedBackups;
+    private readonly SemaphoreSlim _mutex = new(1, 1);
     private CancellationTokenSource? _debounceCts;
-    private const int MaxRetainedBackups = 30;
 
     public string BackupDirectoryPath { get; }
 
-    public BackupService(SqliteConnectionFactory connectionFactory, IConfiguration config, ILogger<BackupService> logger)
+    public BackupService(
+        SqliteConnectionFactory connectionFactory,
+        IConfiguration configuration,
+        ILogger<BackupService> logger)
     {
         _connectionFactory = connectionFactory;
         _logger = logger;
-        BackupDirectoryPath = config["BackupDirectoryPath"] ?? @"C:\ProgramData\HomeBudget\Backups";
+        BackupDirectoryPath = configuration["HomeBudget:BackupDirectoryPath"]
+            ?? @"C:\ProgramData\HomeBudget\Backups";
+        _maxRetainedBackups = int.TryParse(configuration["HomeBudget:MaxRetainedBackups"], out int max) ? max : 30;
+
         Directory.CreateDirectory(BackupDirectoryPath);
     }
 
-    public async Task<string> CreateSnapshotImmediateAsync(string reasonTag, CancellationToken ct = default)
+    public async Task<string> CreateSnapshotImmediateAsync(string reason, CancellationToken ct = default)
     {
-        _debounceCts?.Cancel();
-
-        await _backupLock.WaitAsync(ct);
+        await _mutex.WaitAsync(ct);
         try
         {
-            string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
-            string fileName = $"budget_{reasonTag}_{timestamp}.db";
+            Directory.CreateDirectory(BackupDirectoryPath);
+            string safeReason = string.IsNullOrWhiteSpace(reason) ? "snapshot" : reason.Trim().ToLowerInvariant();
+            string timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
+            string fileName = $"budget_{timestamp}_{safeReason}.db";
             string fullPath = Path.Combine(BackupDirectoryPath, fileName);
 
             await using var conn = await _connectionFactory.CreateOpenConnectionAsync(ct);
-            await using var cmd = conn.CreateCommand();
-            cmd.CommandText = $"VACUUM INTO '{fullPath.Replace("'", "''")}';";
-            await cmd.ExecuteNonQueryAsync(ct);
+            string escapedPath = fullPath.Replace("'", "''");
+            await conn.ExecuteAsync($"VACUUM INTO '{escapedPath}';");
 
-            _logger.LogInformation("Created SQLite snapshot: {FileName}", fileName);
             PruneOldBackups();
+            _logger.LogInformation("Created SQLite backup snapshot {FileName}", fileName);
             return fileName;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to create SQLite backup snapshot for reason {Reason}", reason);
+            return "";
         }
         finally
         {
-            _backupLock.Release();
+            _mutex.Release();
         }
     }
 
     public void ScheduleDebouncedRecategorizationSnapshot()
     {
         _debounceCts?.Cancel();
-        _debounceCts = new CancellationTokenSource();
-        var token = _debounceCts.Token;
+        var cts = new CancellationTokenSource();
+        _debounceCts = cts;
 
         _ = Task.Run(async () =>
         {
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(60), token);
-                await CreateSnapshotImmediateAsync("recat", token);
+                await Task.Delay(TimeSpan.FromSeconds(5), cts.Token);
+                await CreateSnapshotImmediateAsync("recat_debounced", cts.Token);
             }
             catch (OperationCanceledException)
             {
-                // Superseded
             }
-        }, token);
+        });
     }
 
-    public IEnumerable<object> ListBackups()
+    public List<BackupFileInfoDto> ListBackups()
     {
+        if (!Directory.Exists(BackupDirectoryPath)) return [];
+
         return new DirectoryInfo(BackupDirectoryPath)
-            .GetFiles("budget_*.db")
+            .GetFiles("*.db")
             .OrderByDescending(f => f.CreationTimeUtc)
-            .Select(f => new
+            .Select(f => new BackupFileInfoDto
             {
-                fileName = f.Name,
-                createdAtUtc = f.CreationTimeUtc,
-                sizeBytes = f.Length
-            });
+                FileName = f.Name,
+                CreatedAtUtc = f.CreationTimeUtc,
+                SizeBytes = f.Length
+            })
+            .ToList();
     }
 
     private void PruneOldBackups()
     {
-        var oldFiles = new DirectoryInfo(BackupDirectoryPath)
-            .GetFiles("budget_*.db")
-            .OrderByDescending(f => f.CreationTimeUtc)
-            .Skip(MaxRetainedBackups)
-            .ToList();
-
-        foreach (var file in oldFiles)
+        try
         {
-            try { file.Delete(); } catch { }
+            var files = new DirectoryInfo(BackupDirectoryPath)
+                .GetFiles("*.db")
+                .OrderByDescending(f => f.CreationTimeUtc)
+                .Skip(_maxRetainedBackups)
+                .ToList();
+
+            foreach (var file in files)
+            {
+                file.Delete();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error pruning old SQLite backups");
         }
     }
 }

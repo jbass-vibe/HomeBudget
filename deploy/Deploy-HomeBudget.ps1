@@ -1,60 +1,53 @@
-#Requires -RunAsAdministrator
-param(
-    [string]$SiteName = "HomeBudget",
-    [int]$Port = 80,
-    [string]$PublishDir = "C:\inetpub\HomeBudget",
-    [string]$DataDir = "C:\ProgramData\HomeBudget",
-    [string]$BackupDir = "C:\ProgramData\HomeBudget\Backups"
-)
+<#
+.SYNOPSIS
+  Provisions the HomeBudget ASP.NET Core (.NET 10) site in Windows 11 IIS on port 8080,
+  sets folder ACLs for C:\ProgramData\HomeBudget, and scopes Windows Firewall to LocalSubnet.
+#>
+$ErrorActionPreference = "Stop"
 
-Write-Host "1. Enabling Windows 11 IIS Features..." -ForegroundColor Cyan
-Enable-WindowsOptionalFeature -Online -FeatureName IIS-WebServerRole, IIS-WebServer, IIS-CommonHttpFeatures, IIS-StaticContent, IIS-DefaultDocument, IIS-HttpErrors, IIS-HealthAndDiagnostics, IIS-HttpLogging, IIS-Security, IIS-RequestFiltering, IIS-Performance, IIS-WebServerManagementTools, IIS-ManagementConsole -All -NoRestart
+$SiteName = "HomeBudget"
+$AppPoolName = "HomeBudget"
+$PublishPath = "C:\inetpub\HomeBudget"
+$DataPath = "C:\ProgramData\HomeBudget"
+$BackupPath = "C:\ProgramData\HomeBudget\Backups"
+$Port = 8080
 
-Write-Host "2. Creating Local Data and Backup Directories..." -ForegroundColor Cyan
-New-Item -ItemType Directory -Force -Path $PublishDir, $DataDir, $BackupDir | Out-Null
+Write-Host "1. Creating data and publish directories..." -ForegroundColor Cyan
+New-Item -ItemType Directory -Force -Path $PublishPath | Out-Null
+New-Item -ItemType Directory -Force -Path $DataPath | Out-Null
+New-Item -ItemType Directory -Force -Path $BackupPath | Out-Null
 
-Write-Host "3. Configuring IIS Application Pool & Site..." -ForegroundColor Cyan
 Import-Module WebAdministration
 
-if (Test-Path "IIS:\Sites\Default Web Site") {
-    Stop-Website -Name "Default Web Site" -ErrorAction SilentlyContinue
+Write-Host "2. Configuring IIS Application Pool ($AppPoolName)..." -ForegroundColor Cyan
+if (-not (Test-Path "IIS:\AppPools\$AppPoolName")) {
+    New-WebAppPool -Name $AppPoolName | Out-Null
 }
+Set-ItemProperty "IIS:\AppPools\$AppPoolName" -Name "managedRuntimeVersion" -Value ""
+Set-ItemProperty "IIS:\AppPools\$AppPoolName" -Name "startMode" -Value "AlwaysRunning"
 
-if (!(Test-Path "IIS:\AppPools\$SiteName")) {
-    New-WebAppPool -Name $SiteName
+Write-Host "3. Configuring IIS Website ($SiteName) on Port $Port..." -ForegroundColor Cyan
+if (Test-Path "IIS:\Sites\$SiteName") {
+    Remove-Website -Name $SiteName
 }
-Set-ItemProperty "IIS:\AppPools\$SiteName" -Name "managedRuntimeVersion" -Value ""
-Set-ItemProperty "IIS:\AppPools\$SiteName" -Name "startMode" -Value "AlwaysRunning"
+New-Website -Name $SiteName -Port $Port -PhysicalPath $PublishPath -ApplicationPool $AppPoolName -Force | Out-Null
 
-if (!(Test-Path "IIS:\Sites\$SiteName")) {
-    New-Website -Name $SiteName -Port $Port -PhysicalPath $PublishDir -ApplicationPool $SiteName
-}
+Write-Host "4. Granting NTFS permissions to IIS AppPool\$AppPoolName..." -ForegroundColor Cyan
+icacls $PublishPath /grant "IIS AppPool\${AppPoolName}:(OI)(CI)RX" /T | Out-Null
+icacls $DataPath /grant "IIS AppPool\${AppPoolName}:(OI)(CI)M" /T | Out-Null
 
-Write-Host "4. Granting Modify Permissions to IIS AppPool Identity on Local Data & Backup Folders..." -ForegroundColor Cyan
-$AppPoolSid = "IIS AppPool\$SiteName"
-$acl = Get-Acl $DataDir
-$rule = New-Object System.Security.AccessControl.FileSystemAccessRule($AppPoolSid, "Modify", "ContainerInherit,ObjectInherit", "None", "Allow")
-$acl.SetAccessRule($rule)
-Set-Acl -Path $DataDir -AclObject $acl
-
-Write-Host "5. Creating Strictly Scoped LAN-Only Windows Defender Firewall Rule..." -ForegroundColor Cyan
-$FirewallRuleName = "HomeBudget-IIS-LAN-Only"
+Write-Host "5. Configuring LAN-Only Windows Defender Firewall Rule on TCP Port $Port..." -ForegroundColor Cyan
+$FirewallRuleName = "HomeBudget-LAN-Port-$Port"
 Remove-NetFirewallRule -DisplayName $FirewallRuleName -ErrorAction SilentlyContinue
-
 New-NetFirewallRule -DisplayName $FirewallRuleName `
     -Direction Inbound `
+    -Action Allow `
     -Protocol TCP `
     -LocalPort $Port `
-    -Action Allow `
     -Profile Private `
-    -RemoteAddress LocalSubnet `
-    -Description "Allows inbound HTTP access to HomeBudget IIS site strictly from devices on the local subnet over Private Wi-Fi/LAN."
+    -RemoteAddress LocalSubnet | Out-Null
 
-$HostName = $env:COMPUTERNAME.ToLower()
-$LocalIp = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -notmatch 'Loopback' -and $_.IPAddress -match '^(192\.168\.|10\.|172\.)' } | Select-Object -First 1).IPAddress
+Start-WebAppPool -Name $AppPoolName -ErrorAction SilentlyContinue
+Start-Website -Name $SiteName -ErrorAction SilentlyContinue
 
-Write-Host "`nDeployment Provisioning Complete!" -ForegroundColor Green
-Write-Host "Local Database:   $DataDir\budget.db"
-Write-Host "Local Backups:    $BackupDir"
-Write-Host "PC Admin URL:     http://localhost:$Port"
-Write-Host "Wife's iPhone URL: http://$HostName.local:$Port  (or http://$LocalIp`:$Port)"
+Write-Host "HomeBudget deployed and active at http://localhost:$Port" -ForegroundColor Green
