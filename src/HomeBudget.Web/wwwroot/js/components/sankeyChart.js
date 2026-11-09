@@ -1,4 +1,4 @@
-import { formatCurrency } from '../app.js';
+import { formatCurrency, escapeHtml } from '../app.js';
 
 /**
  * Renders a multi-column interactive Cashflow Sankey diagram using pure SVG (zero external CDN required).
@@ -148,7 +148,7 @@ export function renderSankeyDiagram(containerEl, sankeyData, totalIncome, onNode
     path.setAttribute('stroke-width', String(l.width));
 
     const pctIncome = totalIncome > 0 ? ((Number(l.value) / totalIncome) * 100).toFixed(1) : '0.0';
-    const tipHtml = `${l.sourceNode.name} &rarr; ${l.targetNode.name}<br/><strong>${formatCurrency(l.value)}</strong> (${pctIncome}% of Income)`;
+    const tipHtml = `${escapeHtml(l.sourceNode.name)} &rarr; ${escapeHtml(l.targetNode.name)}<br/><strong>${formatCurrency(l.value)}</strong> (${pctIncome}% of Income)`;
 
     path.addEventListener('mousemove', e => showTip(e, tipHtml));
     path.addEventListener('mouseleave', hideTip);
@@ -175,7 +175,7 @@ export function renderSankeyDiagram(containerEl, sankeyData, totalIncome, onNode
     rect.setAttribute('fill', n.colorHex || '#3B82F6');
 
     const pctIncome = totalIncome > 0 ? ((Number(n.amount) / totalIncome) * 100).toFixed(1) : '0.0';
-    const tipHtml = `<strong>${n.name}</strong><br/>${formatCurrency(n.amount)} (${pctIncome}% of Income)`;
+    const tipHtml = `<strong>${escapeHtml(n.name)}</strong><br/>${formatCurrency(n.amount)} (${pctIncome}% of Income)`;
     rect.addEventListener('mousemove', e => showTip(e, tipHtml));
     rect.addEventListener('mouseleave', hideTip);
     if (onNodeClick) {

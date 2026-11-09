@@ -15,8 +15,9 @@ public sealed class ParsedCsvRow
     public string RawDescription { get; set; } = "";
     public string CleanMerchantName { get; set; } = "";
     public decimal Amount { get; set; }
-    public string TransactionType { get; set; } = "Expense";
+    public string TransactionType { get; set; } = TransactionTypes.Expense;
     public string BaseDedupHash { get; set; } = "";
+    public bool RequiresManualReview { get; set; }
 }
 
 public sealed class CsvParserService
@@ -81,21 +82,22 @@ public sealed class CsvParserService
 
             bool isPayment = (typeRaw?.Equals("Payment", StringComparison.OrdinalIgnoreCase) == true)
                 || rawDesc.Contains("PAYMENT THANK YOU", StringComparison.OrdinalIgnoreCase)
-                || rawDesc.Contains("AUTOMATIC PAYMENT", StringComparison.OrdinalIgnoreCase);
+                || rawDesc.Contains("AUTOMATIC PAYMENT", StringComparison.OrdinalIgnoreCase)
+                || rawDesc.Contains("ONLINE PAYMENT", StringComparison.OrdinalIgnoreCase);
 
             if (isPayment)
             {
-                txType = "CreditCardPayoff";
+                txType = TransactionTypes.CreditCardPayoff;
                 normalizedAmt = Math.Abs(csvAmt);
             }
             else if (csvAmt < 0m)
             {
-                txType = "Expense";
+                txType = TransactionTypes.Expense;
                 normalizedAmt = Math.Abs(csvAmt);
             }
             else
             {
-                txType = "Refund";
+                txType = TransactionTypes.Refund;
                 normalizedAmt = -Math.Abs(csvAmt);
             }
 
@@ -107,7 +109,8 @@ public sealed class CsvParserService
                 CleanMerchantName = cleanMerchant,
                 Amount = Math.Round(normalizedAmt, 2),
                 TransactionType = txType,
-                BaseDedupHash = ComputeBaseHash(accountId, isoTxDate, rawDesc, normalizedAmt)
+                BaseDedupHash = ComputeBaseHash(accountId, isoTxDate, rawDesc, normalizedAmt),
+                RequiresManualReview = false
             });
         }
 
@@ -145,27 +148,38 @@ public sealed class CsvParserService
 
             string txType;
             decimal normalizedAmt;
+            bool requiresManualReview = false;
 
             bool isCcPayoff = rawDesc.Contains("CHASE CREDIT CRD", StringComparison.OrdinalIgnoreCase)
                 || rawDesc.Contains("CREDIT CARD", StringComparison.OrdinalIgnoreCase)
-                || rawDesc.Contains("EPAY", StringComparison.OrdinalIgnoreCase) && rawDesc.Contains("CHASE", StringComparison.OrdinalIgnoreCase);
+                || (rawDesc.Contains("EPAY", StringComparison.OrdinalIgnoreCase) && rawDesc.Contains("CHASE", StringComparison.OrdinalIgnoreCase));
 
-            bool isGooglePayroll = csvAmt > 0m && !string.IsNullOrWhiteSpace(googlePayrollPattern)
-                && rawDesc.Contains(googlePayrollPattern.Trim(), StringComparison.OrdinalIgnoreCase);
+            bool isVerifiedPayroll = csvAmt > 0m && (
+                (!string.IsNullOrWhiteSpace(googlePayrollPattern) && rawDesc.Contains(googlePayrollPattern.Trim(), StringComparison.OrdinalIgnoreCase))
+                || rawDesc.Contains("DIRECT DEP", StringComparison.OrdinalIgnoreCase)
+                || rawDesc.Contains("PAYROLL", StringComparison.OrdinalIgnoreCase));
 
             if (isCcPayoff)
             {
-                txType = "CreditCardPayoff";
+                txType = TransactionTypes.CreditCardPayoff;
                 normalizedAmt = Math.Abs(csvAmt);
             }
-            else if (isGooglePayroll || csvAmt > 0m)
+            else if (isVerifiedPayroll)
             {
-                txType = "IncomeDeposit";
+                txType = TransactionTypes.IncomeDeposit;
                 normalizedAmt = Math.Abs(csvAmt);
+            }
+            else if (csvAmt > 0m)
+            {
+                // Non-payroll positive checking credit (e.g., merchant refund, Zelle reimbursement, check deposit, or transfer):
+                // Classify as Refund by default and flag for manual review during staging so it does not silently inflate income.
+                txType = TransactionTypes.Refund;
+                normalizedAmt = -Math.Abs(csvAmt);
+                requiresManualReview = true;
             }
             else
             {
-                txType = "Expense";
+                txType = TransactionTypes.Expense;
                 normalizedAmt = Math.Abs(csvAmt);
             }
 
@@ -177,7 +191,8 @@ public sealed class CsvParserService
                 CleanMerchantName = cleanMerchant,
                 Amount = Math.Round(normalizedAmt, 2),
                 TransactionType = txType,
-                BaseDedupHash = ComputeBaseHash(accountId, isoDate, rawDesc, normalizedAmt)
+                BaseDedupHash = ComputeBaseHash(accountId, isoDate, rawDesc, normalizedAmt),
+                RequiresManualReview = requiresManualReview
             });
         }
 
@@ -203,15 +218,23 @@ public sealed class CsvParserService
     {
         if (string.IsNullOrWhiteSpace(raw)) return "Unknown Merchant";
         string cleaned = Regex.Replace(raw.ToUpperInvariant(), @"[#*]\S+", "");
-        cleaned = Regex.Replace(cleaned, @"\d{4,}", "");
+        cleaned = Regex.Replace(cleaned, @" \d{4,} ", "");
         cleaned = Regex.Replace(cleaned, @"\s{2,}", " ").Trim();
         return string.IsNullOrWhiteSpace(cleaned) ? raw.Trim() : cleaned;
     }
 
     public static string ComputeBaseHash(int accountId, string isoDate, string rawDesc, decimal amount)
     {
-        string canonical = $"{accountId}|{isoDate}|{rawDesc.Trim().ToUpperInvariant()}|{amount.ToString("F2", CultureInfo.InvariantCulture)}";
+        string canonical = $"{accountId}|{isoDate}|{rawDesc.Trim().ToUpperInvariant()}|{Math.Abs(amount).ToString("F2", CultureInfo.InvariantCulture)}";
         byte[] bytes = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
         return Convert.ToHexString(bytes)[..24];
+    }
+
+    public static string ExtractBaseHash(string dedupHash)
+    {
+        if (string.IsNullOrWhiteSpace(dedupHash)) return "";
+        int splitIdx = dedupHash.IndexOf("_SPLIT_", StringComparison.OrdinalIgnoreCase);
+        if (splitIdx > 0) return dedupHash[..splitIdx];
+        return dedupHash;
     }
 }

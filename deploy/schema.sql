@@ -12,14 +12,14 @@ CREATE TABLE IF NOT EXISTS Accounts (
 );
 
 CREATE TABLE IF NOT EXISTS Categories (
-    CategoryId              INTEGER PRIMARY KEY AUTOINCREMENT,
-    Name                    TEXT    NOT NULL UNIQUE,
+    CategoryId               INTEGER PRIMARY KEY AUTOINCREMENT,
+    Name                     TEXT    NOT NULL UNIQUE,
     IsBigBoxMerchantCategory INTEGER NOT NULL DEFAULT 0,
-    MonthlyBudget           NUMERIC NOT NULL DEFAULT 0.00,
-    SortOrder               INTEGER NOT NULL DEFAULT 100,
-    ColorHex                TEXT    NOT NULL DEFAULT '#3B82F6',
-    IsActive                INTEGER NOT NULL DEFAULT 1,
-    CreatedAt               TEXT    NOT NULL DEFAULT (datetime('now'))
+    MonthlyBudget            NUMERIC NOT NULL DEFAULT 0.00,
+    SortOrder                INTEGER NOT NULL DEFAULT 100,
+    ColorHex                 TEXT    NOT NULL DEFAULT '#3B82F6',
+    IsActive                 INTEGER NOT NULL DEFAULT 1,
+    CreatedAt                TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS CategorizationRules (
@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS Transactions (
     TransactionType          TEXT    NOT NULL,
     CategoryId               INTEGER NULL,
     Subcategory              TEXT    NULL,
+    CategorizationSource     TEXT    NOT NULL DEFAULT 'Uncategorized',
     IsCategoryManuallyLocked INTEGER NOT NULL DEFAULT 0,
     ParentTransactionId      INTEGER NULL,
     DedupHash                TEXT    NOT NULL,
@@ -60,6 +61,14 @@ CREATE TABLE IF NOT EXISTS DeletedTransactionHashes (
     TransactionDate TEXT NOT NULL,
     Amount          NUMERIC NOT NULL,
     DeletedAt       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS StagingSessions (
+    StagingSessionId TEXT PRIMARY KEY,
+    AccountId        INTEGER NOT NULL,
+    FileNamesJson    TEXT    NOT NULL,
+    CandidatesJson   TEXT    NOT NULL,
+    CreatedAt        TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS Settings (

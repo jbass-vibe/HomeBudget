@@ -9,8 +9,19 @@ public sealed class SqliteConnectionFactory
 
     public SqliteConnectionFactory(IConfiguration configuration)
     {
-        DatabasePath = configuration["HomeBudget:DatabasePath"]
-            ?? @"C:\ProgramData\HomeBudget\budget.db";
+        string? configuredPath = configuration["HomeBudget:DatabasePath"];
+
+        if (string.IsNullOrWhiteSpace(configuredPath)
+            || (!OperatingSystem.IsWindows() && configuredPath.StartsWith(@"C:\", StringComparison.OrdinalIgnoreCase)))
+        {
+            DatabasePath = OperatingSystem.IsWindows()
+                ? @"C:\ProgramData\HomeBudget\budget.db"
+                : Path.Combine(AppContext.BaseDirectory, "data", "budget.db");
+        }
+        else
+        {
+            DatabasePath = configuredPath;
+        }
 
         var dir = Path.GetDirectoryName(DatabasePath);
         if (!string.IsNullOrWhiteSpace(dir))

@@ -2,6 +2,8 @@ import {
   state,
   apiFetch,
   formatCurrency,
+  escapeHtml,
+  formatBackupStatus,
   showToast,
   openModal,
   closeModal,
@@ -26,7 +28,7 @@ export async function renderInspectorView(container) {
     <div class="page-header">
       <div>
         <h1 class="page-title">Transaction Inspector (Income &amp; Expenses)</h1>
-        <p class="page-subtitle">Filter, recategorize with forward/past automation, edit, split, or delete income and expense entries</p>
+        <p class="page-subtitle">Filter, recategorize with forward/past automation, edit fields &amp; notes, split, or delete income and expense entries</p>
       </div>
     </div>
 
@@ -53,17 +55,17 @@ export async function renderInspectorView(container) {
       <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;">
         <div>
           <label style="font-size:11px;font-weight:700;display:block;">Start Date</label>
-          <input type="date" id="fltStart" class="input-control" value="${filterState.startDate}" />
+          <input type="date" id="fltStart" class="input-control" value="${escapeHtml(filterState.startDate)}" />
         </div>
         <div>
           <label style="font-size:11px;font-weight:700;display:block;">End Date</label>
-          <input type="date" id="fltEnd" class="input-control" value="${filterState.endDate}" />
+          <input type="date" id="fltEnd" class="input-control" value="${escapeHtml(filterState.endDate)}" />
         </div>
         <div>
           <label style="font-size:11px;font-weight:700;display:block;">Account</label>
           <select id="fltAccount" class="select-control">
             <option value="">All Accounts</option>
-            ${state.accounts.map(a => `<option value="${a.accountId}" ${String(a.accountId) === filterState.accountId ? 'selected' : ''}>${a.accountName}</option>`).join('')}
+            ${state.accounts.map(a => `<option value="${a.accountId}" ${String(a.accountId) === filterState.accountId ? 'selected' : ''}>${escapeHtml(a.accountName)}</option>`).join('')}
           </select>
         </div>
         <div>
@@ -71,7 +73,7 @@ export async function renderInspectorView(container) {
           <select id="fltCategory" class="select-control">
             <option value="">All Categories</option>
             <option value="uncat" ${filterState.uncategorizedOnly ? 'selected' : ''}>-- Uncategorized Only --</option>
-            ${state.categories.map(c => `<option value="${c.categoryId}" ${!filterState.uncategorizedOnly && String(c.categoryId) === filterState.categoryId ? 'selected' : ''}>${c.name}</option>`).join('')}
+            ${state.categories.map(c => `<option value="${c.categoryId}" ${!filterState.uncategorizedOnly && String(c.categoryId) === filterState.categoryId ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
           </select>
         </div>
         <div>
@@ -86,11 +88,11 @@ export async function renderInspectorView(container) {
         </div>
         <div>
           <label style="font-size:11px;font-weight:700;display:block;">Min $</label>
-          <input type="number" step="1" id="fltMinAmt" class="input-control" style="width:85px;" placeholder="0" value="${filterState.minAmount}" />
+          <input type="number" step="1" id="fltMinAmt" class="input-control" style="width:85px;" placeholder="0" value="${escapeHtml(filterState.minAmount)}" />
         </div>
         <div>
           <label style="font-size:11px;font-weight:700;display:block;">Max $</label>
-          <input type="number" step="1" id="fltMaxAmt" class="input-control" style="width:85px;" placeholder="Any" value="${filterState.maxAmount}" />
+          <input type="number" step="1" id="fltMaxAmt" class="input-control" style="width:85px;" placeholder="Any" value="${escapeHtml(filterState.maxAmount)}" />
         </div>
         <div>
           <label style="font-size:11px;font-weight:700;display:block;">Sort By</label>
@@ -103,8 +105,8 @@ export async function renderInspectorView(container) {
           </select>
         </div>
         <div style="flex:1;min-width:180px;">
-          <label style="font-size:11px;font-weight:700;display:block;">Search Merchant / Raw Description</label>
-          <input type="text" id="fltSearch" class="input-control" style="width:100%;" placeholder="Search merchant, description, notes..." value="${filterState.search}" />
+          <label style="font-size:11px;font-weight:700;display:block;">Search Merchant / Raw Description / Notes</label>
+          <input type="text" id="fltSearch" class="input-control" style="width:100%;" placeholder="Search merchant, description, notes..." value="${escapeHtml(filterState.search)}" />
         </div>
         <button class="btn btn-primary" id="applyFiltersBtn">Apply Filters</button>
         <button class="btn btn-outline" id="resetFiltersBtn">Reset</button>
@@ -220,7 +222,7 @@ async function loadTransactionsTable(mountEl) {
 
   const catOptions = (selectedId) => `
     <option value="">-- Uncategorized --</option>
-    ${state.categories.map(c => `<option value="${c.categoryId}" ${c.categoryId === selectedId ? 'selected' : ''}>${c.name}</option>`).join('')}
+    ${state.categories.map(c => `<option value="${c.categoryId}" ${c.categoryId === selectedId ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
     <option value="__NEW__">+ Add New Category...</option>
   `;
 
@@ -244,26 +246,27 @@ async function loadTransactionsTable(mountEl) {
             <th>Date</th>
             <th>Account</th>
             <th>Merchant / Description</th>
-            <th>Type (Income / Expense)</th>
+            <th>Type</th>
             <th>Amount ($)</th>
-            <th>Category</th>
+            <th>Category &amp; Source</th>
             <th>Subcategory</th>
+            <th>Notes</th>
             <th>Actions</th>
           </tr>
         </thead>
         <tbody>
           ${data.items.length === 0 ? `
-            <tr><td colspan="9" style="text-align:center;color:#64748B;">No matching income or expense transactions found.</td></tr>
+            <tr><td colspan="10" style="text-align:center;color:#64748B;">No matching income or expense transactions found.</td></tr>
           ` : data.items.map(tx => `
             <tr data-tx-id="${tx.transactionId}">
               <td><input type="checkbox" class="tx-row-check" value="${tx.transactionId}" /></td>
               <td>
-                <input type="date" class="input-control tx-date" value="${tx.transactionDate}" style="width:132px;" />
+                <input type="date" class="input-control tx-date" value="${escapeHtml(tx.transactionDate)}" style="width:132px;" />
               </td>
-              <td>${tx.accountName}</td>
+              <td>${escapeHtml(tx.accountName)}</td>
               <td>
-                <input type="text" class="input-control tx-merchant" value="${tx.cleanMerchantName.replace(/"/g, '&quot;')}" style="width:175px;" />
-                <div style="font-size:11px;color:#64748B;">${tx.rawDescription}</div>
+                <input type="text" class="input-control tx-merchant" value="${escapeHtml(tx.cleanMerchantName)}" style="width:165px;" />
+                <div style="font-size:11px;color:#64748B;">${escapeHtml(tx.rawDescription)}</div>
               </td>
               <td>
                 <select class="select-control tx-type">
@@ -274,15 +277,21 @@ async function loadTransactionsTable(mountEl) {
                 </select>
               </td>
               <td>
-                <input type="number" step="0.01" class="input-control tx-amount" value="${tx.amount}" style="width:100px;font-weight:700;" />
+                <input type="number" step="0.01" class="input-control tx-amount" value="${tx.amount}" style="width:95px;font-weight:700;" />
               </td>
               <td>
                 <select class="select-control tx-cat" data-orig-cat="${tx.categoryId || ''}">
                   ${catOptions(tx.categoryId)}
                 </select>
+                <div style="font-size:10px;color:#64748B;margin-top:2px;">
+                  ${tx.isCategoryManuallyLocked ? '&#128274; Manual' : (tx.categorizationSource === 'Rule' ? '&#9889; Rule' : 'Uncategorized')}
+                </div>
               </td>
               <td>
-                <input type="text" class="input-control tx-subcat" value="${tx.subcategory || ''}" placeholder="None" style="width:105px;" />
+                <input type="text" class="input-control tx-subcat" value="${escapeHtml(tx.subcategory || '')}" placeholder="None" style="width:95px;" />
+              </td>
+              <td>
+                <input type="text" class="input-control tx-notes" value="${escapeHtml(tx.notes || '')}" placeholder="Add note..." style="width:130px;" />
               </td>
               <td style="white-space:nowrap;">
                 <button class="btn btn-primary btn-sm tx-save-btn" title="Save field edits">Save</button>
@@ -342,7 +351,7 @@ async function loadTransactionsTable(mountEl) {
           body: JSON.stringify({ transactionIds: selectedIds, addToTombstone })
         });
         closeModal();
-        showToast(`Deleted ${res.deletedCount} transaction(s) • Backup created`);
+        showToast(`Deleted ${res.deletedCount} transaction(s) • ${formatBackupStatus(res.backupFileCreated)}`);
         loadTransactionsTable(mountEl);
       };
     });
@@ -379,8 +388,9 @@ async function loadTransactionsTable(mountEl) {
       const amount = Number(tr.querySelector('.tx-amount').value || 0);
       const catVal = tr.querySelector('.tx-cat').value;
       const subcategory = tr.querySelector('.tx-subcat').value.trim();
+      const notes = tr.querySelector('.tx-notes').value.trim();
 
-      await apiFetch(`/api/transactions/${txId}`, {
+      const res = await apiFetch(`/api/transactions/${txId}`, {
         method: 'PUT',
         body: JSON.stringify({
           transactionDate,
@@ -389,10 +399,11 @@ async function loadTransactionsTable(mountEl) {
           clearCategory: !catVal,
           subcategory,
           cleanMerchantName,
-          transactionType
+          transactionType,
+          notes
         })
       });
-      showToast(`Saved transaction #${txId} (Backup created)`);
+      showToast(`Saved transaction #${txId} (${formatBackupStatus(res?.backupFileCreated)})`);
       loadTransactionsTable(mountEl);
     };
   });
@@ -407,15 +418,16 @@ async function loadTransactionsTable(mountEl) {
 
       openModal(`
         <h3 style="margin-top:0;">Split Transaction (${formatCurrency(tx.amount)})</h3>
-        <p style="font-size:13px;color:#64748B;">${tx.transactionDate} &bull; ${tx.rawDescription}</p>
+        <p style="font-size:13px;color:#64748B;">${escapeHtml(tx.transactionDate)} &bull; ${escapeHtml(tx.rawDescription)}</p>
         <div id="splitRowsContainer" style="display:flex;flex-direction:column;gap:10px;margin:14px 0;">
           ${[half1, half2].map((amt, i) => `
-            <div class="split-item-row" style="display:flex;gap:8px;align-items:center;">
-              <input type="number" step="0.01" class="input-control split-amt" value="${amt}" style="width:100px;" />
-              <select class="select-control split-cat" style="flex:1;">
-                ${state.categories.map(c => `<option value="${c.categoryId}" ${c.categoryId === tx.categoryId ? 'selected' : ''}>${c.name}</option>`).join('')}
+            <div class="split-item-row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+              <input type="number" step="0.01" class="input-control split-amt" value="${amt}" style="width:95px;" />
+              <select class="select-control split-cat" style="flex:1;min-width:140px;">
+                ${state.categories.map(c => `<option value="${c.categoryId}" ${c.categoryId === tx.categoryId ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
               </select>
-              <input type="text" class="input-control split-sub" placeholder="Subcategory ${i + 1}" style="width:130px;" />
+              <input type="text" class="input-control split-sub" placeholder="Subcategory ${i + 1}" style="width:115px;" />
+              <input type="text" class="input-control split-notes" placeholder="Note (opt)" value="${escapeHtml(tx.notes || '')}" style="width:130px;" />
             </div>
           `).join('')}
         </div>
@@ -431,13 +443,14 @@ async function loadTransactionsTable(mountEl) {
         modalEl.querySelector('#addSplitLegBtn').onclick = () => {
           const row = document.createElement('div');
           row.className = 'split-item-row';
-          row.style.cssText = 'display:flex;gap:8px;align-items:center;';
+          row.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;';
           row.innerHTML = `
-            <input type="number" step="0.01" class="input-control split-amt" value="0.00" style="width:100px;" />
-            <select class="select-control split-cat" style="flex:1;">
-              ${state.categories.map(c => `<option value="${c.categoryId}">${c.name}</option>`).join('')}
+            <input type="number" step="0.01" class="input-control split-amt" value="0.00" style="width:95px;" />
+            <select class="select-control split-cat" style="flex:1;min-width:140px;">
+              ${state.categories.map(c => `<option value="${c.categoryId}">${escapeHtml(c.name)}</option>`).join('')}
             </select>
-            <input type="text" class="input-control split-sub" placeholder="Subcategory" style="width:130px;" />
+            <input type="text" class="input-control split-sub" placeholder="Subcategory" style="width:115px;" />
+            <input type="text" class="input-control split-notes" placeholder="Note (opt)" style="width:130px;" />
           `;
           modalEl.querySelector('#splitRowsContainer').appendChild(row);
         };
@@ -448,7 +461,8 @@ async function loadTransactionsTable(mountEl) {
             splits.push({
               amount: Number(r.querySelector('.split-amt').value || 0),
               categoryId: Number(r.querySelector('.split-cat').value),
-              subcategory: r.querySelector('.split-sub').value.trim() || null
+              subcategory: r.querySelector('.split-sub').value.trim() || null,
+              notes: r.querySelector('.split-notes').value.trim() || null
             });
           });
 
@@ -478,9 +492,9 @@ async function loadTransactionsTable(mountEl) {
       openModal(`
         <h3 style="margin-top:0;color:#DC2626;">Delete ${tx.transactionType === 'IncomeDeposit' ? 'Income Deposit' : 'Expense'}?</h3>
         <div style="background:#FEF2F2;border:1px solid #FECACA;border-radius:10px;padding:12px;font-size:13px;margin-bottom:12px;">
-          <div><strong>${tx.cleanMerchantName}</strong> (${tx.transactionType})</div>
-          <div>Date: ${tx.transactionDate} &bull; Amount: <strong>${formatCurrency(tx.amount)}</strong></div>
-          <div style="font-size:11px;color:#64748B;">Raw: ${tx.rawDescription}</div>
+          <div><strong>${escapeHtml(tx.cleanMerchantName)}</strong> (${escapeHtml(tx.transactionType)})</div>
+          <div>Date: ${escapeHtml(tx.transactionDate)} &bull; Amount: <strong>${formatCurrency(tx.amount)}</strong></div>
+          <div style="font-size:11px;color:#64748B;">Raw: ${escapeHtml(tx.rawDescription)}</div>
         </div>
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;margin:14px 0;">
           <input type="checkbox" id="singleDelTombstoneCheck" checked />
@@ -496,7 +510,7 @@ async function loadTransactionsTable(mountEl) {
           const tomb = modalEl.querySelector('#singleDelTombstoneCheck').checked;
           await apiFetch(`/api/transactions/${txId}?addToTombstone=${tomb}`, { method: 'DELETE' });
           closeModal();
-          showToast(`Deleted ${tx.transactionType} #${txId} • Backup created`);
+          showToast(`Deleted ${tx.transactionType} #${txId}`);
           loadTransactionsTable(mountEl);
         };
       });

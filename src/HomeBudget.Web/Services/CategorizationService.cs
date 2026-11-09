@@ -15,13 +15,15 @@ public sealed class CategorizationService(
         var categories = await conn.QueryAsync<Category>(
             "SELECT * FROM Categories WHERE IsActive = 1 ORDER BY SortOrder ASC, Name ASC;");
         var rules = await conn.QueryAsync<CategorizationRule>(
-            "SELECT * FROM CategorizationRules ORDER BY Priority ASC, RuleId ASC;");
+            "SELECT * FROM CategorizationRules ORDER BY Priority ASC, LENGTH(MatchPattern) DESC, RuleId ASC;");
 
         return new { categories, rules };
     }
 
     public async Task<Category> CreateCategoryAsync(UpsertCategoryRequest req, CancellationToken ct = default)
     {
+        ValidateCategoryRequest(req);
+
         await using var conn = await connectionFactory.CreateOpenConnectionAsync(ct);
         int id = await conn.ExecuteScalarAsync<int>(
             """
@@ -33,9 +35,9 @@ public sealed class CategorizationService(
             {
                 Name = req.Name.Trim(),
                 IsBigBoxMerchantCategory = req.IsBigBoxMerchantCategory ? 1 : 0,
-                req.MonthlyBudget,
+                MonthlyBudget = Math.Max(0m, req.MonthlyBudget),
                 req.SortOrder,
-                req.ColorHex
+                ColorHex = string.IsNullOrWhiteSpace(req.ColorHex) ? "#3B82F6" : req.ColorHex.Trim()
             });
 
         var created = await conn.QuerySingleAsync<Category>(
@@ -47,6 +49,8 @@ public sealed class CategorizationService(
 
     public async Task<Category?> UpdateCategoryAsync(int categoryId, UpsertCategoryRequest req, CancellationToken ct = default)
     {
+        ValidateCategoryRequest(req);
+
         await using var conn = await connectionFactory.CreateOpenConnectionAsync(ct);
         int rows = await conn.ExecuteAsync(
             """
@@ -63,9 +67,9 @@ public sealed class CategorizationService(
                 CategoryId = categoryId,
                 Name = req.Name.Trim(),
                 IsBigBoxMerchantCategory = req.IsBigBoxMerchantCategory ? 1 : 0,
-                req.MonthlyBudget,
+                MonthlyBudget = Math.Max(0m, req.MonthlyBudget),
                 req.SortOrder,
-                req.ColorHex
+                ColorHex = string.IsNullOrWhiteSpace(req.ColorHex) ? "#3B82F6" : req.ColorHex.Trim()
             });
 
         if (rows == 0) return null;
@@ -90,6 +94,15 @@ public sealed class CategorizationService(
 
         if (replacementCategoryId.HasValue && replacementCategoryId.Value != categoryId)
         {
+            var targetExists = await conn.ExecuteScalarAsync<int>(
+                "SELECT COUNT(*) FROM Categories WHERE CategoryId = @TargetId;",
+                new { TargetId = replacementCategoryId.Value },
+                tx);
+            if (targetExists == 0)
+            {
+                throw new InvalidOperationException($"Replacement category {replacementCategoryId.Value} does not exist.");
+            }
+
             affectedTransactions = await conn.ExecuteAsync(
                 "UPDATE Transactions SET CategoryId = @TargetId WHERE CategoryId = @SourceId;",
                 new { SourceId = categoryId, TargetId = replacementCategoryId.Value },
@@ -103,7 +116,13 @@ public sealed class CategorizationService(
         else
         {
             affectedTransactions = await conn.ExecuteAsync(
-                "UPDATE Transactions SET CategoryId = NULL, IsCategoryManuallyLocked = 0 WHERE CategoryId = @SourceId;",
+                """
+                UPDATE Transactions
+                SET CategoryId = NULL,
+                    CategorizationSource = 'Uncategorized',
+                    IsCategoryManuallyLocked = 0
+                WHERE CategoryId = @SourceId;
+                """,
                 new { SourceId = categoryId },
                 tx);
 
@@ -120,7 +139,7 @@ public sealed class CategorizationService(
 
         await tx.CommitAsync(ct);
 
-        string backupFile = await backupService.CreateSnapshotImmediateAsync("category_delete", ct);
+        string? backupFile = await backupService.CreateSnapshotImmediateAsync("category_delete", ct);
 
         return new
         {
@@ -159,7 +178,7 @@ public sealed class CategorizationService(
 
         await tx.CommitAsync(ct);
 
-        string backupFile = await backupService.CreateSnapshotImmediateAsync("category_merge", ct);
+        string? backupFile = await backupService.CreateSnapshotImmediateAsync("category_merge", ct);
 
         return new
         {
@@ -240,7 +259,7 @@ public sealed class CategorizationService(
                     {
                         Name = newName,
                         IsBigBox = req.NewCategoryIsBigBox ? 1 : 0,
-                        Budget = req.NewCategoryMonthlyBudget ?? 200m,
+                        Budget = Math.Max(0m, req.NewCategoryMonthlyBudget ?? 200m),
                         ColorHex = string.IsNullOrWhiteSpace(req.NewCategoryColorHex) ? "#3B82F6" : req.NewCategoryColorHex.Trim()
                     },
                     dbTx);
@@ -253,6 +272,17 @@ public sealed class CategorizationService(
                 targetCategoryId = newCatId;
             }
         }
+        else if (targetCategoryId.HasValue)
+        {
+            int catExists = await conn.ExecuteScalarAsync<int>(
+                "SELECT COUNT(*) FROM Categories WHERE CategoryId = @CatId;",
+                new { CatId = targetCategoryId.Value },
+                dbTx);
+            if (catExists == 0)
+            {
+                throw new InvalidOperationException($"Category {targetCategoryId.Value} does not exist.");
+            }
+        }
 
         string? cleanSubcat = req.Subcategory is not null
             ? (string.IsNullOrWhiteSpace(req.Subcategory) ? null : req.Subcategory.Trim())
@@ -262,12 +292,15 @@ public sealed class CategorizationService(
             ? req.CleanMerchantName.Trim()
             : existing.CleanMerchantName;
 
+        string targetSource = targetCategoryId.HasValue ? "Manual" : "Uncategorized";
+
         await conn.ExecuteAsync(
             """
             UPDATE Transactions
             SET CategoryId = @CategoryId,
                 Subcategory = @Subcategory,
                 CleanMerchantName = @CleanMerchantName,
+                CategorizationSource = @CategorizationSource,
                 IsCategoryManuallyLocked = @IsLocked
             WHERE TransactionId = @TransactionId;
             """,
@@ -277,6 +310,7 @@ public sealed class CategorizationService(
                 CategoryId = targetCategoryId,
                 Subcategory = cleanSubcat,
                 CleanMerchantName = cleanMerchant,
+                CategorizationSource = targetSource,
                 IsLocked = targetCategoryId.HasValue ? 1 : 0
             },
             dbTx);
@@ -332,11 +366,13 @@ public sealed class CategorizationService(
         if (req.ApplyToPast && !string.IsNullOrWhiteSpace(matchPattern))
         {
             string lockFilter = req.IncludeManuallyLockedInPast ? "" : "AND IsCategoryManuallyLocked = 0";
+            string pastSource = targetCategoryId.HasValue ? "Rule" : "Uncategorized";
             pastUpdatedCount = await conn.ExecuteAsync(
                 $"""
                 UPDATE Transactions
                 SET CategoryId = @CategoryId,
-                    Subcategory = COALESCE(@Subcategory, Subcategory)
+                    Subcategory = COALESCE(@Subcategory, Subcategory),
+                    CategorizationSource = @PastSource
                 WHERE TransactionId != @CurrentId
                   AND TransactionType IN ('Expense', 'Refund')
                   AND (CleanMerchantName LIKE @LikePattern OR RawDescription LIKE @LikePattern)
@@ -346,6 +382,7 @@ public sealed class CategorizationService(
                 {
                     CategoryId = targetCategoryId,
                     Subcategory = cleanSubcat,
+                    PastSource = pastSource,
                     CurrentId = transactionId,
                     LikePattern = $"%{matchPattern}%"
                 },
@@ -354,7 +391,7 @@ public sealed class CategorizationService(
 
         await dbTx.CommitAsync(ct);
 
-        string backupFile = await backupService.CreateSnapshotImmediateAsync("recategorize", ct);
+        string? backupFile = await backupService.CreateSnapshotImmediateAsync("recategorize", ct);
 
         var updatedTx = await conn.QuerySingleAsync<TransactionDto>(
             """
@@ -378,7 +415,11 @@ public sealed class CategorizationService(
 
     public async Task<CategorizationRule> CreateRuleAsync(UpsertRuleRequest req, CancellationToken ct = default)
     {
+        ValidateRuleRequest(req);
+
         await using var conn = await connectionFactory.CreateOpenConnectionAsync(ct);
+        await EnsureCategoryExistsAsync(conn, req.CategoryId);
+
         int id = await conn.ExecuteScalarAsync<int>(
             """
             INSERT INTO CategorizationRules (MatchPattern, IsRegex, CategoryId, DefaultSubcategory, Priority)
@@ -400,7 +441,11 @@ public sealed class CategorizationService(
 
     public async Task<CategorizationRule?> UpdateRuleAsync(int ruleId, UpsertRuleRequest req, CancellationToken ct = default)
     {
+        ValidateRuleRequest(req);
+
         await using var conn = await connectionFactory.CreateOpenConnectionAsync(ct);
+        await EnsureCategoryExistsAsync(conn, req.CategoryId);
+
         int rows = await conn.ExecuteAsync(
             """
             UPDATE CategorizationRules
@@ -446,7 +491,7 @@ public sealed class CategorizationService(
             .ToDictionary(c => c.CategoryId, c => c.Name);
 
         var rules = (await conn.QueryAsync<CategorizationRule>(
-            "SELECT * FROM CategorizationRules ORDER BY Priority ASC, RuleId ASC;")).ToList();
+            "SELECT * FROM CategorizationRules ORDER BY Priority ASC, LENGTH(MatchPattern) DESC, RuleId ASC;")).ToList();
 
         string sql = request.IncludeManuallyLocked
             ? "SELECT * FROM Transactions WHERE TransactionType IN ('Expense', 'Refund') ORDER BY TransactionDate DESC;"
@@ -460,7 +505,7 @@ public sealed class CategorizationService(
             foreach (var rule in rules)
             {
                 bool matched = rule.IsRegex
-                    ? Regex.IsMatch(tx.RawDescription, rule.MatchPattern, RegexOptions.IgnoreCase)
+                    ? SafeRegexIsMatch(tx.RawDescription, rule.MatchPattern)
                     : tx.RawDescription.Contains(rule.MatchPattern, StringComparison.OrdinalIgnoreCase)
                       || tx.CleanMerchantName.Contains(rule.MatchPattern, StringComparison.OrdinalIgnoreCase);
 
@@ -509,6 +554,7 @@ public sealed class CategorizationService(
                     UPDATE Transactions
                     SET CategoryId = @NewCategoryId,
                         Subcategory = @NewSubcategory,
+                        CategorizationSource = 'Rule',
                         IsCategoryManuallyLocked = 0
                     WHERE TransactionId = @TransactionId;
                     """,
@@ -539,6 +585,11 @@ public sealed class CategorizationService(
         if (existing is null) return null;
 
         int? newCatId = req.ClearCategory ? null : (req.CategoryId ?? existing.CategoryId);
+        if (newCatId.HasValue)
+        {
+            await EnsureCategoryExistsAsync(conn, newCatId.Value);
+        }
+
         string? newSubcat = req.Subcategory is not null
             ? (string.IsNullOrWhiteSpace(req.Subcategory) ? null : req.Subcategory.Trim())
             : existing.Subcategory;
@@ -546,15 +597,25 @@ public sealed class CategorizationService(
             ? req.CleanMerchantName.Trim()
             : existing.CleanMerchantName;
         string newTxType = !string.IsNullOrWhiteSpace(req.TransactionType)
-            ? req.TransactionType.Trim()
+            ? TransactionTypes.Normalize(req.TransactionType)
             : existing.TransactionType;
+
+        if (!TransactionTypes.IsValid(newTxType))
+        {
+            throw new InvalidOperationException($"Unsupported TransactionType '{req.TransactionType}'.");
+        }
+
         string newTxDate = !string.IsNullOrWhiteSpace(req.TransactionDate)
             ? req.TransactionDate.Trim()
             : existing.TransactionDate;
         decimal newAmount = req.Amount ?? existing.Amount;
         bool newLocked = req.IsCategoryManuallyLocked ?? (newCatId.HasValue || existing.IsCategoryManuallyLocked);
-        string? newNotes = req.Notes ?? existing.Notes;
+        string newSource = newCatId.HasValue ? (newLocked ? "Manual" : "Rule") : "Uncategorized";
+        string? newNotes = req.Notes is not null
+            ? (string.IsNullOrWhiteSpace(req.Notes) ? null : req.Notes.Trim())
+            : existing.Notes;
 
+        // DedupHash is intentionally preserved as immutable import provenance
         await conn.ExecuteAsync(
             """
             UPDATE Transactions
@@ -564,6 +625,7 @@ public sealed class CategorizationService(
                 Subcategory = @Subcategory,
                 CleanMerchantName = @CleanMerchantName,
                 TransactionType = @TransactionType,
+                CategorizationSource = @CategorizationSource,
                 IsCategoryManuallyLocked = @IsLocked,
                 Notes = @Notes
             WHERE TransactionId = @TransactionId;
@@ -577,6 +639,7 @@ public sealed class CategorizationService(
                 Subcategory = newSubcat,
                 CleanMerchantName = newCleanName,
                 TransactionType = newTxType,
+                CategorizationSource = newSource,
                 IsLocked = newLocked ? 1 : 0,
                 Notes = newNotes
             });
@@ -604,7 +667,7 @@ public sealed class CategorizationService(
             }
         }
 
-        string backupFile = await backupService.CreateSnapshotImmediateAsync("data_edit", ct);
+        string? backupFile = await backupService.CreateSnapshotImmediateAsync("data_edit", ct);
 
         var updated = await conn.QuerySingleAsync<TransactionDto>(
             """
@@ -641,24 +704,27 @@ public sealed class CategorizationService(
                 $"Split amounts ({splitSum:F2}) must equal the original transaction amount ({parent.Amount:F2}).");
         }
 
+        string baseHash = CsvParserService.ExtractBaseHash(parent.DedupHash);
+
         await using var tx = await conn.BeginTransactionAsync(ct);
 
         var createdIds = new List<int>();
         for (int i = 0; i < req.Splits.Count; i++)
         {
             var split = req.Splits[i];
-            string childHash = i == 0 ? parent.DedupHash : $"{parent.DedupHash}_SPLIT_{i + 1}";
+            string childHash = i == 0 ? baseHash : $"{baseHash}_SPLIT_{i + 1}";
+            string catSource = split.CategoryId.HasValue ? "Manual" : "Uncategorized";
 
             int childId = await conn.ExecuteScalarAsync<int>(
                 """
                 INSERT INTO Transactions (
                     AccountId, TransactionDate, PostDate, RawDescription, CleanMerchantName,
-                    Amount, TransactionType, CategoryId, Subcategory, IsCategoryManuallyLocked,
-                    ParentTransactionId, DedupHash, UploadBatchId, Notes
+                    Amount, TransactionType, CategoryId, Subcategory, CategorizationSource,
+                    IsCategoryManuallyLocked, ParentTransactionId, DedupHash, UploadBatchId, Notes
                 ) VALUES (
                     @AccountId, @TransactionDate, @PostDate, @RawDescription, @CleanMerchantName,
-                    @Amount, @TransactionType, @CategoryId, @Subcategory, 1,
-                    NULL, @DedupHash, @UploadBatchId, @Notes
+                    @Amount, @TransactionType, @CategoryId, @Subcategory, @CategorizationSource,
+                    1, @ParentTransactionId, @DedupHash, @UploadBatchId, @Notes
                 );
                 SELECT last_insert_rowid();
                 """,
@@ -673,9 +739,11 @@ public sealed class CategorizationService(
                     parent.TransactionType,
                     split.CategoryId,
                     Subcategory = string.IsNullOrWhiteSpace(split.Subcategory) ? null : split.Subcategory.Trim(),
+                    CategorizationSource = catSource,
+                    ParentTransactionId = parent.ParentTransactionId ?? parent.TransactionId,
                     DedupHash = childHash,
                     parent.UploadBatchId,
-                    Notes = split.Notes
+                    Notes = string.IsNullOrWhiteSpace(split.Notes) ? parent.Notes : split.Notes.Trim()
                 },
                 tx);
 
@@ -699,5 +767,59 @@ public sealed class CategorizationService(
             new { Ids = createdIds });
 
         return rows.ToList();
+    }
+
+    private static void ValidateCategoryRequest(UpsertCategoryRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.Name))
+        {
+            throw new InvalidOperationException("Category name is required.");
+        }
+        if (req.MonthlyBudget < 0m)
+        {
+            throw new InvalidOperationException("Monthly budget cannot be negative.");
+        }
+    }
+
+    private static void ValidateRuleRequest(UpsertRuleRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.MatchPattern))
+        {
+            throw new InvalidOperationException("Rule match pattern is required.");
+        }
+        if (req.IsRegex)
+        {
+            try
+            {
+                _ = new Regex(req.MatchPattern.Trim(), RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(250));
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException($"Invalid regular expression pattern: {ex.Message}");
+            }
+        }
+    }
+
+    private static async Task EnsureCategoryExistsAsync(System.Data.Common.DbConnection conn, int categoryId)
+    {
+        int count = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM Categories WHERE CategoryId = @CategoryId;",
+            new { CategoryId = categoryId });
+        if (count == 0)
+        {
+            throw new InvalidOperationException($"Category {categoryId} does not exist.");
+        }
+    }
+
+    private static bool SafeRegexIsMatch(string input, string pattern)
+    {
+        try
+        {
+            return Regex.IsMatch(input, pattern, RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(250));
+        }
+        catch
+        {
+            return false;
+        }
     }
 }

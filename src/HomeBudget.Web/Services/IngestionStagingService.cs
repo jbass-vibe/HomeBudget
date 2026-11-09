@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Dapper;
 using HomeBudget.Web.Data;
@@ -11,8 +11,6 @@ public sealed class IngestionStagingService(
     CsvParserService csvParser,
     BackupService backupService)
 {
-    private readonly ConcurrentDictionary<string, StagingSessionDto> _sessions = new();
-
     public async Task<StagingSessionDto> StageFilesAsync(
         int accountId,
         IFormFileCollection files,
@@ -28,7 +26,7 @@ public sealed class IngestionStagingService(
             "SELECT Value FROM Settings WHERE Key = 'GooglePayrollMatchPattern';") ?? "GOOGLE";
 
         var rules = (await conn.QueryAsync<CategorizationRule>(
-            "SELECT * FROM CategorizationRules ORDER BY Priority ASC, RuleId ASC;")).ToList();
+            "SELECT * FROM CategorizationRules ORDER BY Priority ASC, LENGTH(MatchPattern) DESC, RuleId ASC;")).ToList();
 
         var existingHashes = (await conn.QueryAsync<string>(
             "SELECT DedupHash FROM Transactions WHERE AccountId = @AccountId;",
@@ -81,14 +79,14 @@ public sealed class IngestionStagingService(
 
                 int? matchedCategoryId = null;
                 string? matchedSubcat = null;
-                bool requiresManualReview = false;
+                bool requiresManualReview = row.RequiresManualReview;
 
-                if (row.TransactionType is "Expense" or "Refund")
+                if (row.TransactionType is TransactionTypes.Expense or TransactionTypes.Refund)
                 {
                     foreach (var rule in rules)
                     {
                         bool isMatch = rule.IsRegex
-                            ? Regex.IsMatch(row.RawDescription, rule.MatchPattern, RegexOptions.IgnoreCase)
+                            ? SafeRegexIsMatch(row.RawDescription, rule.MatchPattern)
                             : row.RawDescription.Contains(rule.MatchPattern, StringComparison.OrdinalIgnoreCase)
                               || row.CleanMerchantName.Contains(rule.MatchPattern, StringComparison.OrdinalIgnoreCase);
 
@@ -124,17 +122,34 @@ public sealed class IngestionStagingService(
             }
         }
 
-        _sessions[session.StagingSessionId] = session;
+        // Persist staging session in SQLite so app pool recycles or restarts do not lose staged state
+        await conn.ExecuteAsync(
+            """
+            DELETE FROM StagingSessions WHERE CreatedAt < datetime('now', '-1 day');
+            INSERT INTO StagingSessions (StagingSessionId, AccountId, FileNamesJson, CandidatesJson, CreatedAt)
+            VALUES (@StagingSessionId, @AccountId, @FileNamesJson, @CandidatesJson, datetime('now'));
+            """,
+            new
+            {
+                session.StagingSessionId,
+                session.AccountId,
+                FileNamesJson = JsonSerializer.Serialize(session.FileNames),
+                CandidatesJson = JsonSerializer.Serialize(session.Candidates)
+            });
+
         return session;
     }
 
     public async Task<object> CommitSessionAsync(CommitStagingRequest request, CancellationToken ct = default)
     {
-        if (!_sessions.TryRemove(request.StagingSessionId, out var session))
-        {
-            throw new InvalidOperationException("Staging session not found or already committed.");
-        }
+        await using var conn = await connectionFactory.CreateOpenConnectionAsync(ct);
 
+        var sessionRow = await conn.QuerySingleOrDefaultAsync<StagingSessionEntity>(
+            "SELECT * FROM StagingSessions WHERE StagingSessionId = @Id;",
+            new { Id = request.StagingSessionId })
+            ?? throw new InvalidOperationException("Staging session not found or already committed.");
+
+        var candidates = JsonSerializer.Deserialize<List<StagingCandidateDto>>(sessionRow.CandidatesJson) ?? [];
         var decisionMap = request.Decisions.ToDictionary(d => d.RowId, StringComparer.OrdinalIgnoreCase);
         string batchId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
 
@@ -142,10 +157,9 @@ public sealed class IngestionStagingService(
         int skippedCount = 0;
         int tombstonedCount = 0;
 
-        await using var conn = await connectionFactory.CreateOpenConnectionAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
 
-        foreach (var candidate in session.Candidates)
+        foreach (var candidate in candidates)
         {
             if (!decisionMap.TryGetValue(candidate.RowId, out var decision))
             {
@@ -175,36 +189,47 @@ public sealed class IngestionStagingService(
             string cleanName = !string.IsNullOrWhiteSpace(decision.CleanMerchantName)
                 ? decision.CleanMerchantName.Trim()
                 : candidate.CleanMerchantName;
-            string txType = !string.IsNullOrWhiteSpace(decision.TransactionType)
-                ? decision.TransactionType.Trim()
-                : candidate.TransactionType;
-            int? catId = txType is "Expense" or "Refund" ? decision.CategoryId : null;
+            string txType = TransactionTypes.Normalize(
+                !string.IsNullOrWhiteSpace(decision.TransactionType)
+                    ? decision.TransactionType
+                    : candidate.TransactionType);
+
+            decimal normalizedAmount = txType == TransactionTypes.Refund
+                ? -Math.Abs(candidate.Amount)
+                : Math.Abs(candidate.Amount);
+
+            int? catId = txType is TransactionTypes.Expense or TransactionTypes.Refund ? decision.CategoryId : null;
             string? subcat = string.IsNullOrWhiteSpace(decision.Subcategory) ? null : decision.Subcategory.Trim();
+            bool isManuallyLocked = catId.HasValue && catId != candidate.CategoryId;
+            string catSource = !catId.HasValue
+                ? "Uncategorized"
+                : (isManuallyLocked ? "Manual" : "Rule");
 
             await conn.ExecuteAsync(
                 """
                 INSERT INTO Transactions (
                     AccountId, TransactionDate, PostDate, RawDescription, CleanMerchantName,
-                    Amount, TransactionType, CategoryId, Subcategory, IsCategoryManuallyLocked,
-                    ParentTransactionId, DedupHash, UploadBatchId
+                    Amount, TransactionType, CategoryId, Subcategory, CategorizationSource,
+                    IsCategoryManuallyLocked, ParentTransactionId, DedupHash, UploadBatchId
                 ) VALUES (
                     @AccountId, @TransactionDate, @PostDate, @RawDescription, @CleanMerchantName,
-                    @Amount, @TransactionType, @CategoryId, @Subcategory, @IsLocked,
-                    NULL, @DedupHash, @UploadBatchId
+                    @Amount, @TransactionType, @CategoryId, @Subcategory, @CategorizationSource,
+                    @IsLocked, NULL, @DedupHash, @UploadBatchId
                 );
                 """,
                 new
                 {
-                    session.AccountId,
+                    sessionRow.AccountId,
                     candidate.TransactionDate,
                     candidate.PostDate,
                     candidate.RawDescription,
                     CleanMerchantName = cleanName,
-                    candidate.Amount,
+                    Amount = normalizedAmount,
                     TransactionType = txType,
                     CategoryId = catId,
                     Subcategory = subcat,
-                    IsLocked = (catId != candidate.CategoryId) ? 1 : 0,
+                    CategorizationSource = catSource,
+                    IsLocked = isManuallyLocked ? 1 : 0,
                     candidate.DedupHash,
                     UploadBatchId = batchId
                 },
@@ -212,6 +237,11 @@ public sealed class IngestionStagingService(
 
             importedCount++;
         }
+
+        await conn.ExecuteAsync(
+            "DELETE FROM StagingSessions WHERE StagingSessionId = @Id;",
+            new { Id = request.StagingSessionId },
+            tx);
 
         await tx.CommitAsync(ct);
 
@@ -228,5 +258,17 @@ public sealed class IngestionStagingService(
             tombstonedCount,
             backupFileCreated = backupFile
         };
+    }
+
+    private static bool SafeRegexIsMatch(string input, string pattern)
+    {
+        try
+        {
+            return Regex.IsMatch(input, pattern, RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(250));
+        }
+        catch
+        {
+            return false;
+        }
     }
 }

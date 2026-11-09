@@ -1,4 +1,14 @@
-import { state, apiFetch, formatCurrency, showToast, openModal, closeModal, refreshReferenceData } from '../app.js';
+import {
+  state,
+  apiFetch,
+  formatCurrency,
+  escapeHtml,
+  formatBackupStatus,
+  showToast,
+  openModal,
+  closeModal,
+  refreshReferenceData
+} from '../app.js';
 
 let currentStagingSession = null;
 
@@ -18,7 +28,7 @@ export async function renderUploadView(container) {
           <label style="font-size:12px;font-weight:700;display:block;margin-bottom:6px;">1. Select Source Account / Credit Card</label>
           <select id="uploadAccountSelect" class="select-control" style="width:100%;">
             ${state.accounts.map(a => `
-              <option value="${a.accountId}">${a.accountName} (${a.institution} - ${a.accountType})</option>
+              <option value="${a.accountId}">${escapeHtml(a.accountName)} (${escapeHtml(a.institution)} - ${escapeHtml(a.accountType)})</option>
             `).join('')}
           </select>
         </div>
@@ -130,7 +140,7 @@ async function handleStageFiles(container, fileList) {
     });
     renderStagingTable(stagingMount, currentStagingSession);
   } catch (err) {
-    stagingMount.innerHTML = `<div class="card-panel" style="color:#DC2626;">Upload staging failed: ${err.message}</div>`;
+    stagingMount.innerHTML = `<div class="card-panel" style="color:#DC2626;">Upload staging failed: ${escapeHtml(err.message)}</div>`;
   }
 }
 
@@ -139,7 +149,7 @@ function renderStagingTable(stagingMount, session) {
   const categoryOptionsHtml = (selectedId) => `
     <option value="">-- Uncategorized --</option>
     ${state.categories.map(c => `
-      <option value="${c.categoryId}" ${c.categoryId === selectedId ? 'selected' : ''}>${c.name}</option>
+      <option value="${c.categoryId}" ${c.categoryId === selectedId ? 'selected' : ''}>${escapeHtml(c.name)}</option>
     `).join('')}
   `;
 
@@ -147,7 +157,7 @@ function renderStagingTable(stagingMount, session) {
     <div class="card-panel">
       <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px;">
         <div>
-          <h2 style="margin:0;font-size:17px;font-weight:800;">Staging Review: ${session.fileNames.join(', ')}</h2>
+          <h2 style="margin:0;font-size:17px;font-weight:800;">Staging Review: ${escapeHtml(session.fileNames.join(', '))}</h2>
           <p style="margin:4px 0 0 0;font-size:13px;color:#64748B;">
             Parsed <strong>${s.totalParsed}</strong> rows &bull;
             <span style="color:#059669;font-weight:700;">${s.autoApproveCount} Ready to Import</span> &bull;
@@ -183,7 +193,7 @@ function renderStagingTable(stagingMount, session) {
                   : '';
 
               return `
-                <tr class="${rowClass}" data-row-id="${row.rowId}">
+                <tr class="${rowClass}" data-row-id="${escapeHtml(row.rowId)}">
                   <td>
                     <select class="select-control row-action-select" style="font-weight:700;">
                       <option value="Import" ${defaultAction === 'Import' ? 'selected' : ''}>Import</option>
@@ -192,18 +202,18 @@ function renderStagingTable(stagingMount, session) {
                     </select>
                   </td>
                   <td>
-                    <span class="bigbox-pill">${row.dedupStatus}${row.requiresManualReview ? ' (Review)' : ''}</span>
+                    <span class="bigbox-pill">${escapeHtml(row.dedupStatus)}${row.requiresManualReview ? ' (Review)' : ''}</span>
                   </td>
-                  <td style="white-space:nowrap;">${row.transactionDate}</td>
+                  <td style="white-space:nowrap;">${escapeHtml(row.transactionDate)}</td>
                   <td>
-                    <input type="text" class="input-control row-merchant-input" value="${row.cleanMerchantName.replace(/"/g, '&quot;')}" style="width:190px;" />
-                    <div style="font-size:11px;color:#64748B;">${row.rawDescription}</div>
+                    <input type="text" class="input-control row-merchant-input" value="${escapeHtml(row.cleanMerchantName)}" style="width:190px;" />
+                    <div style="font-size:11px;color:#64748B;">${escapeHtml(row.rawDescription)}</div>
                   </td>
                   <td>
                     <select class="select-control row-type-select">
                       <option value="Expense" ${row.transactionType === 'Expense' ? 'selected' : ''}>Expense</option>
                       <option value="Refund" ${row.transactionType === 'Refund' ? 'selected' : ''}>Refund / Credit</option>
-                      <option value="IncomeDeposit" ${row.transactionType === 'IncomeDeposit' ? 'selected' : ''}>Google Income Deposit</option>
+                      <option value="IncomeDeposit" ${row.transactionType === 'IncomeDeposit' ? 'selected' : ''}>Income Deposit</option>
                       <option value="CreditCardPayoff" ${row.transactionType === 'CreditCardPayoff' ? 'selected' : ''}>Credit Card Payoff</option>
                     </select>
                   </td>
@@ -214,7 +224,7 @@ function renderStagingTable(stagingMount, session) {
                     </select>
                   </td>
                   <td>
-                    <input type="text" class="input-control row-subcat-input" placeholder="Optional" value="${row.subcategory || ''}" style="width:120px;" />
+                    <input type="text" class="input-control row-subcat-input" placeholder="Optional" value="${escapeHtml(row.subcategory || '')}" style="width:120px;" />
                   </td>
                 </tr>
               `;
@@ -253,14 +263,14 @@ function renderStagingTable(stagingMount, session) {
       })
     });
 
-    showToast(`Imported ${result.importedCount} transactions (${result.skippedCount} skipped, ${result.tombstonedCount} tombstoned). Backup created!`);
+    showToast(`Imported ${result.importedCount} transactions (${result.skippedCount} skipped, ${result.tombstonedCount} tombstoned) • ${formatBackupStatus(result.backupFileCreated)}`);
     stagingMount.innerHTML = `
       <div class="card-panel" style="border-color:#10B981;background:#ECFDF5;">
         <strong>&#10003; Upload Committed Successfully!</strong><br/>
         Imported: <strong>${result.importedCount}</strong> &bull;
         Skipped Duplicates: <strong>${result.skippedCount}</strong> &bull;
         Tombstoned: <strong>${result.tombstonedCount}</strong><br/>
-        Snapshot created: <code>${result.backupFileCreated || 'None (no changes)'}</code>
+        Snapshot created: <code>${escapeHtml(result.backupFileCreated || 'None (no changes)')}</code>
       </div>
     `;
   };

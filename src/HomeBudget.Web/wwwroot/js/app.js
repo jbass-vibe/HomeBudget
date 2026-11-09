@@ -12,9 +12,24 @@ export const state = {
   cashflowStart: '',
   cashflowEnd: '',
   includeSubcategories: false,
+  triageGroupByMerchant: true,
   accounts: [],
   categories: []
 };
+
+export function escapeHtml(val) {
+  if (val === null || val === undefined) return '';
+  return String(val)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+export function formatBackupStatus(backupFileCreated) {
+  return backupFileCreated ? 'DB backed up' : 'Backup skipped/failed';
+}
 
 export async function apiFetch(url, options = {}) {
   const res = await fetch(url, {
@@ -94,16 +109,17 @@ export async function refreshReferenceData() {
 export function openCategorizeExpenseModal(tx, onSuccess, preselectedCatId = undefined) {
   const initialCatId = preselectedCatId !== undefined ? preselectedCatId : (tx.categoryId || state.categories[0]?.categoryId || '');
   const startInNewCatMode = preselectedCatId === '__NEW__';
+  const defaultPattern = tx.cleanMerchantName || tx.rawDescription || '';
 
   openModal(`
     <h3 style="margin-top:0;">Categorize Expense</h3>
     <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:13px;">
       <div style="display:flex;justify-content:space-between;align-items:center;">
-        <strong>${tx.cleanMerchantName || tx.rawDescription}</strong>
+        <strong>${escapeHtml(tx.cleanMerchantName || tx.rawDescription)}</strong>
         <strong class="${tx.amount < 0 ? 'amount-refund' : 'amount-expense'}">${formatCurrency(tx.amount)}</strong>
       </div>
       <div style="font-size:11px;color:#64748B;margin-top:3px;">
-        ${tx.transactionDate} &bull; ${tx.accountName || ''} &bull; Raw: <code>${tx.rawDescription}</code>
+        ${escapeHtml(tx.transactionDate)} &bull; ${escapeHtml(tx.accountName || '')} &bull; Raw: <code>${escapeHtml(tx.rawDescription)}</code>
       </div>
     </div>
 
@@ -121,7 +137,7 @@ export function openCategorizeExpenseModal(tx, onSuccess, preselectedCatId = und
             <option value="">-- Uncategorized --</option>
             ${state.categories.map(c => `
               <option value="${c.categoryId}" ${String(c.categoryId) === String(initialCatId) ? 'selected' : ''}>
-                ${c.name} (Budget: ${formatCurrency(c.monthlyBudget)})
+                ${escapeHtml(c.name)} (Budget: ${formatCurrency(c.monthlyBudget)})
               </option>
             `).join('')}
           </select>
@@ -131,7 +147,7 @@ export function openCategorizeExpenseModal(tx, onSuccess, preselectedCatId = und
           <div style="font-size:12px;font-weight:700;color:#1E40AF;">Create New Category (Triggers automatic DB backup)</div>
           <input type="text" id="inlineNewCatName" class="input-control" placeholder="New Category Name (e.g., Pet Care)" />
           <div style="display:flex;gap:8px;align-items:center;">
-            <input type="number" step="10" id="inlineNewCatBudget" class="input-control" placeholder="Monthly Budget ($)" value="200" style="flex:1;" />
+            <input type="number" step="10" min="0" id="inlineNewCatBudget" class="input-control" placeholder="Monthly Budget ($)" value="200" style="flex:1;" />
             <input type="color" id="inlineNewCatColor" value="#2563EB" style="width:48px;height:36px;border:none;cursor:pointer;" />
           </div>
         </div>
@@ -139,7 +155,7 @@ export function openCategorizeExpenseModal(tx, onSuccess, preselectedCatId = und
 
       <div>
         <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Subcategory (Optional)</label>
-        <input type="text" id="catModalSubcat" class="input-control" style="width:100%;" placeholder="Optional subcategory..." value="${tx.subcategory || ''}" />
+        <input type="text" id="catModalSubcat" class="input-control" style="width:100%;" placeholder="Optional subcategory..." value="${escapeHtml(tx.subcategory || '')}" />
       </div>
 
       <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:12px;">
@@ -150,7 +166,7 @@ export function openCategorizeExpenseModal(tx, onSuccess, preselectedCatId = und
           <label style="font-size:11px;font-weight:600;color:#64748B;display:block;margin-bottom:4px;">
             Merchant Match Keyword / Pattern:
           </label>
-          <input type="text" id="catModalPattern" class="input-control" style="width:100%;" value="${(tx.cleanMerchantName || tx.rawDescription).replace(/"/g, '&quot;')}" />
+          <input type="text" id="catModalPattern" class="input-control" style="width:100%;" value="${escapeHtml(defaultPattern)}" />
         </div>
 
         <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;font-weight:600;margin-bottom:8px;cursor:pointer;">
@@ -244,7 +260,7 @@ export function openCategorizeExpenseModal(tx, onSuccess, preselectedCatId = und
       if (res.createdCategory) parts.push(`created "${res.createdCategory.name}"`);
       if (res.ruleSaved) parts.push('saved forward rule');
       if (res.pastUpdatedCount > 0) parts.push(`updated ${res.pastUpdatedCount} past expense(s)`);
-      parts.push('DB backed up');
+      parts.push(formatBackupStatus(res.backupFileCreated));
       showToast(parts.join(' • '));
 
       if (onSuccess) await onSuccess(res);
@@ -260,13 +276,13 @@ export function openCategoryManagerModal(categoryToEdit = null, onSuccess = null
   const otherCategories = state.categories.filter(c => !isEdit || c.categoryId !== categoryToEdit.categoryId);
 
   openModal(`
-    <h3 style="margin-top:0;">${isEdit ? `Edit / Delete Category: ${categoryToEdit.name}` : 'Add New Category'}</h3>
+    <h3 style="margin-top:0;">${isEdit ? `Edit / Delete Category: ${escapeHtml(categoryToEdit.name)}` : 'Add New Category'}</h3>
     <p style="font-size:12px;color:#64748B;margin-top:0;">All category changes automatically trigger a local SQLite database backup.</p>
 
     <div style="display:flex;flex-direction:column;gap:12px;margin:14px 0;">
       <div>
         <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Category Name</label>
-        <input type="text" id="mgrCatName" class="input-control" style="width:100%;" value="${isEdit ? categoryToEdit.name.replace(/"/g, '&quot;') : ''}" placeholder="e.g., Childcare, Home Improvement" />
+        <input type="text" id="mgrCatName" class="input-control" style="width:100%;" value="${isEdit ? escapeHtml(categoryToEdit.name) : ''}" placeholder="e.g., Childcare, Home Improvement" />
       </div>
       <div style="display:flex;gap:10px;">
         <div style="flex:1;">
@@ -279,7 +295,7 @@ export function openCategoryManagerModal(categoryToEdit = null, onSuccess = null
         </div>
         <div>
           <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Color</label>
-          <input type="color" id="mgrCatColor" value="${isEdit ? categoryToEdit.colorHex : '#2563EB'}" style="width:52px;height:36px;border:none;cursor:pointer;" />
+          <input type="color" id="mgrCatColor" value="${isEdit ? escapeHtml(categoryToEdit.colorHex) : '#2563EB'}" style="width:52px;height:36px;border:none;cursor:pointer;" />
         </div>
       </div>
       <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;">
@@ -294,7 +310,7 @@ export function openCategoryManagerModal(categoryToEdit = null, onSuccess = null
         <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
           <select id="mgrDeleteReassign" class="select-control" style="flex:1;">
             <option value="">Mark existing expenses in this category as Uncategorized</option>
-            ${otherCategories.map(c => `<option value="${c.categoryId}">Move existing expenses to: ${c.name}</option>`).join('')}
+            ${otherCategories.map(c => `<option value="${c.categoryId}">Move existing expenses to: ${escapeHtml(c.name)}</option>`).join('')}
           </select>
           <button type="button" class="btn btn-danger btn-sm" id="mgrDeleteCatBtn">Delete Category</button>
         </div>
@@ -314,9 +330,14 @@ export function openCategoryManagerModal(categoryToEdit = null, onSuccess = null
         alert('Category name is required.');
         return;
       }
+      const monthlyBudget = Number(modalEl.querySelector('#mgrCatBudget').value || 0);
+      if (monthlyBudget < 0) {
+        alert('Monthly budget cannot be negative.');
+        return;
+      }
       const payload = {
         name,
-        monthlyBudget: Number(modalEl.querySelector('#mgrCatBudget').value || 0),
+        monthlyBudget,
         sortOrder: Number(modalEl.querySelector('#mgrCatOrder').value || 100),
         colorHex: modalEl.querySelector('#mgrCatColor').value,
         isBigBoxMerchantCategory: modalEl.querySelector('#mgrCatBigBox').checked
@@ -327,13 +348,13 @@ export function openCategoryManagerModal(categoryToEdit = null, onSuccess = null
           method: 'PUT',
           body: JSON.stringify(payload)
         });
-        showToast(`Updated category "${name}" (Backup created)`);
+        showToast(`Updated category "${name}"`);
       } else {
         await apiFetch('/api/categories', {
           method: 'POST',
           body: JSON.stringify(payload)
         });
-        showToast(`Created category "${name}" (Backup created)`);
+        showToast(`Created category "${name}"`);
       }
 
       await refreshReferenceData();
@@ -357,7 +378,7 @@ export function openCategoryManagerModal(categoryToEdit = null, onSuccess = null
 
         await refreshReferenceData();
         closeModal();
-        showToast(`Deleted "${categoryToEdit.name}" (${res.affectedTransactionsCount} expenses updated • Backup created)`);
+        showToast(`Deleted "${categoryToEdit.name}" (${res.affectedTransactionsCount} expenses updated • ${formatBackupStatus(res.backupFileCreated)})`);
         if (onSuccess) await onSuccess();
       };
     }
@@ -385,7 +406,7 @@ export async function navigateTo(viewName) {
   }
 
   const container = document.getElementById('viewContainer');
-  container.innerHTML = `<div class="card-panel">Loading ${viewTitles[viewName] || viewName}...</div>`;
+  container.innerHTML = `<div class="card-panel">Loading ${escapeHtml(viewTitles[viewName] || viewName)}...</div>`;
 
   try {
     await refreshReferenceData();
@@ -395,7 +416,7 @@ export async function navigateTo(viewName) {
     else if (viewName === 'inspector') await renderInspectorView(container);
     else if (viewName === 'topology') await renderTopologyView(container);
   } catch (err) {
-    container.innerHTML = `<div class="card-panel" style="color:#DC2626;">Error loading view: ${err.message}</div>`;
+    container.innerHTML = `<div class="card-panel" style="color:#DC2626;">Error loading view: ${escapeHtml(err.message)}</div>`;
   }
 }
 

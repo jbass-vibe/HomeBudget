@@ -44,9 +44,20 @@ app.MapGet("/api/accounts", async (SqliteConnectionFactory db) =>
 
 app.MapPost("/api/accounts", async (Account req, SqliteConnectionFactory db, BackupService backupService, CancellationToken ct) =>
 {
+    if (string.IsNullOrWhiteSpace(req.AccountName))
+    {
+        return Results.BadRequest(new { error = "AccountName is required." });
+    }
+
     await using var conn = await db.CreateOpenConnectionAsync(ct);
     int id = await conn.ExecuteScalarAsync<int>(
-        "INSERT INTO Accounts (AccountName, Institution, AccountType, IsActive) VALUES (@AccountName, @Institution, @AccountType, 1); SELECT last_insert_rowid();", req);
+        "INSERT INTO Accounts (AccountName, Institution, AccountType, IsActive) VALUES (@AccountName, @Institution, @AccountType, 1); SELECT last_insert_rowid();",
+        new
+        {
+            AccountName = req.AccountName.Trim(),
+            Institution = string.IsNullOrWhiteSpace(req.Institution) ? "Chase" : req.Institution.Trim(),
+            AccountType = string.IsNullOrWhiteSpace(req.AccountType) ? "CreditCard" : req.AccountType.Trim()
+        });
     req.AccountId = id;
     await backupService.CreateSnapshotImmediateAsync("account_create", ct);
     return Results.Ok(req);
@@ -62,24 +73,49 @@ app.MapGet("/api/categories", async (SqliteConnectionFactory db) =>
 
 app.MapPost("/api/categories", async (UpsertCategoryRequest req, CategorizationService catService, CancellationToken ct) =>
 {
-    var created = await catService.CreateCategoryAsync(req, ct);
-    return Results.Ok(created);
+    try
+    {
+        var created = await catService.CreateCategoryAsync(req, ct);
+        return Results.Ok(created);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
 });
 
 app.MapPut("/api/categories/{id:int}", async (int id, UpsertCategoryRequest req, CategorizationService catService, CancellationToken ct) =>
 {
-    var updated = await catService.UpdateCategoryAsync(id, req, ct);
-    return updated is not null ? Results.Ok(updated) : Results.NotFound();
+    try
+    {
+        var updated = await catService.UpdateCategoryAsync(id, req, ct);
+        return updated is not null ? Results.Ok(updated) : Results.NotFound();
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
 });
 
 app.MapDelete("/api/categories/{id:int}", async (int id, int? replacementCategoryId, CategorizationService catService, CancellationToken ct) =>
 {
-    var res = await catService.DeleteCategoryAsync(id, replacementCategoryId, ct);
-    return res is not null ? Results.Ok(res) : Results.NotFound();
+    try
+    {
+        var res = await catService.DeleteCategoryAsync(id, replacementCategoryId, ct);
+        return res is not null ? Results.Ok(res) : Results.NotFound();
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
 });
 
 app.MapPut("/api/categories/{id:int}/budget", async (int id, UpdateBudgetRequest req, BudgetService budgetService, CancellationToken ct) =>
 {
+    if (req.MonthlyBudget < 0m)
+    {
+        return Results.BadRequest(new { error = "MonthlyBudget cannot be negative." });
+    }
     var updated = await budgetService.UpdateCategoryMonthlyBudgetAsync(id, req.MonthlyBudget, ct);
     return updated is not null ? Results.Ok(updated) : Results.NotFound();
 });
@@ -90,8 +126,15 @@ app.MapPost("/api/categories/{id:int}/merge-into/{targetId:int}", async (
     CategorizationService catService,
     CancellationToken ct) =>
 {
-    var result = await catService.MergeCategoriesAsync(id, targetId, ct);
-    return Results.Ok(result);
+    try
+    {
+        var result = await catService.MergeCategoriesAsync(id, targetId, ct);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
 });
 
 app.MapGet("/api/topology", async (CategorizationService catService, CancellationToken ct) =>
@@ -102,14 +145,28 @@ app.MapGet("/api/topology", async (CategorizationService catService, Cancellatio
 
 app.MapPost("/api/rules", async (UpsertRuleRequest req, CategorizationService catService, CancellationToken ct) =>
 {
-    var rule = await catService.CreateRuleAsync(req, ct);
-    return Results.Ok(rule);
+    try
+    {
+        var rule = await catService.CreateRuleAsync(req, ct);
+        return Results.Ok(rule);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
 });
 
 app.MapPut("/api/rules/{id:int}", async (int id, UpsertRuleRequest req, CategorizationService catService, CancellationToken ct) =>
 {
-    var rule = await catService.UpdateRuleAsync(id, req, ct);
-    return rule is not null ? Results.Ok(rule) : Results.NotFound();
+    try
+    {
+        var rule = await catService.UpdateRuleAsync(id, req, ct);
+        return rule is not null ? Results.Ok(rule) : Results.NotFound();
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
 });
 
 app.MapDelete("/api/rules/{id:int}", async (int id, CategorizationService catService, CancellationToken ct) =>
@@ -179,24 +236,31 @@ app.MapPost("/api/uploads/stage", async (
         return Results.BadRequest(new { error = "At least one CSV file is required." });
     }
 
-    var session = await stagingService.StageFilesAsync(accountId, form.Files, ct);
-
-    return Results.Ok(new
+    try
     {
-        session.StagingSessionId,
-        session.AccountId,
-        session.FileNames,
-        summary = new
+        var session = await stagingService.StageFilesAsync(accountId, form.Files, ct);
+
+        return Results.Ok(new
         {
-            totalParsed = session.Candidates.Count,
-            autoApproveCount = session.Candidates.Count(c => c.DedupStatus == "AutoApprove"),
-            potentialCollisionCount = session.Candidates.Count(c => c.DedupStatus == "PotentialCollision"),
-            manualReviewCount = session.Candidates.Count(c => c.RequiresManualReview && c.DedupStatus == "AutoApprove"),
-            skippedDuplicateCount = session.Candidates.Count(c => c.DedupStatus == "SkippedDuplicate"),
-            skippedDeletedCount = session.Candidates.Count(c => c.DedupStatus == "SkippedDeleted")
-        },
-        candidates = session.Candidates
-    });
+            session.StagingSessionId,
+            session.AccountId,
+            session.FileNames,
+            summary = new
+            {
+                totalParsed = session.Candidates.Count,
+                autoApproveCount = session.Candidates.Count(c => c.DedupStatus == "AutoApprove"),
+                potentialCollisionCount = session.Candidates.Count(c => c.DedupStatus == "PotentialCollision"),
+                manualReviewCount = session.Candidates.Count(c => c.RequiresManualReview && c.DedupStatus == "AutoApprove"),
+                skippedDuplicateCount = session.Candidates.Count(c => c.DedupStatus == "SkippedDuplicate"),
+                skippedDeletedCount = session.Candidates.Count(c => c.DedupStatus == "SkippedDeleted")
+            },
+            candidates = session.Candidates
+        });
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
 }).DisableAntiforgery();
 
 app.MapPost("/api/uploads/commit", async (
@@ -204,8 +268,15 @@ app.MapPost("/api/uploads/commit", async (
     IngestionStagingService stagingService,
     CancellationToken ct) =>
 {
-    var result = await stagingService.CommitSessionAsync(request, ct);
-    return Results.Ok(result);
+    try
+    {
+        var result = await stagingService.CommitSessionAsync(request, ct);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
 });
 
 // ============================================================================
@@ -228,8 +299,15 @@ app.MapPost("/api/transactions/{id:int}/categorize", async (
     CategorizationService catService,
     CancellationToken ct) =>
 {
-    var res = await catService.CategorizeTransactionWithOptionsAsync(id, req, ct);
-    return res is not null ? Results.Ok(res) : Results.NotFound();
+    try
+    {
+        var res = await catService.CategorizeTransactionWithOptionsAsync(id, req, ct);
+        return res is not null ? Results.Ok(res) : Results.NotFound();
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
 });
 
 app.MapGet("/api/transactions", async (
@@ -286,8 +364,9 @@ app.MapGet("/api/transactions", async (
         }
         else
         {
+            string normalizedType = TransactionTypes.Normalize(tt);
             conditions.Add("t.TransactionType = @TransactionType");
-            parameters.Add("TransactionType", tt);
+            parameters.Add("TransactionType", normalizedType);
         }
     }
     if (minAmount.HasValue)
@@ -343,8 +422,15 @@ app.MapPut("/api/transactions/{id:int}", async (
     CategorizationService catService,
     CancellationToken ct) =>
 {
-    var result = await catService.UpdateTransactionAsync(id, req, ct);
-    return result is not null ? Results.Ok(result) : Results.NotFound();
+    try
+    {
+        var result = await catService.UpdateTransactionAsync(id, req, ct);
+        return result is not null ? Results.Ok(result) : Results.NotFound();
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
 });
 
 app.MapPost("/api/transactions/{id:int}/split", async (
@@ -353,8 +439,15 @@ app.MapPost("/api/transactions/{id:int}/split", async (
     CategorizationService catService,
     CancellationToken ct) =>
 {
-    var childRows = await catService.SplitTransactionAsync(id, req, ct);
-    return Results.Ok(childRows);
+    try
+    {
+        var childRows = await catService.SplitTransactionAsync(id, req, ct);
+        return Results.Ok(childRows);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
 });
 
 app.MapDelete("/api/transactions/{id:int}", async (
@@ -381,6 +474,15 @@ app.MapDelete("/api/transactions/{id:int}", async (
             "INSERT OR IGNORE INTO DeletedTransactionHashes (DedupHash, RawDescription, TransactionDate, Amount) VALUES (@DedupHash, @RawDescription, @TransactionDate, @Amount);",
             txRow,
             sqlTx);
+
+        string baseHash = CsvParserService.ExtractBaseHash(txRow.DedupHash);
+        if (!string.Equals(baseHash, txRow.DedupHash, StringComparison.OrdinalIgnoreCase))
+        {
+            await conn.ExecuteAsync(
+                "INSERT OR IGNORE INTO DeletedTransactionHashes (DedupHash, RawDescription, TransactionDate, Amount) VALUES (@BaseHash, @RawDescription, @TransactionDate, @Amount);",
+                new { BaseHash = baseHash, txRow.RawDescription, txRow.TransactionDate, txRow.Amount },
+                sqlTx);
+        }
     }
 
     await conn.ExecuteAsync("DELETE FROM Transactions WHERE TransactionId = @Id;", new { Id = id }, sqlTx);
@@ -401,6 +503,11 @@ app.MapPost("/api/transactions/bulk-delete", async (
         return Results.BadRequest(new { error = "No transactionIds provided." });
     }
 
+    if (req.TransactionIds.Count > 500)
+    {
+        return Results.BadRequest(new { error = "Bulk delete is limited to at most 500 transactions per request." });
+    }
+
     await using var conn = await db.CreateOpenConnectionAsync(ct);
     var rows = (await conn.QueryAsync<TransactionEntity>(
         "SELECT * FROM Transactions WHERE TransactionId IN @Ids;",
@@ -408,7 +515,7 @@ app.MapPost("/api/transactions/bulk-delete", async (
 
     if (rows.Count == 0)
     {
-        return Results.Ok(new { deletedCount = 0 });
+        return Results.Ok(new { deletedCount = 0, backupFileCreated = (string?)null });
     }
 
     await using var sqlTx = await conn.BeginTransactionAsync(ct);
@@ -420,6 +527,15 @@ app.MapPost("/api/transactions/bulk-delete", async (
                 "INSERT OR IGNORE INTO DeletedTransactionHashes (DedupHash, RawDescription, TransactionDate, Amount) VALUES (@DedupHash, @RawDescription, @TransactionDate, @Amount);",
                 txRow,
                 sqlTx);
+
+            string baseHash = CsvParserService.ExtractBaseHash(txRow.DedupHash);
+            if (!string.Equals(baseHash, txRow.DedupHash, StringComparison.OrdinalIgnoreCase))
+            {
+                await conn.ExecuteAsync(
+                    "INSERT OR IGNORE INTO DeletedTransactionHashes (DedupHash, RawDescription, TransactionDate, Amount) VALUES (@BaseHash, @RawDescription, @TransactionDate, @Amount);",
+                    new { BaseHash = baseHash, txRow.RawDescription, txRow.TransactionDate, txRow.Amount },
+                    sqlTx);
+            }
         }
     }
 
@@ -429,7 +545,7 @@ app.MapPost("/api/transactions/bulk-delete", async (
         sqlTx);
 
     await sqlTx.CommitAsync(ct);
-    string backupFile = await backupService.CreateSnapshotImmediateAsync("transaction_delete", ct);
+    string? backupFile = await backupService.CreateSnapshotImmediateAsync("transaction_delete", ct);
 
     return Results.Ok(new { deletedCount, backupFileCreated = backupFile });
 });
@@ -459,6 +575,11 @@ app.MapGet("/api/settings", async (SqliteConnectionFactory db) =>
 
 app.MapPut("/api/settings", async (SettingsDto req, SqliteConnectionFactory db, BackupService backupService, CancellationToken ct) =>
 {
+    if (req.PersistentMonthlyIncome < 0m)
+    {
+        return Results.BadRequest(new { error = "PersistentMonthlyIncome cannot be negative." });
+    }
+
     await using var conn = await db.CreateOpenConnectionAsync(ct);
     await using var tx = await conn.BeginTransactionAsync(ct);
 
@@ -471,20 +592,25 @@ app.MapPut("/api/settings", async (SettingsDto req, SqliteConnectionFactory db, 
     }
 
     await UpsertSetting("PersistentMonthlyIncome", req.PersistentMonthlyIncome.ToString("F2", CultureInfo.InvariantCulture));
-    await UpsertSetting("GooglePayrollMatchPattern", req.GooglePayrollMatchPattern.Trim());
-    await UpsertSetting("CurrentMonthIncomeMode", req.CurrentMonthIncomeMode.Trim());
+    await UpsertSetting("GooglePayrollMatchPattern", (req.GooglePayrollMatchPattern ?? "GOOGLE").Trim());
+    await UpsertSetting("CurrentMonthIncomeMode", (req.CurrentMonthIncomeMode ?? "Auto").Trim());
     if (!string.IsNullOrWhiteSpace(req.GeminiApiKey))
     {
         await UpsertSetting("GeminiApiKey", req.GeminiApiKey.Trim());
     }
 
     await tx.CommitAsync(ct);
-    await backupService.CreateSnapshotImmediateAsync("settings_update", ct);
-    return Results.Ok(new { updated = true });
+    string? backupFile = await backupService.CreateSnapshotImmediateAsync("settings_update", ct);
+    return Results.Ok(new { updated = true, backupFileCreated = backupFile });
 });
 
 app.MapPut("/api/settings/income-overrides", async (IncomeOverrideDto req, SqliteConnectionFactory db, BackupService backupService, CancellationToken ct) =>
 {
+    if (string.IsNullOrWhiteSpace(req.YearMonth) || req.IncomeAmount < 0m)
+    {
+        return Results.BadRequest(new { error = "Valid YearMonth and non-negative IncomeAmount are required." });
+    }
+
     await using var conn = await db.CreateOpenConnectionAsync(ct);
     await conn.ExecuteAsync(
         "INSERT INTO IncomeOverrides (YearMonth, IncomeAmount, Notes) VALUES (@YearMonth, @IncomeAmount, @Notes) ON CONFLICT(YearMonth) DO UPDATE SET IncomeAmount = @IncomeAmount, Notes = @Notes;",
@@ -510,8 +636,12 @@ app.MapGet("/api/backups", (BackupService backupService) =>
 
 app.MapPost("/api/backups/trigger", async (BackupService backupService, CancellationToken ct) =>
 {
-    string fileName = await backupService.CreateSnapshotImmediateAsync("manual", ct);
-    return Results.Ok(new { fileName });
+    string? fileName = await backupService.CreateSnapshotImmediateAsync("manual", ct);
+    if (string.IsNullOrWhiteSpace(fileName))
+    {
+        return Results.Problem("Failed to create SQLite backup snapshot.", statusCode: 500);
+    }
+    return Results.Ok(new { fileName, backupSucceeded = true });
 });
 
 app.MapGet("/api/backups/download/{fileName}", (string fileName, BackupService backupService) =>

@@ -33,6 +33,8 @@ public sealed class DatabaseInitializer(
             await conn.ExecuteAsync(schemaSql);
         }
 
+        await ApplyIdempotentSchemaMigrationsAsync(conn);
+
         int ruleCount = await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM CategorizationRules;");
         if (ruleCount == 0)
         {
@@ -67,5 +69,52 @@ public sealed class DatabaseInitializer(
         }
 
         logger.LogInformation("SQLite database initialized in WAL mode at {DatabasePath}", connectionFactory.DatabasePath);
+    }
+
+    public static async Task ApplyIdempotentSchemaMigrationsAsync(System.Data.Common.DbConnection conn)
+    {
+        // 1. Ensure StagingSessions exists for older databases created prior to v2.1
+        await conn.ExecuteAsync(
+            """
+            CREATE TABLE IF NOT EXISTS StagingSessions (
+                StagingSessionId TEXT PRIMARY KEY,
+                AccountId        INTEGER NOT NULL,
+                FileNamesJson    TEXT    NOT NULL,
+                CandidatesJson   TEXT    NOT NULL,
+                CreatedAt        TEXT    NOT NULL DEFAULT (datetime('now'))
+            );
+            """);
+
+        // Prune expired staging sessions older than 24 hours
+        await conn.ExecuteAsync("DELETE FROM StagingSessions WHERE CreatedAt < datetime('now', '-1 day');");
+
+        // 2. Check Transactions columns for CategorizationSource and UploadBatchId
+        var txColumns = (await conn.QueryAsync<string>("SELECT name FROM pragma_table_info('Transactions');"))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (!txColumns.Contains("CategorizationSource"))
+        {
+            await conn.ExecuteAsync(
+                "ALTER TABLE Transactions ADD COLUMN CategorizationSource TEXT NOT NULL DEFAULT 'Uncategorized';");
+
+            await conn.ExecuteAsync(
+                """
+                UPDATE Transactions
+                SET CategorizationSource = CASE
+                    WHEN CategoryId IS NULL THEN 'Uncategorized'
+                    WHEN IsCategoryManuallyLocked = 1 THEN 'Manual'
+                    ELSE 'Rule'
+                END;
+                """);
+        }
+
+        if (!txColumns.Contains("UploadBatchId"))
+        {
+            await conn.ExecuteAsync("ALTER TABLE Transactions ADD COLUMN UploadBatchId TEXT NULL;");
+        }
+
+        // Normalize any legacy TransactionType values ('Payment' or 'Transfer') to canonical 'CreditCardPayoff'
+        await conn.ExecuteAsync(
+            "UPDATE Transactions SET TransactionType = 'CreditCardPayoff' WHERE TransactionType IN ('Payment', 'Transfer');");
     }
 }

@@ -2,6 +2,7 @@ import {
   state,
   apiFetch,
   formatCurrency,
+  escapeHtml,
   openModal,
   closeModal,
   showToast,
@@ -23,12 +24,12 @@ export async function renderBudgetsView(container) {
     <div class="page-header">
       <div>
         <h1 class="page-title">Monthly Budgets</h1>
-        <p class="page-subtitle">Fixed calendar-month targets (no rollover) &bull; Income source: <strong>${sourceBadge}</strong></p>
+        <p class="page-subtitle">Fixed calendar-month targets (no rollover) &bull; Income source: <strong>${escapeHtml(sourceBadge)}</strong></p>
       </div>
       <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;">
         <button class="btn btn-primary btn-sm" id="budgetsAddCatBtn">+ Add Category</button>
         <button class="btn btn-outline btn-sm" id="prevMonthBtn">&larr;</button>
-        <input type="month" id="budgetMonthPicker" class="input-control" value="${data.yearMonth}" />
+        <input type="month" id="budgetMonthPicker" class="input-control" value="${escapeHtml(data.yearMonth)}" />
         <button class="btn btn-outline btn-sm" id="nextMonthBtn">&rarr;</button>
       </div>
     </div>
@@ -37,7 +38,7 @@ export async function renderBudgetsView(container) {
       <div class="kpi-card">
         <div class="kpi-label">Month Income</div>
         <div class="kpi-value">${formatCurrency(data.resolvedIncome)}</div>
-        <div class="kpi-sub">${sourceBadge}</div>
+        <div class="kpi-sub">${escapeHtml(sourceBadge)}</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-label">Total Budgeted</div>
@@ -45,7 +46,7 @@ export async function renderBudgetsView(container) {
         <div class="kpi-sub">Across ${data.categories.length} categories</div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-label">Net Spent (${data.yearMonth})</div>
+        <div class="kpi-label">Net Spent (${escapeHtml(data.yearMonth)})</div>
         <div class="kpi-value">${formatCurrency(data.totalNetSpent)}</div>
         <div class="kpi-sub">Refunds automatically netted</div>
       </div>
@@ -61,15 +62,15 @@ export async function renderBudgetsView(container) {
     ${uncatTxs.length > 0 ? `
       <div class="card-panel" style="border:2px solid #F59E0B;background:#FFFBEB;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-          <strong style="color:#B45309;">&#9888;&#65039; ${uncatTxs.length} Uncategorized Expense(s) in ${data.yearMonth}</strong>
+          <strong style="color:#B45309;">&#9888;&#65039; ${uncatTxs.length} Uncategorized Expense(s) in ${escapeHtml(data.yearMonth)}</strong>
           <span style="font-size:12px;color:#92400E;">Categorize below (prompts to apply to similar future/past expenses)</span>
         </div>
         <div style="display:flex;flex-direction:column;gap:6px;">
           ${uncatTxs.map(t => `
             <div style="display:flex;justify-content:space-between;align-items:center;background:#FFFFFF;padding:8px 12px;border-radius:8px;border:1px solid #FDE68A;font-size:13px;">
               <div>
-                <strong>${t.cleanMerchantName}</strong>
-                <span style="color:#64748B;font-size:11px;margin-left:6px;">${t.transactionDate} &bull; ${t.accountName}</span>
+                <strong>${escapeHtml(t.cleanMerchantName)}</strong>
+                <span style="color:#64748B;font-size:11px;margin-left:6px;">${escapeHtml(t.transactionDate)} &bull; ${escapeHtml(t.accountName)}</span>
               </div>
               <div style="display:flex;align-items:center;gap:10px;">
                 <strong>${formatCurrency(t.amount)}</strong>
@@ -86,7 +87,7 @@ export async function renderBudgetsView(container) {
     </div>
 
     <div class="payoff-callout">
-      <span>&#128179; <strong>Credit Card Payoffs Recorded (${data.yearMonth}):</strong> Excluded from spending &amp; budgets</span>
+      <span>&#128179; <strong>Credit Card Payoffs Recorded (${escapeHtml(data.yearMonth)}):</strong> Excluded from spending &amp; budgets</span>
       <strong>${formatCurrency(data.creditCardPayoffsTotal)}</strong>
     </div>
   `;
@@ -129,8 +130,8 @@ export async function renderBudgetsView(container) {
       if (!cat) return;
 
       openModal(`
-        <h3 style="margin-top:0;">Set Monthly Budget — ${cat.name}</h3>
-        <p style="font-size:13px;color:#64748B;">Fixed monthly target for <strong>${cat.name}</strong> (triggers automatic SQLite backup):</p>
+        <h3 style="margin-top:0;">Set Monthly Budget — ${escapeHtml(cat.name)}</h3>
+        <p style="font-size:13px;color:#64748B;">Fixed monthly target for <strong>${escapeHtml(cat.name)}</strong> (triggers automatic SQLite backup):</p>
         <div style="margin:16px 0;">
           <label style="font-size:12px;font-weight:700;display:block;margin-bottom:6px;">Monthly Budget ($)</label>
           <input type="number" step="10" min="0" inputmode="decimal" id="modalBudgetInput" class="input-control" style="width:100%;font-size:18px;font-weight:700;" value="${cat.monthlyBudget}" />
@@ -146,12 +147,16 @@ export async function renderBudgetsView(container) {
         modalEl.querySelector('#cancelModalBtn').onclick = closeModal;
         modalEl.querySelector('#saveBudgetBtn').onclick = async () => {
           const val = Number(input.value || 0);
+          if (val < 0) {
+            alert('Monthly budget cannot be negative.');
+            return;
+          }
           await apiFetch(`/api/categories/${catId}/budget`, {
             method: 'PUT',
             body: JSON.stringify({ monthlyBudget: val })
           });
           closeModal();
-          showToast(`Updated ${cat.name} budget to ${formatCurrency(val)} (Backup created)`);
+          showToast(`Updated ${cat.name} budget to ${formatCurrency(val)}`);
           renderBudgetsView(container);
         };
       });
@@ -191,8 +196,8 @@ function renderCategoryCardHtml(cat) {
     <div class="budget-card">
       <div class="budget-card-header">
         <div class="cat-badge">
-          <span class="cat-dot" style="background:${cat.colorHex}"></span>
-          <span>${cat.name}</span>
+          <span class="cat-dot" style="background:${escapeHtml(cat.colorHex)}"></span>
+          <span>${escapeHtml(cat.name)}</span>
           ${cat.isBigBoxMerchantCategory ? '<span class="bigbox-pill">Merchant</span>' : ''}
         </div>
         <div style="display:flex;gap:6px;align-items:center;">
@@ -204,7 +209,7 @@ function renderCategoryCardHtml(cat) {
       </div>
 
       <div class="progress-track">
-        <div class="progress-fill ${cat.statusLevel}" style="width:${pctWidth}%"></div>
+        <div class="progress-fill ${escapeHtml(cat.statusLevel)}" style="width:${pctWidth}%"></div>
       </div>
 
       <div class="budget-metrics-row">
@@ -222,8 +227,8 @@ function renderCategoryCardHtml(cat) {
           : cat.transactions.map(t => `
               <div class="drilldown-item">
                 <div>
-                  <div style="font-weight:600;">${t.cleanMerchantName}</div>
-                  <div style="font-size:11px;color:#64748B;">${t.transactionDate} &bull; ${t.accountName}${t.subcategory ? ` &bull; ${t.subcategory}` : ''}</div>
+                  <div style="font-weight:600;">${escapeHtml(t.cleanMerchantName)}</div>
+                  <div style="font-size:11px;color:#64748B;">${escapeHtml(t.transactionDate)} &bull; ${escapeHtml(t.accountName)}${t.subcategory ? ` &bull; ${escapeHtml(t.subcategory)}` : ''}</div>
                 </div>
                 <div style="display:flex;align-items:center;gap:8px;">
                   <span class="${t.amount < 0 ? 'amount-refund' : 'amount-expense'}">

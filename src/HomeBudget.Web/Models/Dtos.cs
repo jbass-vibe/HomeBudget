@@ -122,10 +122,11 @@ public sealed class TransactionDto
     public string RawDescription { get; set; } = "";
     public string CleanMerchantName { get; set; } = "";
     public decimal Amount { get; set; }
-    public string TransactionType { get; set; } = "Expense";
+    public string TransactionType { get; set; } = TransactionTypes.Expense;
     public int? CategoryId { get; set; }
     public string? CategoryName { get; set; }
     public string? Subcategory { get; set; }
+    public string CategorizationSource { get; set; } = "Uncategorized";
     public bool IsCategoryManuallyLocked { get; set; }
     public int? ParentTransactionId { get; set; }
     public string? Notes { get; set; }
@@ -263,7 +264,7 @@ public sealed class StagingCandidateDto
     public string RawDescription { get; set; } = "";
     public string CleanMerchantName { get; set; } = "";
     public decimal Amount { get; set; }
-    public string TransactionType { get; set; } = "Expense";
+    public string TransactionType { get; set; } = TransactionTypes.Expense;
     public int? CategoryId { get; set; }
     public string? Subcategory { get; set; }
     public string DedupHash { get; set; } = "";
@@ -292,5 +293,5 @@ public sealed class StagingDecisionDto
     public int? CategoryId { get; set; }
     public string? Subcategory { get; set; }
     public string CleanMerchantName { get; set; } = "";
-    public string TransactionType { get; set; } = "Expense";
+    public string TransactionType { get; set; } = TransactionTypes.Expense;
 }

@@ -21,14 +21,27 @@ public sealed class BackupService
     {
         _connectionFactory = connectionFactory;
         _logger = logger;
-        BackupDirectoryPath = configuration["HomeBudget:BackupDirectoryPath"]
-            ?? @"C:\ProgramData\HomeBudget\Backups";
-        _maxRetainedBackups = int.TryParse(configuration["HomeBudget:MaxRetainedBackups"], out int max) ? max : 30;
+
+        string? configuredBackupDir = configuration["HomeBudget:BackupDirectoryPath"];
+        if (string.IsNullOrWhiteSpace(configuredBackupDir)
+            || (!OperatingSystem.IsWindows() && configuredBackupDir.StartsWith(@"C:\", StringComparison.OrdinalIgnoreCase)))
+        {
+            string dbDir = Path.GetDirectoryName(connectionFactory.DatabasePath) ?? AppContext.BaseDirectory;
+            BackupDirectoryPath = OperatingSystem.IsWindows() && string.IsNullOrWhiteSpace(configuredBackupDir)
+                ? @"C:\ProgramData\HomeBudget\Backups"
+                : Path.Combine(dbDir, "Backups");
+        }
+        else
+        {
+            BackupDirectoryPath = configuredBackupDir;
+        }
+
+        _maxRetainedBackups = int.TryParse(configuration["HomeBudget:MaxRetainedBackups"], out int max) && max > 0 ? max : 30;
 
         Directory.CreateDirectory(BackupDirectoryPath);
     }
 
-    public async Task<string> CreateSnapshotImmediateAsync(string reason, CancellationToken ct = default)
+    public async Task<string?> CreateSnapshotImmediateAsync(string reason, CancellationToken ct = default)
     {
         await _mutex.WaitAsync(ct);
         try
@@ -43,14 +56,21 @@ public sealed class BackupService
             string escapedPath = fullPath.Replace("'", "''");
             await conn.ExecuteAsync($"VACUUM INTO '{escapedPath}';");
 
+            var fileInfo = new FileInfo(fullPath);
+            if (!fileInfo.Exists || fileInfo.Length == 0)
+            {
+                _logger.LogError("SQLite backup snapshot {FileName} was not created or is empty at {FullPath}", fileName, fullPath);
+                return null;
+            }
+
             PruneOldBackups();
-            _logger.LogInformation("Created SQLite backup snapshot {FileName}", fileName);
+            _logger.LogInformation("Created verified SQLite backup snapshot {FileName} ({SizeBytes} bytes)", fileName, fileInfo.Length);
             return fileName;
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to create SQLite backup snapshot for reason {Reason}", reason);
-            return "";
+            _logger.LogError(ex, "Failed to create SQLite backup snapshot for reason {Reason}", reason);
+            return null;
         }
         finally
         {
