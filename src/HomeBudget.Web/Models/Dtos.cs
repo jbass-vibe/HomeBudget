@@ -268,18 +268,40 @@ public sealed class BackupFileInfoDto
 public sealed class BackupPolicyConfigDto
 {
     public string BackupAutoMode { get; set; } = "Coalesced";
+    public string AutoBackupMode
+    {
+        get => BackupAutoMode;
+        set { if (!string.IsNullOrWhiteSpace(value)) BackupAutoMode = value; }
+    }
+
     public int BackupDebounceSeconds { get; set; } = 30;
+    public int DebounceSeconds
+    {
+        get => BackupDebounceSeconds;
+        set { if (value > 0) BackupDebounceSeconds = value; }
+    }
+
     public int BackupMinIntervalMinutes { get; set; } = 10;
+    public int MinIntervalMinutes
+    {
+        get => BackupMinIntervalMinutes;
+        set { if (value >= 0) BackupMinIntervalMinutes = value; }
+    }
+
     public int MaxRetainedBackups { get; set; } = 15;
 }
 
 public sealed class BackupStatusDto
 {
     public int TotalCount { get; set; }
+    public int TotalSnapshotCount => TotalCount;
     public long TotalSizeBytes { get; set; }
+    public long TotalBytesOnDisk => TotalSizeBytes;
     public DateTime? LatestBackupUtc { get; set; }
+    public DateTime? LastSnapshotUtc => LatestBackupUtc;
     public int PendingChangesCount { get; set; }
     public List<string> PendingReasons { get; set; } = [];
+    public string PendingReasonSummary => string.Join(", ", PendingReasons);
     public DateTime? NextScheduledBackupUtc { get; set; }
 }
 
@@ -297,6 +319,31 @@ public sealed class RestoreBackupRequest
 {
     public bool CreatePreRestoreBackup { get; set; } = true;
 }
+
+public sealed class RestoreBackupResultDto
+{
+    public string RestoredFrom { get; set; } = "";
+    public string? PreRestoreBackupFile { get; set; }
+    public string? PreRestoreSnapshot => PreRestoreBackupFile;
+    public bool IntegrityVerified { get; set; } = true;
+}
+
+public sealed class ClearTransactionHistoryRequest
+{
+    public bool CreateBackupFirst { get; set; } = true;
+    public bool ClearDeletedTombstones { get; set; } = true;
+    public bool ClearStagingSessions { get; set; } = true;
+    public int? AccountId { get; set; }
+}
+
+public sealed class ClearTransactionHistoryResultDto
+{
+    public int DeletedTransactionsCount { get; set; }
+    public int DeletedTombstonesCount { get; set; }
+    public int DeletedStagingSessionsCount { get; set; }
+    public string? PreClearBackupFile { get; set; }
+}
+
 
 public sealed class StagingCandidateDto
 {

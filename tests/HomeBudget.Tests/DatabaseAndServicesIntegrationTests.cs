@@ -228,7 +228,34 @@ public sealed class DatabaseAndServicesIntegrationTests : IDisposable
         int countAfterRestore = await connAfter.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM Categories WHERE Name = 'TempCategory';");
         Assert.Equal(0, countAfterRestore);
 
-        // 5. Prune & delete snapshots
+        // 5. Clear transaction history with pre-clear backup and tombstone reset, then restore from pre_clear_history snapshot
+        await connAfter.ExecuteAsync(
+            """
+            INSERT INTO Transactions (AccountId, TransactionDate, RawDescription, CleanMerchantName, Amount, TransactionType, DedupHash)
+            VALUES (1, '2026-11-08', 'TEST CHARGE', 'TEST CHARGE', 99.95, 'Expense', 'CLEAR_TEST_HASH');
+            INSERT INTO DeletedTransactionHashes (DedupHash, RawDescription, TransactionDate, Amount)
+            VALUES ('TOMBSTONE_HASH', 'OLD DELETED', '2026-11-01', 12.00);
+            """);
+
+        var clearRes = await _categorizationService.ClearTransactionHistoryAsync(new ClearTransactionHistoryRequest
+        {
+            CreateBackupFirst = true,
+            ClearDeletedTombstones = true,
+            ClearStagingSessions = true
+        });
+
+        Assert.Equal(1, clearRes.DeletedTransactionsCount);
+        Assert.Equal(1, clearRes.DeletedTombstonesCount);
+        Assert.False(string.IsNullOrWhiteSpace(clearRes.PreClearBackupFile));
+        Assert.Equal(0, await connAfter.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM Transactions;"));
+        Assert.Equal(0, await connAfter.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM DeletedTransactionHashes;"));
+
+        // Restore the pre-clear snapshot and verify the transaction is restored
+        await _backupService.RestoreSnapshotAsync(clearRes.PreClearBackupFile!, createPreRestoreBackup: false);
+        await using var connRestored = await _connectionFactory.CreateOpenConnectionAsync();
+        Assert.Equal(1, await connRestored.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM Transactions WHERE DedupHash = 'CLEAR_TEST_HASH';"));
+
+        // 6. Prune & delete snapshots
         int pruned = _backupService.PruneBackupsToCount(1);
         Assert.True(pruned >= 1);
         Assert.Single(_backupService.ListBackups());

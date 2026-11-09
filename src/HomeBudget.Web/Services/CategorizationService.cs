@@ -809,7 +809,7 @@ public sealed class CategorizationService(
         await conn.ExecuteAsync("DELETE FROM Transactions WHERE TransactionId = @Id;", new { Id = transactionId }, tx);
         await tx.CommitAsync(ct);
 
-        await backupService.RequestBackupAsync("data_edit", isMajorOperation: false, ct);
+        await backupService.RequestBackupAsync("transaction_split", isMajorOperation: true, ct);
 
         var rows = await conn.QueryAsync<TransactionDto>(
             """
@@ -823,6 +823,54 @@ public sealed class CategorizationService(
             new { Ids = createdIds });
 
         return rows.ToList();
+    }
+
+    public async Task<ClearTransactionHistoryResultDto> ClearTransactionHistoryAsync(
+        ClearTransactionHistoryRequest request,
+        CancellationToken ct = default)
+    {
+        string? preClearBackupFile = null;
+        if (request.CreateBackupFirst)
+        {
+            preClearBackupFile = await backupService.FlushPendingSnapshotAsync("pre_clear_history", ct);
+        }
+
+        await using var conn = await connectionFactory.CreateOpenConnectionAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+
+        int deletedTransactions = request.AccountId.HasValue
+            ? await conn.ExecuteAsync(
+                "DELETE FROM Transactions WHERE AccountId = @AccountId;",
+                new { AccountId = request.AccountId.Value },
+                tx)
+            : await conn.ExecuteAsync("DELETE FROM Transactions;", transaction: tx);
+
+        int deletedTombstones = 0;
+        if (request.ClearDeletedTombstones)
+        {
+            deletedTombstones = await conn.ExecuteAsync("DELETE FROM DeletedTransactionHashes;", transaction: tx);
+        }
+
+        int deletedStaging = 0;
+        if (request.ClearStagingSessions)
+        {
+            deletedStaging = request.AccountId.HasValue
+                ? await conn.ExecuteAsync(
+                    "DELETE FROM StagingSessions WHERE AccountId = @AccountId;",
+                    new { AccountId = request.AccountId.Value },
+                    tx)
+                : await conn.ExecuteAsync("DELETE FROM StagingSessions;", transaction: tx);
+        }
+
+        await tx.CommitAsync(ct);
+
+        return new ClearTransactionHistoryResultDto
+        {
+            DeletedTransactionsCount = deletedTransactions,
+            DeletedTombstonesCount = deletedTombstones,
+            DeletedStagingSessionsCount = deletedStaging,
+            PreClearBackupFile = preClearBackupFile
+        };
     }
 
     private static void ValidateCategoryRequest(UpsertCategoryRequest req)

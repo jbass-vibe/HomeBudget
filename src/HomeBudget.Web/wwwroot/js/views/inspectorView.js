@@ -161,6 +161,13 @@ export async function renderInspectorView(container) {
     if (e.key === 'Enter') syncInputsAndReload();
   };
 
+  const clearHistoryBtn = container.querySelector('#clearHistoryInspectorBtn');
+  if (clearHistoryBtn) {
+    clearHistoryBtn.onclick = () => {
+      openClearTransactionHistoryModal(() => renderInspectorView(container));
+    };
+  }
+
   container.querySelector('#resetFiltersBtn').onclick = () => {
     Object.assign(filterState, {
       startDate: '',

@@ -407,7 +407,7 @@ public sealed class BackupService
         return deleted;
     }
 
-    public async Task<object> RestoreSnapshotAsync(string fileName, bool createPreRestoreBackup = true, CancellationToken ct = default)
+    public async Task<RestoreBackupResultDto> RestoreSnapshotAsync(string fileName, bool createPreRestoreBackup = true, CancellationToken ct = default)
     {
         string? fullPath = ResolveSafeBackupFilePath(fileName);
         if (fullPath is null || !File.Exists(fullPath))
@@ -429,14 +429,19 @@ public sealed class BackupService
             Pooling = false
         }.ToString();
 
-        await using (var checkConn = new SqliteConnection(checkConnStr))
+        try
         {
+            await using var checkConn = new SqliteConnection(checkConnStr);
             await checkConn.OpenAsync(ct);
             string? integrity = await checkConn.ExecuteScalarAsync<string>("PRAGMA integrity_check;");
             if (!string.Equals(integrity, "ok", StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidOperationException($"Backup file '{fileInfo.Name}' failed SQLite integrity check ({integrity}).");
             }
+        }
+        catch (SqliteException ex)
+        {
+            throw new InvalidOperationException($"File '{fileInfo.Name}' is not a valid SQLite database ({ex.Message}).");
         }
 
         // 2. Optionally create a safety backup of the current live database first
@@ -468,16 +473,52 @@ public sealed class BackupService
             _cachedPolicy = null;
             _logger.LogInformation("Restored live SQLite database from snapshot {FileName}", fileInfo.Name);
 
-            return new
+            return new RestoreBackupResultDto
             {
-                restoredFrom = fileInfo.Name,
-                preRestoreBackupFile = preRestoreFile,
-                integrityVerified = true
+                RestoredFrom = fileInfo.Name,
+                PreRestoreBackupFile = preRestoreFile,
+                IntegrityVerified = true
             };
         }
         finally
         {
             _mutex.Release();
+        }
+    }
+
+    public async Task<RestoreBackupResultDto> RestoreUploadedSnapshotAsync(
+        Stream uploadedStream,
+        string? originalFileName,
+        bool createPreRestoreBackup = true,
+        CancellationToken ct = default)
+    {
+        Directory.CreateDirectory(BackupDirectoryPath);
+        string timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
+        string savedFileName = $"budget_{timestamp}_uploaded_restore.db";
+        string savedFullPath = Path.Combine(BackupDirectoryPath, savedFileName);
+
+        await using (var fs = new FileStream(savedFullPath, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            await uploadedStream.CopyToAsync(fs, ct);
+        }
+
+        try
+        {
+            return await RestoreSnapshotAsync(savedFileName, createPreRestoreBackup, ct);
+        }
+        catch
+        {
+            try
+            {
+                if (File.Exists(savedFullPath))
+                {
+                    File.Delete(savedFullPath);
+                }
+            }
+            catch
+            {
+            }
+            throw;
         }
     }
 
@@ -499,12 +540,15 @@ public sealed class BackupService
             "manual" => "Manual Snapshot",
             "csv_upload" => "CSV Import",
             "pre_restore" => "Pre-Restore Safety",
+            "pre_clear_history" => "Pre-Clear History Safety",
+            "uploaded_restore" => "Uploaded Snapshot",
             "category_delete" => "Category Delete",
             "category_merge" => "Category Merge",
             "category_create" => "Category Create",
             "category_update" => "Category Update",
             "bulk_delete" => "Bulk Delete",
             "transaction_delete" => "Transaction Delete",
+            "transaction_split" => "Transaction Split",
             "recategorize" or "recat_debounced" => "Expense Categorization",
             "backprop" => "Rule Back-Propagation",
             "rule_create" or "rule_update" or "rule_delete" => "Rule Change",
@@ -545,4 +589,11 @@ public sealed class BackupService
             _logger.LogWarning(ex, "Error pruning old SQLite backups");
         }
     }
+
+    public void Dispose()
+    {
+        CancelPendingSchedule();
+        _mutex.Dispose();
+    }
 }
+

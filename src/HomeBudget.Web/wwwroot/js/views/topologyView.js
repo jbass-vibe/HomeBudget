@@ -10,7 +10,9 @@ import {
   openModal,
   closeModal,
   refreshReferenceData,
-  openCategoryManagerModal
+  openCategoryManagerModal,
+  openClearTransactionHistoryModal,
+  openRestoreDatabaseModal
 } from '../app.js';
 
 export function sortRules(rules, catNameById = {}, sortMode = 'priority_asc') {
@@ -774,42 +776,29 @@ export async function renderTopologyView(container) {
     };
   });
 
-  // Restore Snapshot Modal
+  // Clear Transaction History (with Pre-Clear Backup option)
+  const clearHistoryAdminBtn = container.querySelector('#clearHistoryAdminBtn');
+  if (clearHistoryAdminBtn) {
+    clearHistoryAdminBtn.onclick = () => {
+      openClearTransactionHistoryModal(() => renderTopologyView(container));
+    };
+  }
+
+  // Top-level Restore Database Modal (Local Snapshot or Upload External .db)
+  const restoreDatabaseModalBtn = container.querySelector('#restoreDatabaseModalBtn');
+  if (restoreDatabaseModalBtn) {
+    restoreDatabaseModalBtn.onclick = () => {
+      openRestoreDatabaseModal(sortedBackups, '', () => renderTopologyView(container));
+    };
+  }
+
+  // Per-row Restore Snapshot Modal
   container.querySelectorAll('.restore-backup-btn').forEach(btn => {
     btn.onclick = () => {
       const fileName = btn.dataset.file;
-      openModal(`
-        <h3 style="margin-top:0;color:#B45309;">Restore Database from Snapshot</h3>
-        <div style="background:#FFFBEB;border:1px solid #FDE68A;border-radius:10px;padding:12px;margin:12px 0;font-size:13px;color:#92400E;">
-          <strong>Warning:</strong> Restoring <code>${escapeHtml(fileName)}</code> will overwrite your live SQLite database with the state from this snapshot.
-        </div>
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;margin:14px 0;">
-          <input type="checkbox" id="preRestoreSafetyCheck" checked />
-          <span>Create an automatic <code>pre_restore</code> safety backup of the current live database before restoring (Recommended)</span>
-        </label>
-        <div style="display:flex;justify-content:flex-end;gap:10px;">
-          <button class="btn btn-outline" id="cancelRestoreBtn">Cancel</button>
-          <button class="btn btn-danger" id="confirmRestoreBtn">Verify Integrity &amp; Restore Database</button>
-        </div>
-      `, (m) => {
-        m.querySelector('#cancelRestoreBtn').onclick = closeModal;
-        m.querySelector('#confirmRestoreBtn').onclick = async () => {
-          const createPreRestoreBackup = m.querySelector('#preRestoreSafetyCheck').checked;
-          try {
-            const res = await apiFetch(`/api/backups/restore/${encodeURIComponent(fileName)}`, {
-              method: 'POST',
-              body: JSON.stringify({ createPreRestoreBackup })
-            });
-            closeModal();
-            await refreshReferenceData();
-            showToast(`Restored database from ${res.restoredFrom}${res.preRestoreSnapshot ? ` (Safety backup: ${res.preRestoreSnapshot})` : ''}`);
-            renderTopologyView(container);
-          } catch (err) {
-            alert(`Restore failed: ${err.message}`);
-          }
-        };
-      });
+      openRestoreDatabaseModal(sortedBackups, fileName, () => renderTopologyView(container));
     };
   });
 }
+
 

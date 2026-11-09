@@ -490,6 +490,235 @@ export function openCategoryManagerModal(categoryToEdit = null, onSuccess = null
   });
 }
 
+/**
+ * Clear Transaction History Modal (v2.4)
+ * Offers pre-clear database backup option and tombstone/staging cleanup options
+ * while preserving Categories, Rules, Accounts, Monthly Budgets, and Settings.
+ */
+export function openClearTransactionHistoryModal(onSuccess) {
+  openModal(`
+    <h3 style="margin-top:0;color:#DC2626;">Clear Transaction History</h3>
+    <div style="background:#FEF2F2;border:1px solid #FECACA;border-radius:10px;padding:12px;margin-bottom:14px;font-size:13px;color:#991B1B;">
+      <strong>Design Iteration Reset:</strong> Clears imported transactions while preserving all of your <strong>Categories</strong>, <strong>Auto-Categorization Rules</strong>, <strong>Accounts</strong>, <strong>Monthly Budgets</strong>, and <strong>Income Settings</strong>.
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:12px;margin:14px 0;">
+      <div>
+        <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Scope to Clear</label>
+        <select id="clearHistoryScopeSelect" class="select-control" style="width:100%;">
+          <option value="">All Accounts (Clear Entire Transaction History)</option>
+          ${state.accounts.map(a => `<option value="${a.accountId}">Only Account: ${escapeHtml(a.accountName)} (${escapeHtml(a.institution)})</option>`).join('')}
+        </select>
+      </div>
+
+      <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;background:#EFF6FF;border:1px solid #BFDBFE;border-radius:10px;padding:10px 12px;cursor:pointer;">
+        <input type="checkbox" id="clearHistoryBackupCheck" checked style="margin-top:3px;" />
+        <div>
+          <strong style="color:#1E40AF;">Back up database before clearing (<code>pre_clear_history</code> snapshot)</strong>
+          <div style="font-size:11px;color:#475569;margin-top:2px;">
+            Creates a verified SQLite snapshot first so you can restore your current transaction history at any time.
+          </div>
+        </div>
+      </label>
+
+      <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;cursor:pointer;">
+        <input type="checkbox" id="clearHistoryTombstonesCheck" checked style="margin-top:3px;" />
+        <div>
+          <strong>Also reset deleted transaction tombstones (<code>DeletedTransactionHashes</code>)</strong>
+          <div style="font-size:11px;color:#64748B;">Allows re-importing the same CSV statements without skipping previously deleted rows.</div>
+        </div>
+      </label>
+
+      <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;cursor:pointer;">
+        <input type="checkbox" id="clearHistoryStagingCheck" checked style="margin-top:3px;" />
+        <div>
+          <strong>Also clear uncommitted CSV upload staging sessions</strong>
+        </div>
+      </label>
+    </div>
+
+    <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px;">
+      <button class="btn btn-outline" id="cancelClearHistoryBtn">Cancel</button>
+      <button class="btn btn-danger" id="confirmClearHistoryBtn">Backup &amp; Clear Transaction History</button>
+    </div>
+  `, (m) => {
+    const backupCheck = m.querySelector('#clearHistoryBackupCheck');
+    const confirmBtn = m.querySelector('#confirmClearHistoryBtn');
+
+    backupCheck.onchange = () => {
+      confirmBtn.textContent = backupCheck.checked
+        ? 'Backup & Clear Transaction History'
+        : 'Clear Transaction History (No Backup)';
+    };
+
+    m.querySelector('#cancelClearHistoryBtn').onclick = closeModal;
+    confirmBtn.onclick = async () => {
+      const scopeVal = m.querySelector('#clearHistoryScopeSelect').value;
+      const createBackupFirst = backupCheck.checked;
+      const clearDeletedTombstones = m.querySelector('#clearHistoryTombstonesCheck').checked;
+      const clearStagingSessions = m.querySelector('#clearHistoryStagingCheck').checked;
+
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = 'Clearing...';
+
+      try {
+        const res = await apiFetch('/api/transactions/clear-history', {
+          method: 'POST',
+          body: JSON.stringify({
+            createBackupFirst,
+            clearDeletedTombstones,
+            clearStagingSessions,
+            accountId: scopeVal ? Number(scopeVal) : null
+          })
+        });
+        closeModal();
+        const backupMsg = res.preClearBackupFile
+          ? `Backup saved: ${res.preClearBackupFile}`
+          : 'No pre-clear backup requested';
+        showToast(`Cleared ${res.deletedTransactionsCount} transaction(s) • ${backupMsg}`);
+        if (onSuccess) await onSuccess(res);
+      } catch (err) {
+        confirmBtn.disabled = false;
+        alert(`Failed to clear transaction history: ${err.message}`);
+      }
+    };
+  });
+}
+
+/**
+ * Unified Database Restore Modal (v2.4)
+ * Supports restoring either from a local snapshot in Backups/ or by uploading an external .db file,
+ * with an option to create an automatic pre_restore safety snapshot first.
+ */
+export function openRestoreDatabaseModal(backups = [], preselectedFileName = '', onSuccess = null) {
+  const hasLocalBackups = Array.isArray(backups) && backups.length > 0;
+  const initialMode = preselectedFileName || hasLocalBackups ? 'local' : 'upload';
+  const selectedFile = preselectedFileName || (hasLocalBackups ? backups[0].fileName : '');
+
+  openModal(`
+    <h3 style="margin-top:0;color:#B45309;">Restore SQLite Database</h3>
+    <div style="background:#FFFBEB;border:1px solid #FDE68A;border-radius:10px;padding:12px;margin:12px 0;font-size:13px;color:#92400E;">
+      <strong>Warning:</strong> Restoring a snapshot will replace the live database with the selected snapshot after verifying <code>PRAGMA integrity_check</code>.
+    </div>
+
+    <div style="display:flex;gap:8px;margin-bottom:12px;">
+      <button type="button" class="pill-btn ${initialMode === 'local' ? 'active' : ''}" id="restoreModeLocalBtn">
+        From Local Snapshot (${backups.length})
+      </button>
+      <button type="button" class="pill-btn ${initialMode === 'upload' ? 'active' : ''}" id="restoreModeUploadBtn">
+        Upload External .db File
+      </button>
+    </div>
+
+    <div id="restoreLocalWrap" style="display:${initialMode === 'local' ? 'block' : 'none'};margin-bottom:14px;">
+      <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Select Snapshot from Backups Directory</label>
+      ${hasLocalBackups ? `
+        <select id="restoreSnapshotSelect" class="select-control" style="width:100%;">
+          ${backups.map(b => `
+            <option value="${escapeHtml(b.fileName)}" ${b.fileName === selectedFile ? 'selected' : ''}>
+              ${escapeHtml(b.fileName)} (${escapeHtml(b.reasonLabel || 'Snapshot')} • ${(Number(b.sizeBytes || 0) / 1024).toFixed(1)} KB)
+            </option>
+          `).join('')}
+        </select>
+      ` : `
+        <div style="padding:10px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;font-size:12px;color:#64748B;">
+          No local snapshots found in Backups directory. Switch to "Upload External .db File" to restore from a file.
+        </div>
+      `}
+    </div>
+
+    <div id="restoreUploadWrap" style="display:${initialMode === 'upload' ? 'block' : 'none'};margin-bottom:14px;">
+      <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Select SQLite Snapshot File (.db)</label>
+      <input type="file" id="restoreUploadFileInput" accept=".db,.sqlite,.sqlite3" class="input-control" style="width:100%;" />
+    </div>
+
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;margin:14px 0;cursor:pointer;">
+      <input type="checkbox" id="preRestoreSafetyCheck" checked />
+      <span>Create an automatic <code>pre_restore</code> safety backup of the current live database before restoring (Recommended)</span>
+    </label>
+
+    <div style="display:flex;justify-content:flex-end;gap:10px;">
+      <button class="btn btn-outline" id="cancelRestoreBtn">Cancel</button>
+      <button class="btn btn-danger" id="confirmRestoreBtn">Verify Integrity &amp; Restore Database</button>
+    </div>
+  `, (m) => {
+    let activeMode = initialMode;
+    const localBtn = m.querySelector('#restoreModeLocalBtn');
+    const uploadBtn = m.querySelector('#restoreModeUploadBtn');
+    const localWrap = m.querySelector('#restoreLocalWrap');
+    const uploadWrap = m.querySelector('#restoreUploadWrap');
+
+    localBtn.onclick = () => {
+      activeMode = 'local';
+      localBtn.classList.add('active');
+      uploadBtn.classList.remove('active');
+      localWrap.style.display = 'block';
+      uploadWrap.style.display = 'none';
+    };
+
+    uploadBtn.onclick = () => {
+      activeMode = 'upload';
+      uploadBtn.classList.add('active');
+      localBtn.classList.remove('active');
+      uploadWrap.style.display = 'block';
+      localWrap.style.display = 'none';
+    };
+
+    m.querySelector('#cancelRestoreBtn').onclick = closeModal;
+    m.querySelector('#confirmRestoreBtn').onclick = async () => {
+      const createPreRestoreBackup = m.querySelector('#preRestoreSafetyCheck').checked;
+      const confirmBtn = m.querySelector('#confirmRestoreBtn');
+
+      try {
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = 'Restoring...';
+        let res;
+
+        if (activeMode === 'local') {
+          const selectEl = m.querySelector('#restoreSnapshotSelect');
+          const targetFile = selectEl ? selectEl.value : '';
+          if (!targetFile) {
+            alert('Please select a backup snapshot to restore.');
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = 'Verify Integrity & Restore Database';
+            return;
+          }
+          res = await apiFetch(`/api/backups/restore/${encodeURIComponent(targetFile)}`, {
+            method: 'POST',
+            body: JSON.stringify({ createPreRestoreBackup })
+          });
+        } else {
+          const fileInput = m.querySelector('#restoreUploadFileInput');
+          const file = fileInput?.files?.[0];
+          if (!file) {
+            alert('Please choose a .db snapshot file to upload and restore.');
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = 'Verify Integrity & Restore Database';
+            return;
+          }
+          const formData = new FormData();
+          formData.append('file', file);
+          formData.append('createPreRestoreBackup', String(createPreRestoreBackup));
+          res = await apiFetch('/api/backups/restore-upload', {
+            method: 'POST',
+            body: formData
+          });
+        }
+
+        closeModal();
+        await refreshReferenceData();
+        const safetyBackup = res.preRestoreBackupFile || res.preRestoreSnapshot;
+        showToast(`Restored database from ${res.restoredFrom}${safetyBackup ? ` (Safety backup: ${safetyBackup})` : ''}`);
+        if (onSuccess) await onSuccess(res);
+      } catch (err) {
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Verify Integrity & Restore Database';
+        alert(`Restore failed: ${err.message}`);
+      }
+    };
+  });
+}
+
 const viewTitles = {
   budgets: 'Monthly Budgets',
   cashflow: 'Cashflow & Sankey',

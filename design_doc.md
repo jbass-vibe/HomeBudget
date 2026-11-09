@@ -1,15 +1,15 @@
-# Local Home Budgeting & Cashflow System — Design Document (v2.3)
+# Local Home Budgeting & Cashflow System — Design Document (v2.4)
 
-**Document Version:** 2.3  
+**Document Version:** 2.4  
 **Target Platform:** Windows 11 IIS + ASP.NET Core (.NET 10 Minimal APIs) + SQLite (WAL Mode)  
 **Network Scope:** Strictly LAN-Only (`LocalSubnet` via Windows Defender Firewall, Port 8080)  
 **Primary Personas:**
 - **User (Spouse / Mobile-First on iPhone):** Reviews monthly budgets, explores the Cashflow Sankey visualization, manages categories (add/edit/delete), and rapidly categorizes or recategorizes expenses directly from the Visualization and Budgets views with automated forward/backward rule propagation prompts and flexible list sorting.
-- **Administrator (Desktop on Windows 11 PC):** Performs multi-file CSV statement ingestion (Chase & Wells Fargo), manages full category topology, rules, and local SQLite backup lifecycle/policies, and uses the filtered Transaction Inspector to edit, annotate (`Notes`), split, or delete income and expense entries (with tombstone hash protection).
+- **Administrator (Desktop on Windows 11 PC):** Performs multi-file CSV statement ingestion (Chase & Wells Fargo), manages full category topology, rules, and local SQLite backup/restore lifecycle & policies, clears transaction history with pre-clear backup protection while iterating on topology/rules, and uses the filtered Transaction Inspector to edit, annotate (`Notes`), split, or delete income and expense entries (with tombstone hash protection).
 
 ---
 
-## 1. Summary of Requirements & Architecture Evolution (v2.0 $\rightarrow$ v2.3)
+## 1. Summary of Requirements & Architecture Evolution (v2.0 $\rightarrow$ v2.4)
 
 ### 1.1 Core Product Capabilities
 1. **Full Category Lifecycle & Dual-Persona Access (Add, Edit, Delete):**
@@ -41,9 +41,10 @@
 5. **Comprehensive List Management & Multi-Mode Sorting (v2.2):**
    - Every major list, dropdown menu, visualization node column, and table across the application provides consistent, user-controllable sorting options—including **Alphabetical (A $\rightarrow$ Z / Z $\rightarrow$ A)**, **Recent Changes (`UpdatedAt DESC`)**, **Amount / Spend (High $\rightarrow$ Low / Low $\rightarrow$ High)**, and **Custom / Priority Order**.
 
-6. **Smart Coalesced SQLite Backup Policy & Admin Backup Management Suite (New in v2.3):**
+6. **Smart Coalesced SQLite Backup Policy, Full Database Restore & Clear Transaction History (v2.3 $\rightarrow$ v2.4):**
    - **Preventing Backup Sprawl (Debounce + Cooldown + Tiered Triggers):** Replaces naive synchronous per-click snapshots with a configurable policy engine (`BackupService.RequestBackupAsync`). By default (`BackupAutoMode = 'Coalesced'`), rapid interactive edits (triage categorizations, budget tweaks, rule edits, transaction edits) are coalesced across a sliding quiet window (`BackupDebounceSeconds = 30s`) and a minimum interval cooldown (`BackupMinIntervalMinutes = 10m`) so a 20-item categorization session produces **one** consolidated snapshot instead of 20 separate `.db` files. Nested duplicate snapshots inside composite service operations are also eliminated.
-   - **Full Admin Backup Management Panel (`topologyView.js`):** Allows the Administrator to configure auto-backup mode (`Coalesced`, `MajorOnly`, `ManualOnly`, `EveryChange`), retention count (`MaxRetainedBackups`, default `15`), debounce/cooldown timers, flush pending coalesced backups on demand, sort/inspect snapshots with trigger-reason badges, delete individual or bulk-selected snapshots, prune old snapshots, and safely **restore** the live database from any snapshot (with pre-restore safety backup and `PRAGMA integrity_check` verification).
+   - **Full Admin Backup & Database Restore Suite (`topologyView.js`):** Allows the Administrator to configure auto-backup mode (`Coalesced`, `MajorOnly`, `ManualOnly`, `EveryChange`), retention count (`MaxRetainedBackups`, default `15`), debounce/cooldown timers, flush pending coalesced backups on demand, sort/inspect snapshots with trigger-reason badges, delete individual or bulk-selected snapshots, prune old snapshots, and safely **restore** the live database either from any local snapshot (`POST /api/backups/restore/{fileName}`) or by uploading an external `.db` snapshot file (`POST /api/backups/restore-upload`)—with automatic `pre_restore` safety backup and `PRAGMA integrity_check` verification.
+   - **Clear Transaction History with Pre-Clear Backup (`POST /api/transactions/clear-history`):** Enables rapid design and rule iteration by allowing the Administrator to wipe all transaction history (or a specific account's transactions) while preserving all Categories, Auto-Categorization Rules, Accounts, Monthly Budgets, and Income Settings. Before clearing, the modal offers a pre-checked option to create an immediate `pre_clear_history` database backup snapshot, as well as options to clear `DeletedTransactionHashes` tombstones and `StagingSessions` so CSV statements can be cleanly re-imported from scratch.
 
 ### 1.2 Operational Safety & Data Integrity Refinements
 1. **Canonical Transaction Type Vocabulary:**
@@ -341,8 +342,8 @@ To prevent backup sprawl while preserving strong local data safety, `BackupServi
 4. **`'EveryChange'` *(Legacy Immediate Mode)*:**
    - Creates an immediate snapshot on each top-level mutation (while suppressing duplicate nested snapshots inside composite operations such as `UpdateTransactionAsync` with rule creation + back-propagation).
 
-#### C. Admin Panel Backup Management Suite (`topologyView.js` Section 4)
-The **Local SQLite Backup Management** card in the Admin Panel (`Categories, Rules, Income & Backups`) provides end-to-end control over backup policies, storage, retention, and recovery:
+#### C. Admin Panel Backup, Restore & Transaction History Management (`topologyView.js` Section 4 & `inspectorView.js`)
+The **Local SQLite Backup, Restore & Database Management** card in the Admin Panel (`Categories, Rules, Income & Backups`) and the **Transaction Inspector** header provide end-to-end control over backup policies, storage, retention, recovery, and transaction history reset:
 1. **Storage & Queue Telemetry Bar:**
    - Displays **Total Snapshots (`N / MaxRetained`)**, **Total Disk Usage (`KB / MB`)**, **Latest Snapshot Timestamp**, and **Pending Coalesced Changes (`N` queued edits)** with a one-click **"Flush Pending Now"** button.
 2. **Inline Backup Policy Configuration:**
@@ -350,13 +351,24 @@ The **Local SQLite Backup Management** card in the Admin Panel (`Categories, Rul
 3. **Snapshot List Sorting, Single/Bulk Deletion & Pruning:**
    - Sort snapshots by **Newest First (`date_desc`)**, **Oldest First (`date_asc`)**, **Largest Size (`size_desc`)**, **Smallest Size (`size_asc`)**, or **Trigger Reason (`reason_asc`)**.
    - Select individual or all snapshots via checkboxes to **Bulk Delete Selected (`POST /api/backups/bulk-delete`)**, delete a single row (`DELETE /api/backups/{fileName}`), or **Prune Oldest Snapshots (`POST /api/backups/prune`)** down to any target count.
-4. **Verified In-App Database Restore (`POST /api/backups/restore/{fileName}`):**
-   - Clicking **Restore...** on any snapshot opens a confirmation modal with an option to create a `pre_restore` safety backup of the current live database first (checked by default).
+4. **Verified In-App Database Restore (`POST /api/backups/restore/{fileName}` & `POST /api/backups/restore-upload`):**
+   - **Per-Row or Top-Level Restore Modal:** Clicking **`↺ Restore Database...`** in the header toolbar or **`↺ Restore DB...`** on any snapshot row opens the Database Restore Modal, supporting two modes:
+     - **Restore from Local Snapshot:** Select any snapshot from `Backups/` (pre-selected when launched from a row).
+     - **Upload & Restore External `.db` Snapshot:** Upload a `.db` file previously downloaded to the user's computer or Google Drive (`POST /api/backups/restore-upload`), which saves the file into `Backups/`, verifies its SQLite integrity, and restores it.
+   - Both restore workflows include a pre-checked option to **create an automatic `pre_restore` safety backup** of the current live database first.
    - The backend verifies the target snapshot file is non-empty and passes `PRAGMA integrity_check;`, creates the optional `pre_restore` snapshot, uses `SqliteConnection.BackupDatabase` to atomically copy the snapshot into the live `budget.db`, and runs `DatabaseInitializer.ApplyIdempotentSchemaMigrationsAsync` so even older snapshots upgrade cleanly to the current schema.
+5. **Clear Transaction History with Pre-Clear Backup (`POST /api/transactions/clear-history`):**
+   - Available from both the **Admin Panel (Section 4)** and the **Transaction Inspector** header via the **`🗑 Clear Transaction History...`** button (`openClearTransactionHistoryModal`).
+   - Designed for rapid iteration on category topology, rules, and CSV parsing without losing configured `Categories`, `CategorizationRules`, `Accounts`, `MonthlyBudget` targets, or `Settings` / `IncomeOverrides`.
+   - Presents an interactive modal with:
+     - **Scope Selector:** Clear **All Accounts (Full Transaction History)** or only transactions belonging to a **Specific Account**.
+     - **`[x] Create a database backup snapshot ("pre_clear_history") before clearing`** *(Checked by default)*: Immediately writes a verified SQLite snapshot before deleting any rows so the user can restore with one click.
+     - **`[x] Also reset deleted transaction tombstones (DeletedTransactionHashes)`** *(Checked by default)*: Clears tombstone hashes so previously deleted transactions do not block re-importing the same CSV files.
+     - **`[x] Clear uncommitted CSV upload staging sessions (StagingSessions)`** *(Checked by default)*.
 
 ---
 
-## 5. Updated API Contract Summary (v2.3)
+## 5. Updated API Contract Summary (v2.4)
 
 | Method & Route | Persona | Description | Backup Behavior (`Coalesced` Default) |
 | :--- | :--- | :--- | :--- |
@@ -379,9 +391,10 @@ The **Local SQLite Backup Management** card in the Admin Panel (`Categories, Rul
 | `GET /api/transactions/similar-count` | Both | Returns count of past transactions matching `pattern`. | None |
 | `GET /api/transactions` | Both / Admin | Query transactions with filters and `sortBy` (`date_desc`, `date_asc`, `recent_changes`, `merchant_asc`, `merchant_desc`, `amount_desc`, `amount_asc`). | None |
 | `PUT /api/transactions/{id}` | Admin | Edit transaction fields and `Notes` (single consolidated backup request even when creating/back-propagating a rule). | Coalesced (`data_edit`) |
-| `POST /api/transactions/{id}/split` | Admin | Split a transaction into multiple categorized child legs. | Coalesced (`data_edit`) |
+| `POST /api/transactions/{id}/split` | Admin | Split a transaction into multiple categorized child legs. | **Major** (`transaction_split`) |
 | `DELETE /api/transactions/{id}` | Admin | Delete an income or expense transaction (with `?addToTombstone=true/false`). | Coalesced (`transaction_delete`) |
 | `POST /api/transactions/bulk-delete` | Admin | Bulk-delete selected income/expense transactions in one atomic transaction. | **Major** (`bulk_delete`) |
+| `POST /api/transactions/clear-history` | Admin | Clear all transactions (or a single account's transactions), optionally resetting `DeletedTransactionHashes` and `StagingSessions`, with an optional pre-clear backup (`createBackupFirst = true`). | **Immediate Pre-Clear** (`pre_clear_history`) |
 | `GET /api/cashflow` | Both | Returns cashflow summary, Sankey nodes/links, `uncategorizedTransactions`, and `?categorySort=` ordering. | None |
 | `GET /api/budgets/{yearMonth?}` | Both | Returns monthly budget summary, category progress cards, and uncategorized transactions for the month. | None |
 | `GET /api/settings` | Both | Returns income configuration and monthly overrides. | None |
@@ -396,6 +409,7 @@ The **Local SQLite Backup Management** card in the Admin Panel (`Categories, Rul
 | `POST /api/backups/bulk-delete` | Admin | Deletes multiple selected `.db` backup snapshots in one operation. | None |
 | `POST /api/backups/prune` | Admin | Prunes older snapshots so only the `keepCount` newest `.db` files remain. | None |
 | `POST /api/backups/restore/{fileName}` | Admin | Verifies snapshot integrity, optionally creates a `pre_restore` safety snapshot, atomically restores `budget.db`, and runs schema migrations. | **Immediate** (`pre_restore`) |
+| `POST /api/backups/restore-upload` | Admin | Uploads an external `.db` snapshot file, verifies SQLite integrity, optionally creates a `pre_restore` safety snapshot, and restores `budget.db`. | **Immediate** (`pre_restore`) |
 
 ---
 
@@ -443,10 +457,12 @@ The **Local SQLite Backup Management** card in the Admin Panel (`Categories, Rul
 +-----------------------------------------------------------------------+
 ```
 
-### 6.3 Admin Backup Management Panel (`Categories, Rules, Income & Backups`)
+### 6.3 Admin Backup, Restore & Transaction History Management Panel
 ```
 +-----------------------------------------------------------------------+
-| 4. Local SQLite Backup Management & Retention Policy                  |
+| 4. Local SQLite Backup, Restore & Database Management                 |
+|    [ 🗑 Clear Transaction History... ] [ ↺ Restore Database... ]       |
+|    [ + Create Manual Snapshot Now ]                                   |
 |-----------------------------------------------------------------------|
 | Snapshots: 8 / 15 Max  | Disk Used: 1.4 MB | Pending Edits: 0 Queued  |
 |-----------------------------------------------------------------------|
@@ -455,7 +471,6 @@ The **Local SQLite Backup Management** card in the Admin Panel (`Categories, Rul
 |                                                [ Save Backup Policy ] |
 |-----------------------------------------------------------------------|
 | Sort: [ Newest First ▼ ]  [ Delete Selected (2) ] [ Prune Oldest... ] |
-|                                        [ + Create Manual Snapshot ]   |
 |-----------------------------------------------------------------------|
 | [x] budget_20261109_192000_manual.db     | Manual    | 180 KB |       |
 |     [ ⬇ Download ] [ ↺ Restore DB... ] [ 🗑 Delete ]                  |
@@ -463,3 +478,27 @@ The **Local SQLite Backup Management** card in the Admin Panel (`Categories, Rul
 |     [ ⬇ Download ] [ ↺ Restore DB... ] [ 🗑 Delete ]                  |
 +-----------------------------------------------------------------------+
 ```
+
+### 6.4 Clear Transaction History Modal (with Pre-Clear Backup Protection)
+```
++-----------------------------------------------------------------------+
+| Clear Transaction History                                         [X] |
++-----------------------------------------------------------------------+
+| Reset imported transactions while preserving your Categories,         |
+| Auto-Categorization Rules, Accounts, Monthly Budgets, and Settings.   |
+|                                                                       |
+| Scope: [ All Accounts (Clear Entire Transaction History)          ▼ ] |
+|                                                                       |
+| [x] Back up database before clearing ("pre_clear_history" snapshot)   |
+|     Creates a verified SQLite snapshot first so you can restore       |
+|     your current transactions at any time.                            |
+|                                                                       |
+| [x] Also clear deleted transaction tombstones                         |
+|     Allows re-importing previously deleted CSV rows cleanly.          |
+|                                                                       |
+| [x] Also clear uncommitted CSV staging sessions                       |
+|                                                                       |
+|                      [ Cancel ]  [ Backup & Clear Transaction History ]|
++-----------------------------------------------------------------------+
+```
+

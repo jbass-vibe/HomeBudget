@@ -562,6 +562,15 @@ app.MapPost("/api/transactions/bulk-delete", async (
     return Results.Ok(new { deletedCount, backupFileCreated = backupFile });
 });
 
+app.MapPost("/api/transactions/clear-history", async (
+    ClearTransactionHistoryRequest? req,
+    CategorizationService catService,
+    CancellationToken ct) =>
+{
+    var result = await catService.ClearTransactionHistoryAsync(req ?? new ClearTransactionHistoryRequest(), ct);
+    return Results.Ok(result);
+});
+
 // ============================================================================
 // 5. SETTINGS, INCOME OVERRIDES & LOCAL BACKUP MANAGEMENT
 // ============================================================================
@@ -729,5 +738,36 @@ app.MapPost("/api/backups/restore/{fileName}", async (
     }
 });
 
+app.MapPost("/api/backups/restore-upload", async (
+    HttpRequest request,
+    BackupService backupService,
+    CancellationToken ct) =>
+{
+    var form = await request.ReadFormAsync(ct);
+    var file = form.Files.FirstOrDefault();
+    if (file is null || file.Length == 0)
+    {
+        return Results.BadRequest(new { error = "A valid non-empty SQLite .db snapshot file is required." });
+    }
+
+    bool createPreRestoreBackup = !bool.TryParse(form["createPreRestoreBackup"], out bool flag) || flag;
+
+    try
+    {
+        await using var stream = file.OpenReadStream();
+        var result = await backupService.RestoreUploadedSnapshotAsync(
+            stream,
+            file.FileName,
+            createPreRestoreBackup,
+            ct);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+}).DisableAntiforgery();
+
 app.Run();
+
 
