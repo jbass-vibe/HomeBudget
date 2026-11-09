@@ -5,6 +5,7 @@ public sealed class CashflowResponse
     public string StartDate { get; set; } = "";
     public string EndDate { get; set; } = "";
     public string WindowType { get; set; } = "mtd";
+    public string CategorySort { get; set; } = "spend_desc";
     public bool IncludeSubcategories { get; set; }
     public bool HasAnySubcategories { get; set; }
     public decimal TotalIncome { get; set; }
@@ -70,6 +71,8 @@ public sealed class CashflowTableRowDto
     public int? CategoryId { get; set; }
     public string CategoryName { get; set; } = "";
     public string ColorHex { get; set; } = "#64748B";
+    public int SortOrder { get; set; } = 100;
+    public string LastActivityAt { get; set; } = "";
     public decimal NetSpend { get; set; }
     public decimal PctOfTotalSpend { get; set; }
     public decimal PctOfIncome { get; set; }
@@ -82,6 +85,7 @@ public sealed class SubcategoryBreakdownDto
 {
     public string SubcategoryName { get; set; } = "";
     public decimal NetSpend { get; set; }
+    public string LastActivityAt { get; set; } = "";
 }
 
 public sealed class MonthlyBudgetViewDto
@@ -109,6 +113,8 @@ public sealed class CategoryBudgetCardDto
     public decimal Remaining { get; set; }
     public decimal PctUsed { get; set; }
     public string StatusLevel { get; set; } = "Green";
+    public string? UpdatedAt { get; set; }
+    public string LastActivityAt { get; set; } = "";
     public List<TransactionDto> Transactions { get; set; } = [];
 }
 
@@ -130,6 +136,8 @@ public sealed class TransactionDto
     public bool IsCategoryManuallyLocked { get; set; }
     public int? ParentTransactionId { get; set; }
     public string? Notes { get; set; }
+    public string? CreatedAt { get; set; }
+    public string? UpdatedAt { get; set; }
 }
 
 public sealed class UpdateTransactionRequest

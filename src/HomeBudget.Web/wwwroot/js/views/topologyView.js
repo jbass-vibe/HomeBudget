@@ -1,14 +1,49 @@
 import {
+  state,
   apiFetch,
   formatCurrency,
   escapeHtml,
   formatBackupStatus,
+  sortCategories,
+  setSortPreference,
   showToast,
   openModal,
   closeModal,
   refreshReferenceData,
   openCategoryManagerModal
 } from '../app.js';
+
+export function sortRules(rules, catNameById = {}, sortMode = 'priority_asc') {
+  const list = Array.isArray(rules) ? [...rules] : [];
+  return list.sort((a, b) => {
+    const patA = String(a.matchPattern || '');
+    const patB = String(b.matchPattern || '');
+    switch (sortMode) {
+      case 'alpha_asc':
+        return patA.localeCompare(patB, undefined, { sensitivity: 'base' });
+      case 'category_asc': {
+        const catA = String(catNameById[a.categoryId] || a.categoryId || '');
+        const catB = String(catNameById[b.categoryId] || b.categoryId || '');
+        return catA.localeCompare(catB, undefined, { sensitivity: 'base' }) ||
+          (Number(a.priority ?? 100) - Number(b.priority ?? 100));
+      }
+      case 'recent': {
+        const tsA = String(a.updatedAt || a.createdAt || '');
+        const tsB = String(b.updatedAt || b.createdAt || '');
+        if (tsB !== tsA) return tsB.localeCompare(tsA);
+        return Number(b.ruleId || 0) - Number(a.ruleId || 0);
+      }
+      case 'priority_asc':
+      default: {
+        const prioDiff = Number(a.priority ?? 100) - Number(b.priority ?? 100);
+        if (prioDiff !== 0) return prioDiff;
+        const lenDiff = patB.length - patA.length;
+        if (lenDiff !== 0) return lenDiff;
+        return Number(a.ruleId || 0) - Number(b.ruleId || 0);
+      }
+    }
+  });
+}
 
 export async function renderTopologyView(container) {
   const [topology, settings, backupInfo] = await Promise.all([
@@ -17,9 +52,11 @@ export async function renderTopologyView(container) {
     apiFetch('/api/backups')
   ]);
 
-  const categories = topology.categories;
-  const rules = topology.rules;
-  const catNameById = Object.fromEntries(categories.map(c => [c.categoryId, c.name]));
+  const rawCategories = topology.categories;
+  const catNameById = Object.fromEntries(rawCategories.map(c => [c.categoryId, c.name]));
+  const categories = sortCategories(rawCategories, state.topologyCategorySort);
+  const dropdownCategories = sortCategories(rawCategories, state.categoryDropdownSort);
+  const rules = sortRules(topology.rules, catNameById, state.topologyRuleSort);
 
   container.innerHTML = `
     <div class="page-header">
@@ -36,7 +73,16 @@ export async function renderTopologyView(container) {
           <h2 style="margin:0;font-size:17px;font-weight:800;">1. Spending Category Topology</h2>
           <p style="margin:2px 0 0 0;font-size:12px;color:#64748B;">Rename, reorder, or merge categories (merging automatically reassigns historical transactions)</p>
         </div>
-        <div style="display:flex;gap:8px;">
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;">
+          <label style="font-size:12px;font-weight:700;color:#475569;display:inline-flex;align-items:center;gap:6px;">
+            Sort Table:
+            <select id="topologyCatSortSelect" class="select-control" style="font-size:12px;padding:4px 8px;">
+              <option value="custom_order" ${state.topologyCategorySort === 'custom_order' ? 'selected' : ''}>Custom Order</option>
+              <option value="alpha_asc" ${state.topologyCategorySort === 'alpha_asc' ? 'selected' : ''}>Alphabetical (A-Z)</option>
+              <option value="recent" ${state.topologyCategorySort === 'recent' ? 'selected' : ''}>Recent Changes</option>
+              <option value="budget_desc" ${state.topologyCategorySort === 'budget_desc' ? 'selected' : ''}>Highest Budget ($)</option>
+            </select>
+          </label>
           <button class="btn btn-outline btn-sm" id="mergeCatModalBtn">Merge Categories...</button>
           <button class="btn btn-primary btn-sm" id="addCatModalBtn">+ New Category</button>
         </div>
@@ -80,7 +126,16 @@ export async function renderTopologyView(container) {
           <h2 style="margin:0;font-size:17px;font-weight:800;">2. Auto-Categorization Rules &amp; Historical Back-Propagation</h2>
           <p style="margin:2px 0 0 0;font-size:12px;color:#64748B;">Evaluated in ascending Priority order during CSV upload and retroactive back-propagation</p>
         </div>
-        <div style="display:flex;gap:8px;">
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;">
+          <label style="font-size:12px;font-weight:700;color:#475569;display:inline-flex;align-items:center;gap:6px;">
+            Sort Rules:
+            <select id="topologyRuleSortSelect" class="select-control" style="font-size:12px;padding:4px 8px;">
+              <option value="priority_asc" ${state.topologyRuleSort === 'priority_asc' ? 'selected' : ''}>Evaluation Priority</option>
+              <option value="alpha_asc" ${state.topologyRuleSort === 'alpha_asc' ? 'selected' : ''}>Match Pattern (A-Z)</option>
+              <option value="category_asc" ${state.topologyRuleSort === 'category_asc' ? 'selected' : ''}>Target Category (A-Z)</option>
+              <option value="recent" ${state.topologyRuleSort === 'recent' ? 'selected' : ''}>Recent Changes</option>
+            </select>
+          </label>
           <button class="btn btn-outline btn-sm" id="previewBackPropBtn">&#9889; Preview &amp; Back-Propagate Rules</button>
           <button class="btn btn-primary btn-sm" id="addRuleModalBtn">+ New Rule</button>
         </div>
@@ -184,6 +239,22 @@ export async function renderTopologyView(container) {
     </div>
   `;
 
+  const topologyCatSortSelect = container.querySelector('#topologyCatSortSelect');
+  if (topologyCatSortSelect) {
+    topologyCatSortSelect.onchange = (e) => {
+      setSortPreference('topologyCategorySort', e.target.value);
+      renderTopologyView(container);
+    };
+  }
+
+  const topologyRuleSortSelect = container.querySelector('#topologyRuleSortSelect');
+  if (topologyRuleSortSelect) {
+    topologyRuleSortSelect.onchange = (e) => {
+      setSortPreference('topologyRuleSort', e.target.value);
+      renderTopologyView(container);
+    };
+  }
+
   // Save inline Category edits
   container.querySelectorAll('.save-cat-btn').forEach(btn => {
     btn.onclick = async () => {
@@ -201,6 +272,7 @@ export async function renderTopologyView(container) {
       });
       await refreshReferenceData();
       showToast(`Updated category ${name}`);
+      renderTopologyView(container);
     };
   });
 
@@ -208,7 +280,7 @@ export async function renderTopologyView(container) {
   container.querySelectorAll('.del-cat-btn').forEach(btn => {
     btn.onclick = () => {
       const catId = Number(btn.dataset.catId);
-      const catObj = categories.find(c => c.categoryId === catId);
+      const catObj = rawCategories.find(c => c.categoryId === catId);
       if (catObj) {
         openCategoryManagerModal(catObj, () => renderTopologyView(container));
       }
@@ -261,13 +333,13 @@ export async function renderTopologyView(container) {
         <div>
           <label style="font-size:12px;font-weight:700;display:block;">Merge Source Category (Will be removed)</label>
           <select id="mergeSourceSel" class="select-control" style="width:100%;">
-            ${categories.map(c => `<option value="${c.categoryId}">${escapeHtml(c.name)}</option>`).join('')}
+            ${dropdownCategories.map(c => `<option value="${c.categoryId}">${escapeHtml(c.name)}</option>`).join('')}
           </select>
         </div>
         <div>
           <label style="font-size:12px;font-weight:700;display:block;">Into Target Category</label>
           <select id="mergeTargetSel" class="select-control" style="width:100%;">
-            ${categories.map((c, i) => `<option value="${c.categoryId}" ${i === 1 ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
+            ${dropdownCategories.map((c, i) => `<option value="${c.categoryId}" ${i === 1 ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
           </select>
         </div>
       </div>
@@ -299,7 +371,7 @@ export async function renderTopologyView(container) {
       <div style="display:flex;flex-direction:column;gap:12px;margin:14px 0;">
         <input type="text" id="newRulePattern" class="input-control" placeholder="Substring or Regex (e.g., WHOLEFDS, TRADER JOE)" />
         <select id="newRuleCat" class="select-control">
-          ${categories.map(c => `<option value="${c.categoryId}">${escapeHtml(c.name)}</option>`).join('')}
+          ${dropdownCategories.map(c => `<option value="${c.categoryId}">${escapeHtml(c.name)}</option>`).join('')}
         </select>
         <input type="text" id="newRuleSubcat" class="input-control" placeholder="Default Subcategory (Optional)" />
         <input type="number" id="newRulePriority" class="input-control" value="50" placeholder="Priority (Lower = Earlier)" />

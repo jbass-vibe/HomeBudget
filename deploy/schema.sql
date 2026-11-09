@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS Categories (
     SortOrder                INTEGER NOT NULL DEFAULT 100,
     ColorHex                 TEXT    NOT NULL DEFAULT '#3B82F6',
     IsActive                 INTEGER NOT NULL DEFAULT 1,
-    CreatedAt                TEXT    NOT NULL DEFAULT (datetime('now'))
+    CreatedAt                TEXT    NOT NULL DEFAULT (datetime('now')),
+    UpdatedAt                TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS CategorizationRules (
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS CategorizationRules (
     DefaultSubcategory  TEXT    NULL,
     Priority            INTEGER NOT NULL DEFAULT 100,
     CreatedAt           TEXT    NOT NULL DEFAULT (datetime('now')),
+    UpdatedAt           TEXT    NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (CategoryId) REFERENCES Categories(CategoryId) ON DELETE CASCADE
 );
 
@@ -51,6 +53,7 @@ CREATE TABLE IF NOT EXISTS Transactions (
     UploadBatchId            TEXT    NULL,
     Notes                    TEXT    NULL,
     CreatedAt                TEXT    NOT NULL DEFAULT (datetime('now')),
+    UpdatedAt                TEXT    NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (AccountId)  REFERENCES Accounts(AccountId),
     FOREIGN KEY (CategoryId) REFERENCES Categories(CategoryId) ON DELETE SET NULL
 );
@@ -89,6 +92,7 @@ CREATE INDEX IF NOT EXISTS IX_Transactions_Category ON Transactions(CategoryId);
 CREATE INDEX IF NOT EXISTS IX_Transactions_Type ON Transactions(TransactionType);
 CREATE INDEX IF NOT EXISTS IX_Transactions_Merchant ON Transactions(CleanMerchantName);
 CREATE INDEX IF NOT EXISTS IX_Transactions_DedupHash ON Transactions(DedupHash);
+CREATE INDEX IF NOT EXISTS IX_Transactions_UpdatedAt ON Transactions(UpdatedAt);
 
 -- Default Seed Accounts (Only inserted if Accounts table is empty)
 INSERT INTO Accounts (AccountName, Institution, AccountType, IsActive)

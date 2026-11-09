@@ -59,11 +59,11 @@ public sealed class BudgetService(SqliteConnectionFactory connectionFactory, Bac
             new { YearMonth = ym })).ToList();
 
         decimal creditCardPayoffsTotal = transactions
-            .Where(t => t.TransactionType == "CreditCardPayoff")
+            .Where(t => t.TransactionType == TransactionTypes.CreditCardPayoff)
             .Sum(t => t.Amount);
 
         var spendTxs = transactions
-            .Where(t => t.TransactionType is "Expense" or "Refund")
+            .Where(t => t.TransactionType is TransactionTypes.Expense or TransactionTypes.Refund)
             .ToList();
 
         var cards = new List<CategoryBudgetCardDto>();
@@ -83,6 +83,15 @@ public sealed class BudgetService(SqliteConnectionFactory connectionFactory, Bac
                         ? "Amber"
                         : "Green";
 
+            string maxTxUpdated = catTxs
+                .Select(t => t.UpdatedAt ?? t.CreatedAt ?? t.TransactionDate)
+                .DefaultIfEmpty("")
+                .Max() ?? "";
+
+            string lastActivity = string.CompareOrdinal(cat.UpdatedAt ?? "", maxTxUpdated) >= 0
+                ? (cat.UpdatedAt ?? maxTxUpdated)
+                : maxTxUpdated;
+
             cards.Add(new CategoryBudgetCardDto
             {
                 CategoryId = cat.CategoryId,
@@ -95,6 +104,8 @@ public sealed class BudgetService(SqliteConnectionFactory connectionFactory, Bac
                 Remaining = remaining,
                 PctUsed = pctUsed,
                 StatusLevel = statusLevel,
+                UpdatedAt = cat.UpdatedAt,
+                LastActivityAt = lastActivity,
                 Transactions = catTxs
             });
         }
@@ -120,7 +131,7 @@ public sealed class BudgetService(SqliteConnectionFactory connectionFactory, Bac
     {
         await using var conn = await connectionFactory.CreateOpenConnectionAsync(ct);
         int updated = await conn.ExecuteAsync(
-            "UPDATE Categories SET MonthlyBudget = @MonthlyBudget WHERE CategoryId = @CategoryId;",
+            "UPDATE Categories SET MonthlyBudget = @MonthlyBudget, UpdatedAt = datetime('now') WHERE CategoryId = @CategoryId;",
             new { CategoryId = categoryId, MonthlyBudget = Math.Max(0m, monthlyBudget) });
 
         if (updated == 0) return null;

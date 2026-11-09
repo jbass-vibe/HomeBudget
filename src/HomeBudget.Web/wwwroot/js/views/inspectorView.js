@@ -4,6 +4,8 @@ import {
   formatCurrency,
   escapeHtml,
   formatBackupStatus,
+  sortCategories,
+  setSortPreference,
   showToast,
   openModal,
   closeModal,
@@ -24,6 +26,8 @@ const filterState = {
 };
 
 export async function renderInspectorView(container) {
+  const sortedFilterCategories = sortCategories(state.categories, state.categoryDropdownSort);
+
   container.innerHTML = `
     <div class="page-header">
       <div>
@@ -73,7 +77,16 @@ export async function renderInspectorView(container) {
           <select id="fltCategory" class="select-control">
             <option value="">All Categories</option>
             <option value="uncat" ${filterState.uncategorizedOnly ? 'selected' : ''}>-- Uncategorized Only --</option>
-            ${state.categories.map(c => `<option value="${c.categoryId}" ${!filterState.uncategorizedOnly && String(c.categoryId) === filterState.categoryId ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
+            ${sortedFilterCategories.map(c => `<option value="${c.categoryId}" ${!filterState.uncategorizedOnly && String(c.categoryId) === filterState.categoryId ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:700;display:block;">Category List Order</label>
+          <select id="inspectorCatDropdownSort" class="select-control">
+            <option value="alpha_asc" ${state.categoryDropdownSort === 'alpha_asc' ? 'selected' : ''}>Alphabetical (A-Z)</option>
+            <option value="recent" ${state.categoryDropdownSort === 'recent' ? 'selected' : ''}>Recent Changes</option>
+            <option value="custom_order" ${state.categoryDropdownSort === 'custom_order' ? 'selected' : ''}>Custom Order</option>
+            <option value="budget_desc" ${state.categoryDropdownSort === 'budget_desc' ? 'selected' : ''}>Highest Budget ($)</option>
           </select>
         </div>
         <div>
@@ -95,13 +108,15 @@ export async function renderInspectorView(container) {
           <input type="number" step="1" id="fltMaxAmt" class="input-control" style="width:85px;" placeholder="Any" value="${escapeHtml(filterState.maxAmount)}" />
         </div>
         <div>
-          <label style="font-size:11px;font-weight:700;display:block;">Sort By</label>
+          <label style="font-size:11px;font-weight:700;display:block;">Sort Transactions</label>
           <select id="fltSort" class="select-control">
             <option value="date_desc" ${filterState.sortBy === 'date_desc' ? 'selected' : ''}>Newest First</option>
             <option value="date_asc" ${filterState.sortBy === 'date_asc' ? 'selected' : ''}>Oldest First</option>
+            <option value="recent_changes" ${filterState.sortBy === 'recent_changes' ? 'selected' : ''}>Recent Changes</option>
             <option value="amount_desc" ${filterState.sortBy === 'amount_desc' ? 'selected' : ''}>Highest Amount</option>
             <option value="amount_asc" ${filterState.sortBy === 'amount_asc' ? 'selected' : ''}>Lowest Amount</option>
             <option value="merchant_asc" ${filterState.sortBy === 'merchant_asc' ? 'selected' : ''}>Merchant (A-Z)</option>
+            <option value="merchant_desc" ${filterState.sortBy === 'merchant_desc' ? 'selected' : ''}>Merchant (Z-A)</option>
           </select>
         </div>
         <div style="flex:1;min-width:180px;">
@@ -137,6 +152,11 @@ export async function renderInspectorView(container) {
   };
 
   container.querySelector('#applyFiltersBtn').onclick = syncInputsAndReload;
+  container.querySelector('#fltSort').onchange = syncInputsAndReload;
+  container.querySelector('#inspectorCatDropdownSort').onchange = (e) => {
+    setSortPreference('categoryDropdownSort', e.target.value);
+    renderInspectorView(container);
+  };
   container.querySelector('#fltSearch').onkeydown = (e) => {
     if (e.key === 'Enter') syncInputsAndReload();
   };
@@ -219,10 +239,11 @@ async function loadTransactionsTable(mountEl) {
   if (filterState.search) params.set('search', filterState.search);
 
   const data = await apiFetch(`/api/transactions?${params.toString()}`);
+  const sortedDropdownCats = sortCategories(state.categories, state.categoryDropdownSort);
 
   const catOptions = (selectedId) => `
     <option value="">-- Uncategorized --</option>
-    ${state.categories.map(c => `<option value="${c.categoryId}" ${c.categoryId === selectedId ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
+    ${sortedDropdownCats.map(c => `<option value="${c.categoryId}" ${c.categoryId === selectedId ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
     <option value="__NEW__">+ Add New Category...</option>
   `;
 
@@ -424,7 +445,7 @@ async function loadTransactionsTable(mountEl) {
             <div class="split-item-row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
               <input type="number" step="0.01" class="input-control split-amt" value="${amt}" style="width:95px;" />
               <select class="select-control split-cat" style="flex:1;min-width:140px;">
-                ${state.categories.map(c => `<option value="${c.categoryId}" ${c.categoryId === tx.categoryId ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
+                ${sortedDropdownCats.map(c => `<option value="${c.categoryId}" ${c.categoryId === tx.categoryId ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
               </select>
               <input type="text" class="input-control split-sub" placeholder="Subcategory ${i + 1}" style="width:115px;" />
               <input type="text" class="input-control split-notes" placeholder="Note (opt)" value="${escapeHtml(tx.notes || '')}" style="width:130px;" />
@@ -447,7 +468,7 @@ async function loadTransactionsTable(mountEl) {
           row.innerHTML = `
             <input type="number" step="0.01" class="input-control split-amt" value="0.00" style="width:95px;" />
             <select class="select-control split-cat" style="flex:1;min-width:140px;">
-              ${state.categories.map(c => `<option value="${c.categoryId}">${escapeHtml(c.name)}</option>`).join('')}
+              ${sortedDropdownCats.map(c => `<option value="${c.categoryId}">${escapeHtml(c.name)}</option>`).join('')}
             </select>
             <input type="text" class="input-control split-sub" placeholder="Subcategory" style="width:115px;" />
             <input type="text" class="input-control split-notes" placeholder="Note (opt)" style="width:130px;" />

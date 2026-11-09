@@ -4,6 +4,27 @@ import { renderUploadView } from './views/uploadView.js';
 import { renderInspectorView } from './views/inspectorView.js';
 import { renderTopologyView } from './views/topologyView.js';
 
+const SORT_STORAGE_KEYS = {
+  categoryDropdownSort: 'hb_cat_dropdown_sort',
+  cashflowCategorySort: 'hb_cashflow_cat_sort',
+  triageSort: 'hb_triage_sort',
+  budgetsCategorySort: 'hb_budgets_cat_sort',
+  topologyCategorySort: 'hb_topology_cat_sort',
+  topologyRuleSort: 'hb_topology_rule_sort'
+};
+
+export function getSavedSort(stateKey, fallback) {
+  try {
+    const storageKey = SORT_STORAGE_KEYS[stateKey] || stateKey;
+    if (typeof localStorage !== 'undefined' && localStorage !== null) {
+      return localStorage.getItem(storageKey) || fallback;
+    }
+  } catch {
+    // Ignore storage errors in restricted contexts
+  }
+  return fallback;
+}
+
 export const state = {
   currentView: 'budgets',
   selectedYearMonth: new Date().toISOString().slice(0, 7),
@@ -13,9 +34,58 @@ export const state = {
   cashflowEnd: '',
   includeSubcategories: false,
   triageGroupByMerchant: true,
+  categoryDropdownSort: getSavedSort('categoryDropdownSort', 'alpha_asc'),
+  cashflowCategorySort: getSavedSort('cashflowCategorySort', 'spend_desc'),
+  triageSort: getSavedSort('triageSort', 'amount_desc'),
+  budgetsCategorySort: getSavedSort('budgetsCategorySort', 'custom_order'),
+  topologyCategorySort: getSavedSort('topologyCategorySort', 'custom_order'),
+  topologyRuleSort: getSavedSort('topologyRuleSort', 'priority_asc'),
   accounts: [],
   categories: []
 };
+
+export function setSortPreference(stateKey, value) {
+  state[stateKey] = value;
+  try {
+    const storageKey = SORT_STORAGE_KEYS[stateKey] || stateKey;
+    if (typeof localStorage !== 'undefined' && localStorage !== null) {
+      localStorage.setItem(storageKey, value);
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export function sortCategories(categories = state.categories, sortMode = state.categoryDropdownSort) {
+  const list = Array.isArray(categories) ? [...categories] : [];
+  return list.sort((a, b) => {
+    const nameA = String(a.name || '');
+    const nameB = String(b.name || '');
+    switch (sortMode) {
+      case 'alpha_asc':
+        return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+      case 'alpha_desc':
+        return nameB.localeCompare(nameA, undefined, { sensitivity: 'base' });
+      case 'recent': {
+        const tsA = String(a.lastActivityAt || a.updatedAt || a.createdAt || '');
+        const tsB = String(b.lastActivityAt || b.updatedAt || b.createdAt || '');
+        if (tsB !== tsA) return tsB.localeCompare(tsA);
+        return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+      }
+      case 'budget_desc': {
+        const diff = Number(b.monthlyBudget || 0) - Number(a.monthlyBudget || 0);
+        if (diff !== 0) return diff;
+        return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+      }
+      case 'custom_order':
+      default: {
+        const orderDiff = Number(a.sortOrder ?? 100) - Number(b.sortOrder ?? 100);
+        if (orderDiff !== 0) return orderDiff;
+        return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+      }
+    }
+  });
+}
 
 export function escapeHtml(val) {
   if (val === null || val === undefined) return '';
@@ -93,7 +163,7 @@ export function closeModal() {
 export async function refreshReferenceData() {
   const [accounts, categories] = await Promise.all([
     apiFetch('/api/accounts'),
-    apiFetch('/api/categories')
+    apiFetch(`/api/categories?sortBy=${encodeURIComponent(state.categoryDropdownSort || 'custom_order')}`)
   ]);
   state.accounts = accounts;
   state.categories = categories;
@@ -107,9 +177,22 @@ export async function refreshReferenceData() {
  * Also allows creating a new category inline.
  */
 export function openCategorizeExpenseModal(tx, onSuccess, preselectedCatId = undefined) {
-  const initialCatId = preselectedCatId !== undefined ? preselectedCatId : (tx.categoryId || state.categories[0]?.categoryId || '');
+  const sortedCats = sortCategories(state.categories, state.categoryDropdownSort);
+  const initialCatId = preselectedCatId !== undefined ? preselectedCatId : (tx.categoryId || sortedCats[0]?.categoryId || '');
   const startInNewCatMode = preselectedCatId === '__NEW__';
   const defaultPattern = tx.cleanMerchantName || tx.rawDescription || '';
+
+  const buildCatSelectOptions = (selectedVal, sortMode) => {
+    const ordered = sortCategories(state.categories, sortMode);
+    return `
+      <option value="">-- Uncategorized --</option>
+      ${ordered.map(c => `
+        <option value="${c.categoryId}" ${String(c.categoryId) === String(selectedVal) ? 'selected' : ''}>
+          ${escapeHtml(c.name)} (Budget: ${formatCurrency(c.monthlyBudget)})
+        </option>
+      `).join('')}
+    `;
+  };
 
   openModal(`
     <h3 style="margin-top:0;">Categorize Expense</h3>
@@ -125,21 +208,26 @@ export function openCategorizeExpenseModal(tx, onSuccess, preselectedCatId = und
 
     <div style="display:flex;flex-direction:column;gap:12px;">
       <div>
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px;">
           <label style="font-size:12px;font-weight:700;">1. Select Category</label>
-          <button type="button" class="btn btn-outline btn-sm" id="toggleNewCatInlineBtn">
-            ${startInNewCatMode ? 'Choose Existing Category' : '+ New Category'}
-          </button>
+          <div style="display:flex;align-items:center;gap:6px;">
+            <label style="font-size:11px;color:#64748B;font-weight:600;">Sort List:
+              <select id="catModalSortSelect" class="select-control" style="padding:3px 6px;font-size:11px;">
+                <option value="alpha_asc" ${state.categoryDropdownSort === 'alpha_asc' ? 'selected' : ''}>Alphabetical (A-Z)</option>
+                <option value="recent" ${state.categoryDropdownSort === 'recent' ? 'selected' : ''}>Recent Changes</option>
+                <option value="custom_order" ${state.categoryDropdownSort === 'custom_order' ? 'selected' : ''}>Custom Order</option>
+                <option value="budget_desc" ${state.categoryDropdownSort === 'budget_desc' ? 'selected' : ''}>Highest Budget ($)</option>
+              </select>
+            </label>
+            <button type="button" class="btn btn-outline btn-sm" id="toggleNewCatInlineBtn">
+              ${startInNewCatMode ? 'Choose Existing Category' : '+ New Category'}
+            </button>
+          </div>
         </div>
 
         <div id="existingCatSelectWrap" style="display:${startInNewCatMode ? 'none' : 'block'};">
           <select id="catModalSelect" class="select-control" style="width:100%;font-size:14px;font-weight:600;">
-            <option value="">-- Uncategorized --</option>
-            ${state.categories.map(c => `
-              <option value="${c.categoryId}" ${String(c.categoryId) === String(initialCatId) ? 'selected' : ''}>
-                ${escapeHtml(c.name)} (Budget: ${formatCurrency(c.monthlyBudget)})
-              </option>
-            `).join('')}
+            ${buildCatSelectOptions(initialCatId, state.categoryDropdownSort)}
           </select>
         </div>
 
@@ -195,8 +283,18 @@ export function openCategorizeExpenseModal(tx, onSuccess, preselectedCatId = und
     const toggleBtn = modalEl.querySelector('#toggleNewCatInlineBtn');
     const existingWrap = modalEl.querySelector('#existingCatSelectWrap');
     const newWrap = modalEl.querySelector('#newCatInlineWrap');
+    const catSelectEl = modalEl.querySelector('#catModalSelect');
+    const sortSelectEl = modalEl.querySelector('#catModalSortSelect');
     const patternInput = modalEl.querySelector('#catModalPattern');
     const badgeEl = modalEl.querySelector('#pastMatchCountBadge');
+
+    if (sortSelectEl) {
+      sortSelectEl.onchange = () => {
+        const currentSelected = catSelectEl.value;
+        setSortPreference('categoryDropdownSort', sortSelectEl.value);
+        catSelectEl.innerHTML = buildCatSelectOptions(currentSelected, state.categoryDropdownSort);
+      };
+    }
 
     const updateSimilarCount = async () => {
       const p = patternInput.value.trim();
@@ -273,7 +371,10 @@ export function openCategorizeExpenseModal(tx, onSuccess, preselectedCatId = und
  */
 export function openCategoryManagerModal(categoryToEdit = null, onSuccess = null) {
   const isEdit = Boolean(categoryToEdit);
-  const otherCategories = state.categories.filter(c => !isEdit || c.categoryId !== categoryToEdit.categoryId);
+  const otherCategories = sortCategories(
+    state.categories.filter(c => !isEdit || c.categoryId !== categoryToEdit.categoryId),
+    state.categoryDropdownSort
+  );
 
   openModal(`
     <h3 style="margin-top:0;">${isEdit ? `Edit / Delete Category: ${escapeHtml(categoryToEdit.name)}` : 'Add New Category'}</h3>

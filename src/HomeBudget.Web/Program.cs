@@ -63,11 +63,19 @@ app.MapPost("/api/accounts", async (Account req, SqliteConnectionFactory db, Bac
     return Results.Ok(req);
 });
 
-app.MapGet("/api/categories", async (SqliteConnectionFactory db) =>
+app.MapGet("/api/categories", async (string? sortBy, SqliteConnectionFactory db) =>
 {
     await using var conn = await db.CreateOpenConnectionAsync();
+    string orderClause = (sortBy ?? "custom_order").Trim().ToLowerInvariant() switch
+    {
+        "alpha_asc" => "Name COLLATE NOCASE ASC",
+        "alpha_desc" => "Name COLLATE NOCASE DESC",
+        "recent" => "COALESCE(UpdatedAt, CreatedAt, '') DESC, Name COLLATE NOCASE ASC",
+        "budget_desc" => "MonthlyBudget DESC, Name COLLATE NOCASE ASC",
+        _ => "SortOrder ASC, Name COLLATE NOCASE ASC"
+    };
     var categories = await conn.QueryAsync<Category>(
-        "SELECT * FROM Categories WHERE IsActive = 1 ORDER BY SortOrder ASC, Name ASC;");
+        $"SELECT * FROM Categories WHERE IsActive = 1 ORDER BY {orderClause};");
     return Results.Ok(categories);
 });
 
@@ -194,6 +202,7 @@ app.MapGet("/api/cashflow", async (
     string? endDate,
     int? months,
     bool? includeSubcategories,
+    string? categorySort,
     CashflowService cashflowService,
     CancellationToken ct) =>
 {
@@ -203,6 +212,7 @@ app.MapGet("/api/cashflow", async (
         endDate,
         months,
         includeSubcategories ?? false,
+        categorySort,
         ct);
     return Results.Ok(result);
 });
@@ -388,9 +398,11 @@ app.MapGet("/api/transactions", async (
     string orderByClause = (sortBy ?? "date_desc").ToLowerInvariant() switch
     {
         "date_asc" => "t.TransactionDate ASC, t.TransactionId ASC",
+        "recent_changes" => "COALESCE(t.UpdatedAt, t.CreatedAt, t.TransactionDate) DESC, t.TransactionId DESC",
         "amount_desc" => "ABS(t.Amount) DESC, t.TransactionDate DESC",
         "amount_asc" => "ABS(t.Amount) ASC, t.TransactionDate DESC",
-        "merchant_asc" => "t.CleanMerchantName ASC, t.TransactionDate DESC",
+        "merchant_asc" => "t.CleanMerchantName COLLATE NOCASE ASC, t.TransactionDate DESC",
+        "merchant_desc" => "t.CleanMerchantName COLLATE NOCASE DESC, t.TransactionDate DESC",
         _ => "t.TransactionDate DESC, t.TransactionId DESC"
     };
 

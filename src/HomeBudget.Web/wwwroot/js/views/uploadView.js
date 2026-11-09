@@ -4,6 +4,8 @@ import {
   formatCurrency,
   escapeHtml,
   formatBackupStatus,
+  sortCategories,
+  setSortPreference,
   showToast,
   openModal,
   closeModal,
@@ -146,9 +148,10 @@ async function handleStageFiles(container, fileList) {
 
 function renderStagingTable(stagingMount, session) {
   const s = session.summary;
+  const sortedCats = sortCategories(state.categories, state.categoryDropdownSort);
   const categoryOptionsHtml = (selectedId) => `
     <option value="">-- Uncategorized --</option>
-    ${state.categories.map(c => `
+    ${sortedCats.map(c => `
       <option value="${c.categoryId}" ${c.categoryId === selectedId ? 'selected' : ''}>${escapeHtml(c.name)}</option>
     `).join('')}
   `;
@@ -166,7 +169,18 @@ function renderStagingTable(stagingMount, session) {
             <span>${s.skippedDuplicateCount + s.skippedDeletedCount} Duplicates/Tombstoned Skipped</span>
           </p>
         </div>
-        <button class="btn btn-primary" id="commitUploadBtn">&#10003; Commit Approved Rows to SQLite</button>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <label style="font-size:12px;font-weight:700;color:#475569;display:inline-flex;align-items:center;gap:6px;">
+            Category List Order:
+            <select id="uploadCatDropdownSort" class="select-control" style="font-size:12px;padding:4px 8px;">
+              <option value="alpha_asc" ${state.categoryDropdownSort === 'alpha_asc' ? 'selected' : ''}>Alphabetical (A-Z)</option>
+              <option value="recent" ${state.categoryDropdownSort === 'recent' ? 'selected' : ''}>Recent Changes</option>
+              <option value="custom_order" ${state.categoryDropdownSort === 'custom_order' ? 'selected' : ''}>Custom Order</option>
+              <option value="budget_desc" ${state.categoryDropdownSort === 'budget_desc' ? 'selected' : ''}>Highest Budget ($)</option>
+            </select>
+          </label>
+          <button class="btn btn-primary" id="commitUploadBtn">&#10003; Commit Approved Rows to SQLite</button>
+        </div>
       </div>
 
       <div class="table-responsive">
@@ -234,6 +248,23 @@ function renderStagingTable(stagingMount, session) {
       </div>
     </div>
   `;
+
+  const uploadSortSel = stagingMount.querySelector('#uploadCatDropdownSort');
+  if (uploadSortSel) {
+    uploadSortSel.onchange = (e) => {
+      setSortPreference('categoryDropdownSort', e.target.value);
+      const reordered = sortCategories(state.categories, state.categoryDropdownSort);
+      stagingMount.querySelectorAll('.row-cat-select').forEach(sel => {
+        const curVal = sel.value;
+        sel.innerHTML = `
+          <option value="">-- Uncategorized --</option>
+          ${reordered.map(c => `
+            <option value="${c.categoryId}" ${String(c.categoryId) === String(curVal) ? 'selected' : ''}>${escapeHtml(c.name)}</option>
+          `).join('')}
+        `;
+      });
+    };
+  }
 
   stagingMount.querySelector('#commitUploadBtn').onclick = async () => {
     const decisions = [];

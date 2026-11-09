@@ -3,6 +3,7 @@ import {
   apiFetch,
   formatCurrency,
   escapeHtml,
+  setSortPreference,
   openModal,
   closeModal,
   showToast,
@@ -10,9 +11,49 @@ import {
   openCategoryManagerModal
 } from '../app.js';
 
+export function sortBudgetCards(categories, sortMode = 'custom_order') {
+  const list = Array.isArray(categories) ? [...categories] : [];
+  return list.sort((a, b) => {
+    const nameA = String(a.name || '');
+    const nameB = String(b.name || '');
+    switch (sortMode) {
+      case 'alpha_asc':
+        return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+      case 'recent': {
+        const tsA = String(a.lastActivityAt || a.updatedAt || '');
+        const tsB = String(b.lastActivityAt || b.updatedAt || '');
+        if (tsB !== tsA) return tsB.localeCompare(tsA);
+        return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+      }
+      case 'pct_used_desc': {
+        const diff = Number(b.pctUsed || 0) - Number(a.pctUsed || 0);
+        if (diff !== 0) return diff;
+        return Number(b.netSpent || 0) - Number(a.netSpent || 0);
+      }
+      case 'spend_desc': {
+        const diff = Number(b.netSpent || 0) - Number(a.netSpent || 0);
+        if (diff !== 0) return diff;
+        return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+      }
+      case 'remaining_asc': {
+        const diff = Number(a.remaining || 0) - Number(b.remaining || 0);
+        if (diff !== 0) return diff;
+        return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+      }
+      case 'custom_order':
+      default: {
+        const orderDiff = Number(a.sortOrder ?? 100) - Number(b.sortOrder ?? 100);
+        if (orderDiff !== 0) return orderDiff;
+        return nameA.localeCompare(nameB, undefined, { sensitivity: 'base' });
+      }
+    }
+  });
+}
+
 export async function renderBudgetsView(container) {
   const data = await apiFetch(`/api/budgets/${state.selectedYearMonth}`);
   const uncatTxs = data.uncategorizedTransactions || [];
+  const sortedCategories = sortBudgetCards(data.categories, state.budgetsCategorySort);
 
   const sourceBadge = data.incomeSourceType === 'ActualGoogleDeposits'
     ? 'Google Bi-Weekly Direct Deposits'
@@ -27,6 +68,17 @@ export async function renderBudgetsView(container) {
         <p class="page-subtitle">Fixed calendar-month targets (no rollover) &bull; Income source: <strong>${escapeHtml(sourceBadge)}</strong></p>
       </div>
       <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;">
+        <label style="font-size:12px;font-weight:700;color:#475569;display:inline-flex;align-items:center;gap:6px;">
+          Sort Categories:
+          <select id="budgetsSortSelect" class="select-control" style="font-size:12px;padding:4px 8px;">
+            <option value="custom_order" ${state.budgetsCategorySort === 'custom_order' ? 'selected' : ''}>Custom Order</option>
+            <option value="alpha_asc" ${state.budgetsCategorySort === 'alpha_asc' ? 'selected' : ''}>Alphabetical (A-Z)</option>
+            <option value="recent" ${state.budgetsCategorySort === 'recent' ? 'selected' : ''}>Recent Changes</option>
+            <option value="pct_used_desc" ${state.budgetsCategorySort === 'pct_used_desc' ? 'selected' : ''}>% Budget Used (High-Low)</option>
+            <option value="spend_desc" ${state.budgetsCategorySort === 'spend_desc' ? 'selected' : ''}>Highest Spend ($)</option>
+            <option value="remaining_asc" ${state.budgetsCategorySort === 'remaining_asc' ? 'selected' : ''}>Remaining Budget (Low-High)</option>
+          </select>
+        </label>
         <button class="btn btn-primary btn-sm" id="budgetsAddCatBtn">+ Add Category</button>
         <button class="btn btn-outline btn-sm" id="prevMonthBtn">&larr;</button>
         <input type="month" id="budgetMonthPicker" class="input-control" value="${escapeHtml(data.yearMonth)}" />
@@ -83,7 +135,7 @@ export async function renderBudgetsView(container) {
     ` : ''}
 
     <div class="budget-cards-grid" id="budgetCardsGrid">
-      ${data.categories.map(cat => renderCategoryCardHtml(cat)).join('')}
+      ${sortedCategories.map(cat => renderCategoryCardHtml(cat)).join('')}
     </div>
 
     <div class="payoff-callout">
@@ -108,6 +160,14 @@ export async function renderBudgetsView(container) {
       renderBudgetsView(container);
     }
   };
+
+  const budgetsSortSelect = container.querySelector('#budgetsSortSelect');
+  if (budgetsSortSelect) {
+    budgetsSortSelect.onchange = (e) => {
+      setSortPreference('budgetsCategorySort', e.target.value);
+      renderBudgetsView(container);
+    };
+  }
 
   container.querySelector('#budgetsAddCatBtn').onclick = () => {
     openCategoryManagerModal(null, () => renderBudgetsView(container));

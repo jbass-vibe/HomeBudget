@@ -13,6 +13,7 @@ public sealed class CashflowService(SqliteConnectionFactory connectionFactory)
         string? endDateStr,
         int? monthsCount,
         bool includeSubcategories,
+        string? categorySort = null,
         CancellationToken ct = default)
     {
         (DateOnly startDate, DateOnly endDate, string resolvedWindowType, bool isFullMonthWindow) =
@@ -20,6 +21,7 @@ public sealed class CashflowService(SqliteConnectionFactory connectionFactory)
 
         string isoStart = startDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         string isoEnd = endDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        string normalizedSort = NormalizeCategorySort(categorySort);
 
         await using var conn = await connectionFactory.CreateOpenConnectionAsync(ct);
 
@@ -49,7 +51,6 @@ public sealed class CashflowService(SqliteConnectionFactory connectionFactory)
 
         var categories = (await conn.QueryAsync<Category>(
             "SELECT * FROM Categories WHERE IsActive = 1 ORDER BY SortOrder ASC, Name ASC;")).ToList();
-        var categoryMap = categories.ToDictionary(c => c.CategoryId);
 
         // 3. Load all Transactions in [isoStart, isoEnd]
         var transactions = (await conn.QueryAsync<TransactionDto>(
@@ -64,20 +65,17 @@ public sealed class CashflowService(SqliteConnectionFactory connectionFactory)
             new { StartDate = isoStart, EndDate = isoEnd })).ToList();
 
         decimal creditCardPayoffsTotal = transactions
-            .Where(t => t.TransactionType == "CreditCardPayoff")
+            .Where(t => t.TransactionType == TransactionTypes.CreditCardPayoff)
             .Sum(t => t.Amount);
 
         var spendTransactions = transactions
-            .Where(t => t.TransactionType is "Expense" or "Refund")
+            .Where(t => t.TransactionType is TransactionTypes.Expense or TransactionTypes.Refund)
             .ToList();
 
         bool hasAnySubcategories = spendTransactions.Any(t => !string.IsNullOrWhiteSpace(t.Subcategory));
 
         // 4. Build Companion Tabular Breakdown by Category & Account Source
         var tableRows = new List<CashflowTableRowDto>();
-        var groupedByCategory = spendTransactions
-            .GroupBy(t => t.CategoryId)
-            .ToList();
 
         decimal totalPositiveCategorySpend = 0m;
         decimal totalNetSpend = Math.Round(spendTransactions.Sum(t => t.Amount), 2);
@@ -94,23 +92,35 @@ public sealed class CashflowService(SqliteConnectionFactory connectionFactory)
                 a => a.AccountId,
                 a => Math.Round(catTxs.Where(t => t.AccountId == a.AccountId).Sum(t => t.Amount), 2));
 
-            var subcats = catTxs
+            string maxTxActivity = catTxs
+                .Select(t => t.UpdatedAt ?? t.CreatedAt ?? t.TransactionDate)
+                .DefaultIfEmpty("")
+                .Max() ?? "";
+
+            string catLastActivity = string.CompareOrdinal(cat.UpdatedAt ?? "", maxTxActivity) >= 0
+                ? (cat.UpdatedAt ?? maxTxActivity)
+                : maxTxActivity;
+
+            var subcatGroups = catTxs
                 .Where(t => !string.IsNullOrWhiteSpace(t.Subcategory))
                 .GroupBy(t => t.Subcategory!.Trim(), StringComparer.OrdinalIgnoreCase)
                 .Select(g => new SubcategoryBreakdownDto
                 {
                     SubcategoryName = g.Key,
-                    NetSpend = Math.Round(g.Sum(x => x.Amount), 2)
+                    NetSpend = Math.Round(g.Sum(x => x.Amount), 2),
+                    LastActivityAt = g.Select(x => x.UpdatedAt ?? x.CreatedAt ?? x.TransactionDate).DefaultIfEmpty("").Max() ?? ""
                 })
-                .Where(s => s.NetSpend > 0)
-                .OrderByDescending(s => s.NetSpend)
-                .ToList();
+                .Where(s => s.NetSpend > 0);
+
+            var subcats = SortSubcategories(subcatGroups, normalizedSort);
 
             tableRows.Add(new CashflowTableRowDto
             {
                 CategoryId = cat.CategoryId,
                 CategoryName = cat.Name,
                 ColorHex = cat.ColorHex,
+                SortOrder = cat.SortOrder,
+                LastActivityAt = catLastActivity,
                 NetSpend = netSpend,
                 SpendByAccount = spendByAcct,
                 Subcategories = subcats,
@@ -129,11 +139,18 @@ public sealed class CashflowService(SqliteConnectionFactory connectionFactory)
                 a => a.AccountId,
                 a => Math.Round(uncategorizedTxs.Where(t => t.AccountId == a.AccountId).Sum(t => t.Amount), 2));
 
+            string uncatLastActivity = uncategorizedTxs
+                .Select(t => t.UpdatedAt ?? t.CreatedAt ?? t.TransactionDate)
+                .DefaultIfEmpty("")
+                .Max() ?? "";
+
             tableRows.Add(new CashflowTableRowDto
             {
                 CategoryId = null,
                 CategoryName = "Uncategorized",
                 ColorHex = "#F59E0B",
+                SortOrder = int.MaxValue,
+                LastActivityAt = uncatLastActivity,
                 NetSpend = netUncat,
                 SpendByAccount = spendByAcct,
                 Subcategories = [],
@@ -141,13 +158,14 @@ public sealed class CashflowService(SqliteConnectionFactory connectionFactory)
             });
         }
 
-        // Populate percentages & sort by NetSpend descending
-        tableRows = tableRows.OrderByDescending(r => r.NetSpend).ToList();
+        // Populate percentages & sort according to normalizedSort
         foreach (var row in tableRows)
         {
             row.PctOfTotalSpend = totalNetSpend > 0 ? Math.Round((row.NetSpend / totalNetSpend) * 100m, 1) : 0m;
             row.PctOfIncome = totalIncome > 0 ? Math.Round((row.NetSpend / totalIncome) * 100m, 1) : 0m;
         }
+
+        tableRows = SortCategoryRows(tableRows, normalizedSort);
 
         decimal unspent = totalIncome > totalPositiveCategorySpend
             ? Math.Round(totalIncome - totalPositiveCategorySpend, 2)
@@ -156,7 +174,7 @@ public sealed class CashflowService(SqliteConnectionFactory connectionFactory)
             ? Math.Round(totalPositiveCategorySpend - totalIncome, 2)
             : 0m;
 
-        // 5. Build D3 Sankey Graph
+        // 5. Build D3 Sankey Graph using the sorted tableRows
         var sankey = BuildSankeyGraph(
             totalIncome,
             totalPositiveCategorySpend,
@@ -170,6 +188,7 @@ public sealed class CashflowService(SqliteConnectionFactory connectionFactory)
             StartDate = isoStart,
             EndDate = isoEnd,
             WindowType = resolvedWindowType,
+            CategorySort = normalizedSort,
             IncludeSubcategories = includeSubcategories,
             HasAnySubcategories = hasAnySubcategories,
             TotalIncome = totalIncome,
@@ -185,6 +204,76 @@ public sealed class CashflowService(SqliteConnectionFactory connectionFactory)
             Sankey = sankey,
             Accounts = accounts,
             TableRows = tableRows
+        };
+    }
+
+    public static string NormalizeCategorySort(string? categorySort)
+    {
+        return (categorySort ?? "spend_desc").Trim().ToLowerInvariant() switch
+        {
+            "spend_asc" => "spend_asc",
+            "alpha_asc" => "alpha_asc",
+            "alpha_desc" => "alpha_desc",
+            "recent" => "recent",
+            "custom_order" => "custom_order",
+            _ => "spend_desc"
+        };
+    }
+
+    public static List<CashflowTableRowDto> SortCategoryRows(IEnumerable<CashflowTableRowDto> rows, string normalizedSort)
+    {
+        return normalizedSort switch
+        {
+            "spend_asc" => rows
+                .OrderBy(r => r.NetSpend)
+                .ThenBy(r => r.CategoryName, StringComparer.OrdinalIgnoreCase)
+                .ToList(),
+            "alpha_asc" => rows
+                .OrderBy(r => r.CategoryId is null ? 1 : 0)
+                .ThenBy(r => r.CategoryName, StringComparer.OrdinalIgnoreCase)
+                .ToList(),
+            "alpha_desc" => rows
+                .OrderBy(r => r.CategoryId is null ? 1 : 0)
+                .ThenByDescending(r => r.CategoryName, StringComparer.OrdinalIgnoreCase)
+                .ToList(),
+            "recent" => rows
+                .OrderByDescending(r => r.LastActivityAt, StringComparer.Ordinal)
+                .ThenByDescending(r => r.NetSpend)
+                .ToList(),
+            "custom_order" => rows
+                .OrderBy(r => r.CategoryId is null ? 1 : 0)
+                .ThenBy(r => r.SortOrder)
+                .ThenBy(r => r.CategoryName, StringComparer.OrdinalIgnoreCase)
+                .ToList(),
+            _ => rows
+                .OrderByDescending(r => r.NetSpend)
+                .ThenBy(r => r.CategoryName, StringComparer.OrdinalIgnoreCase)
+                .ToList()
+        };
+    }
+
+    private static List<SubcategoryBreakdownDto> SortSubcategories(IEnumerable<SubcategoryBreakdownDto> subcats, string normalizedSort)
+    {
+        return normalizedSort switch
+        {
+            "spend_asc" => subcats
+                .OrderBy(s => s.NetSpend)
+                .ThenBy(s => s.SubcategoryName, StringComparer.OrdinalIgnoreCase)
+                .ToList(),
+            "alpha_asc" => subcats
+                .OrderBy(s => s.SubcategoryName, StringComparer.OrdinalIgnoreCase)
+                .ToList(),
+            "alpha_desc" => subcats
+                .OrderByDescending(s => s.SubcategoryName, StringComparer.OrdinalIgnoreCase)
+                .ToList(),
+            "recent" => subcats
+                .OrderByDescending(s => s.LastActivityAt, StringComparer.Ordinal)
+                .ThenByDescending(s => s.NetSpend)
+                .ToList(),
+            _ => subcats
+                .OrderByDescending(s => s.NetSpend)
+                .ThenBy(s => s.SubcategoryName, StringComparer.OrdinalIgnoreCase)
+                .ToList()
         };
     }
 

@@ -27,8 +27,8 @@ public sealed class CategorizationService(
         await using var conn = await connectionFactory.CreateOpenConnectionAsync(ct);
         int id = await conn.ExecuteScalarAsync<int>(
             """
-            INSERT INTO Categories (Name, IsBigBoxMerchantCategory, MonthlyBudget, SortOrder, ColorHex, IsActive)
-            VALUES (@Name, @IsBigBoxMerchantCategory, @MonthlyBudget, @SortOrder, @ColorHex, 1);
+            INSERT INTO Categories (Name, IsBigBoxMerchantCategory, MonthlyBudget, SortOrder, ColorHex, IsActive, CreatedAt, UpdatedAt)
+            VALUES (@Name, @IsBigBoxMerchantCategory, @MonthlyBudget, @SortOrder, @ColorHex, 1, datetime('now'), datetime('now'));
             SELECT last_insert_rowid();
             """,
             new
@@ -59,7 +59,8 @@ public sealed class CategorizationService(
                 IsBigBoxMerchantCategory = @IsBigBoxMerchantCategory,
                 MonthlyBudget = @MonthlyBudget,
                 SortOrder = @SortOrder,
-                ColorHex = @ColorHex
+                ColorHex = @ColorHex,
+                UpdatedAt = datetime('now')
             WHERE CategoryId = @CategoryId;
             """,
             new
@@ -104,13 +105,18 @@ public sealed class CategorizationService(
             }
 
             affectedTransactions = await conn.ExecuteAsync(
-                "UPDATE Transactions SET CategoryId = @TargetId WHERE CategoryId = @SourceId;",
+                "UPDATE Transactions SET CategoryId = @TargetId, UpdatedAt = datetime('now') WHERE CategoryId = @SourceId;",
                 new { SourceId = categoryId, TargetId = replacementCategoryId.Value },
                 tx);
 
             affectedRules = await conn.ExecuteAsync(
-                "UPDATE CategorizationRules SET CategoryId = @TargetId WHERE CategoryId = @SourceId;",
+                "UPDATE CategorizationRules SET CategoryId = @TargetId, UpdatedAt = datetime('now') WHERE CategoryId = @SourceId;",
                 new { SourceId = categoryId, TargetId = replacementCategoryId.Value },
+                tx);
+
+            await conn.ExecuteAsync(
+                "UPDATE Categories SET UpdatedAt = datetime('now') WHERE CategoryId = @TargetId;",
+                new { TargetId = replacementCategoryId.Value },
                 tx);
         }
         else
@@ -120,7 +126,8 @@ public sealed class CategorizationService(
                 UPDATE Transactions
                 SET CategoryId = NULL,
                     CategorizationSource = 'Uncategorized',
-                    IsCategoryManuallyLocked = 0
+                    IsCategoryManuallyLocked = 0,
+                    UpdatedAt = datetime('now')
                 WHERE CategoryId = @SourceId;
                 """,
                 new { SourceId = categoryId },
@@ -162,13 +169,18 @@ public sealed class CategorizationService(
         await using var tx = await conn.BeginTransactionAsync(ct);
 
         int reassignedTransactions = await conn.ExecuteAsync(
-            "UPDATE Transactions SET CategoryId = @TargetId WHERE CategoryId = @SourceId;",
+            "UPDATE Transactions SET CategoryId = @TargetId, UpdatedAt = datetime('now') WHERE CategoryId = @SourceId;",
             new { SourceId = sourceCategoryId, TargetId = targetCategoryId },
             tx);
 
         int reassignedRules = await conn.ExecuteAsync(
-            "UPDATE CategorizationRules SET CategoryId = @TargetId WHERE CategoryId = @SourceId;",
+            "UPDATE CategorizationRules SET CategoryId = @TargetId, UpdatedAt = datetime('now') WHERE CategoryId = @SourceId;",
             new { SourceId = sourceCategoryId, TargetId = targetCategoryId },
+            tx);
+
+        await conn.ExecuteAsync(
+            "UPDATE Categories SET UpdatedAt = datetime('now') WHERE CategoryId = @TargetId;",
+            new { TargetId = targetCategoryId },
             tx);
 
         await conn.ExecuteAsync(
@@ -251,8 +263,8 @@ public sealed class CategorizationService(
             {
                 int newCatId = await conn.ExecuteScalarAsync<int>(
                     """
-                    INSERT INTO Categories (Name, IsBigBoxMerchantCategory, MonthlyBudget, SortOrder, ColorHex, IsActive)
-                    VALUES (@Name, @IsBigBox, @Budget, 100, @ColorHex, 1);
+                    INSERT INTO Categories (Name, IsBigBoxMerchantCategory, MonthlyBudget, SortOrder, ColorHex, IsActive, CreatedAt, UpdatedAt)
+                    VALUES (@Name, @IsBigBox, @Budget, 100, @ColorHex, 1, datetime('now'), datetime('now'));
                     SELECT last_insert_rowid();
                     """,
                     new
@@ -284,6 +296,14 @@ public sealed class CategorizationService(
             }
         }
 
+        if (targetCategoryId.HasValue)
+        {
+            await conn.ExecuteAsync(
+                "UPDATE Categories SET UpdatedAt = datetime('now') WHERE CategoryId = @CatId;",
+                new { CatId = targetCategoryId.Value },
+                dbTx);
+        }
+
         string? cleanSubcat = req.Subcategory is not null
             ? (string.IsNullOrWhiteSpace(req.Subcategory) ? null : req.Subcategory.Trim())
             : existing.Subcategory;
@@ -301,7 +321,8 @@ public sealed class CategorizationService(
                 Subcategory = @Subcategory,
                 CleanMerchantName = @CleanMerchantName,
                 CategorizationSource = @CategorizationSource,
-                IsCategoryManuallyLocked = @IsLocked
+                IsCategoryManuallyLocked = @IsLocked,
+                UpdatedAt = datetime('now')
             WHERE TransactionId = @TransactionId;
             """,
             new
@@ -333,7 +354,8 @@ public sealed class CategorizationService(
                     """
                     UPDATE CategorizationRules
                     SET CategoryId = @CategoryId,
-                        DefaultSubcategory = COALESCE(@Subcategory, DefaultSubcategory)
+                        DefaultSubcategory = COALESCE(@Subcategory, DefaultSubcategory),
+                        UpdatedAt = datetime('now')
                     WHERE RuleId = @RuleId;
                     """,
                     new
@@ -348,8 +370,8 @@ public sealed class CategorizationService(
             {
                 await conn.ExecuteAsync(
                     """
-                    INSERT INTO CategorizationRules (MatchPattern, IsRegex, CategoryId, DefaultSubcategory, Priority)
-                    VALUES (@Pattern, 0, @CategoryId, @Subcategory, 25);
+                    INSERT INTO CategorizationRules (MatchPattern, IsRegex, CategoryId, DefaultSubcategory, Priority, CreatedAt, UpdatedAt)
+                    VALUES (@Pattern, 0, @CategoryId, @Subcategory, 25, datetime('now'), datetime('now'));
                     """,
                     new
                     {
@@ -372,7 +394,8 @@ public sealed class CategorizationService(
                 UPDATE Transactions
                 SET CategoryId = @CategoryId,
                     Subcategory = COALESCE(@Subcategory, Subcategory),
-                    CategorizationSource = @PastSource
+                    CategorizationSource = @PastSource,
+                    UpdatedAt = datetime('now')
                 WHERE TransactionId != @CurrentId
                   AND TransactionType IN ('Expense', 'Refund')
                   AND (CleanMerchantName LIKE @LikePattern OR RawDescription LIKE @LikePattern)
@@ -422,8 +445,8 @@ public sealed class CategorizationService(
 
         int id = await conn.ExecuteScalarAsync<int>(
             """
-            INSERT INTO CategorizationRules (MatchPattern, IsRegex, CategoryId, DefaultSubcategory, Priority)
-            VALUES (@MatchPattern, @IsRegex, @CategoryId, @DefaultSubcategory, @Priority);
+            INSERT INTO CategorizationRules (MatchPattern, IsRegex, CategoryId, DefaultSubcategory, Priority, CreatedAt, UpdatedAt)
+            VALUES (@MatchPattern, @IsRegex, @CategoryId, @DefaultSubcategory, @Priority, datetime('now'), datetime('now'));
             SELECT last_insert_rowid();
             """,
             new
@@ -453,7 +476,8 @@ public sealed class CategorizationService(
                 IsRegex = @IsRegex,
                 CategoryId = @CategoryId,
                 DefaultSubcategory = @DefaultSubcategory,
-                Priority = @Priority
+                Priority = @Priority,
+                UpdatedAt = datetime('now')
             WHERE RuleId = @RuleId;
             """,
             new
@@ -555,7 +579,8 @@ public sealed class CategorizationService(
                     SET CategoryId = @NewCategoryId,
                         Subcategory = @NewSubcategory,
                         CategorizationSource = 'Rule',
-                        IsCategoryManuallyLocked = 0
+                        IsCategoryManuallyLocked = 0,
+                        UpdatedAt = datetime('now')
                     WHERE TransactionId = @TransactionId;
                     """,
                     change,
@@ -627,7 +652,8 @@ public sealed class CategorizationService(
                 TransactionType = @TransactionType,
                 CategorizationSource = @CategorizationSource,
                 IsCategoryManuallyLocked = @IsLocked,
-                Notes = @Notes
+                Notes = @Notes,
+                UpdatedAt = datetime('now')
             WHERE TransactionId = @TransactionId;
             """,
             new
@@ -643,6 +669,13 @@ public sealed class CategorizationService(
                 IsLocked = newLocked ? 1 : 0,
                 Notes = newNotes
             });
+
+        if (newCatId.HasValue && newCatId != existing.CategoryId)
+        {
+            await conn.ExecuteAsync(
+                "UPDATE Categories SET UpdatedAt = datetime('now') WHERE CategoryId = @CatId;",
+                new { CatId = newCatId.Value });
+        }
 
         int backPropagatedCount = 0;
         if (!string.IsNullOrWhiteSpace(req.CreateRulePattern) && newCatId.HasValue)
@@ -720,11 +753,13 @@ public sealed class CategorizationService(
                 INSERT INTO Transactions (
                     AccountId, TransactionDate, PostDate, RawDescription, CleanMerchantName,
                     Amount, TransactionType, CategoryId, Subcategory, CategorizationSource,
-                    IsCategoryManuallyLocked, ParentTransactionId, DedupHash, UploadBatchId, Notes
+                    IsCategoryManuallyLocked, ParentTransactionId, DedupHash, UploadBatchId, Notes,
+                    CreatedAt, UpdatedAt
                 ) VALUES (
                     @AccountId, @TransactionDate, @PostDate, @RawDescription, @CleanMerchantName,
                     @Amount, @TransactionType, @CategoryId, @Subcategory, @CategorizationSource,
-                    1, @ParentTransactionId, @DedupHash, @UploadBatchId, @Notes
+                    1, @ParentTransactionId, @DedupHash, @UploadBatchId, @Notes,
+                    datetime('now'), datetime('now')
                 );
                 SELECT last_insert_rowid();
                 """,
@@ -746,6 +781,14 @@ public sealed class CategorizationService(
                     Notes = string.IsNullOrWhiteSpace(split.Notes) ? parent.Notes : split.Notes.Trim()
                 },
                 tx);
+
+            if (split.CategoryId.HasValue)
+            {
+                await conn.ExecuteAsync(
+                    "UPDATE Categories SET UpdatedAt = datetime('now') WHERE CategoryId = @CatId;",
+                    new { CatId = split.CategoryId.Value },
+                    tx);
+            }
 
             createdIds.Add(childId);
         }

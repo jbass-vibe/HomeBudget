@@ -83,6 +83,37 @@ public sealed class DatabaseAndServicesIntegrationTests : IDisposable
         Assert.Equal("Rule", rows[1].CategorizationSource);
         Assert.Equal("Uncategorized", rows[2].CategorizationSource);
         Assert.Equal(TransactionTypes.CreditCardPayoff, rows[3].TransactionType);
+        Assert.All(rows, r => Assert.False(string.IsNullOrWhiteSpace(r.UpdatedAt)));
+
+        var cat = await conn.QuerySingleAsync<Category>("SELECT * FROM Categories WHERE CategoryId = 1;");
+        Assert.False(string.IsNullOrWhiteSpace(cat.UpdatedAt));
+    }
+
+    [Fact]
+    public void SortCategoryRows_SupportsSpendAlphaRecentAndCustomOrderWhilePinningUncategorizedLast()
+    {
+        var rows = new List<CashflowTableRowDto>
+        {
+            new() { CategoryId = 1, CategoryName = "Utilities", SortOrder = 30, NetSpend = 120m, LastActivityAt = "2026-11-02 10:00:00" },
+            new() { CategoryId = 2, CategoryName = "Automotive", SortOrder = 10, NetSpend = 450m, LastActivityAt = "2026-11-01 08:00:00" },
+            new() { CategoryId = null, CategoryName = "Uncategorized", SortOrder = 999999, NetSpend = 999m, LastActivityAt = "2026-11-09 12:00:00" },
+            new() { CategoryId = 3, CategoryName = "Groceries", SortOrder = 20, NetSpend = 300m, LastActivityAt = "2026-11-08 15:30:00" }
+        };
+
+        var bySpendDesc = CashflowService.SortCategoryRows(rows, "spend_desc");
+        Assert.Equal(new int?[] { 2, 3, 1, null }, bySpendDesc.Select(r => r.CategoryId).ToArray());
+
+        var bySpendAsc = CashflowService.SortCategoryRows(rows, "spend_asc");
+        Assert.Equal(new int?[] { 1, 3, 2, null }, bySpendAsc.Select(r => r.CategoryId).ToArray());
+
+        var byAlphaAsc = CashflowService.SortCategoryRows(rows, "alpha_asc");
+        Assert.Equal(new[] { "Automotive", "Groceries", "Utilities", "Uncategorized" }, byAlphaAsc.Select(r => r.CategoryName).ToArray());
+
+        var byRecent = CashflowService.SortCategoryRows(rows, "recent");
+        Assert.Equal(new int?[] { 3, 1, 2, null }, byRecent.Select(r => r.CategoryId).ToArray());
+
+        var byCustom = CashflowService.SortCategoryRows(rows, "custom_order");
+        Assert.Equal(new int?[] { 2, 3, 1, null }, byCustom.Select(r => r.CategoryId).ToArray());
     }
 
     [Fact]

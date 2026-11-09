@@ -3,12 +3,14 @@ import {
   apiFetch,
   formatCurrency,
   escapeHtml,
+  sortCategories,
+  setSortPreference,
   openCategorizeExpenseModal,
   openCategoryManagerModal
 } from '../app.js';
 import { renderSankeyDiagram } from '../components/sankeyChart.js';
 
-export function groupUncategorizedByMerchant(uncatTxs) {
+export function groupUncategorizedByMerchant(uncatTxs, sortMode = 'amount_desc') {
   const map = new Map();
   for (const tx of uncatTxs) {
     const key = (tx.cleanMerchantName || tx.rawDescription || 'Unknown').trim().toUpperCase();
@@ -21,6 +23,7 @@ export function groupUncategorizedByMerchant(uncatTxs) {
         totalAmount: 0,
         minDate: tx.transactionDate,
         maxDate: tx.transactionDate,
+        lastUpdatedAt: tx.updatedAt || tx.createdAt || tx.transactionDate,
         accounts: new Set()
       });
     }
@@ -29,15 +32,60 @@ export function groupUncategorizedByMerchant(uncatTxs) {
     group.totalAmount = Math.round((group.totalAmount + Number(tx.amount || 0)) * 100) / 100;
     if (tx.transactionDate < group.minDate) group.minDate = tx.transactionDate;
     if (tx.transactionDate > group.maxDate) group.maxDate = tx.transactionDate;
+    const txUpd = tx.updatedAt || tx.createdAt || tx.transactionDate;
+    if (txUpd > group.lastUpdatedAt) group.lastUpdatedAt = txUpd;
     if (tx.accountName) group.accounts.add(tx.accountName);
   }
-  return Array.from(map.values()).sort((a, b) => Math.abs(b.totalAmount) - Math.abs(a.totalAmount));
+
+  const groups = Array.from(map.values());
+  return groups.sort((a, b) => {
+    switch (sortMode) {
+      case 'date_desc':
+        return String(b.maxDate || '').localeCompare(String(a.maxDate || '')) || (Math.abs(b.totalAmount) - Math.abs(a.totalAmount));
+      case 'recent':
+        return String(b.lastUpdatedAt || '').localeCompare(String(a.lastUpdatedAt || '')) || (Math.abs(b.totalAmount) - Math.abs(a.totalAmount));
+      case 'alpha_asc':
+        return String(a.merchantName || '').localeCompare(String(b.merchantName || ''), undefined, { sensitivity: 'base' });
+      case 'count_desc':
+        return (b.transactions.length - a.transactions.length) || (Math.abs(b.totalAmount) - Math.abs(a.totalAmount));
+      case 'amount_desc':
+      default:
+        return (Math.abs(b.totalAmount) - Math.abs(a.totalAmount)) || String(a.merchantName || '').localeCompare(String(b.merchantName || ''));
+    }
+  });
+}
+
+export function sortUncategorizedTransactions(uncatTxs, sortMode = 'amount_desc') {
+  const list = Array.isArray(uncatTxs) ? [...uncatTxs] : [];
+  return list.sort((a, b) => {
+    switch (sortMode) {
+      case 'date_desc':
+        return String(b.transactionDate || '').localeCompare(String(a.transactionDate || '')) || (Math.abs(b.amount) - Math.abs(a.amount));
+      case 'recent': {
+        const tsA = String(a.updatedAt || a.createdAt || a.transactionDate || '');
+        const tsB = String(b.updatedAt || b.createdAt || b.transactionDate || '');
+        return tsB.localeCompare(tsA) || (Math.abs(b.amount) - Math.abs(a.amount));
+      }
+      case 'alpha_asc':
+        return String(a.cleanMerchantName || a.rawDescription || '').localeCompare(
+          String(b.cleanMerchantName || b.rawDescription || ''),
+          undefined,
+          { sensitivity: 'base' }
+        );
+      case 'amount_desc':
+      case 'count_desc':
+      default:
+        return (Math.abs(Number(b.amount || 0)) - Math.abs(Number(a.amount || 0))) ||
+          String(b.transactionDate || '').localeCompare(String(a.transactionDate || ''));
+    }
+  });
 }
 
 export async function renderCashflowView(container) {
   const params = new URLSearchParams({
     windowType: state.cashflowWindow,
-    includeSubcategories: String(state.includeSubcategories)
+    includeSubcategories: String(state.includeSubcategories),
+    categorySort: state.cashflowCategorySort || 'spend_desc'
   });
 
   if (state.cashflowWindow === 'last_n_months') {
@@ -49,8 +97,10 @@ export async function renderCashflowView(container) {
 
   const data = await apiFetch(`/api/cashflow?${params.toString()}`);
   const uncatRow = data.tableRows.find(r => r.categoryId === null);
-  const uncatTxs = data.uncategorizedTransactions || (uncatRow ? uncatRow.transactions : []);
-  const merchantGroups = groupUncategorizedByMerchant(uncatTxs);
+  const rawUncatTxs = data.uncategorizedTransactions || (uncatRow ? uncatRow.transactions : []);
+  const uncatTxs = sortUncategorizedTransactions(rawUncatTxs, state.triageSort);
+  const merchantGroups = groupUncategorizedByMerchant(rawUncatTxs, state.triageSort);
+  const sortedDropdownCategories = sortCategories(state.categories, state.categoryDropdownSort);
 
   container.innerHTML = `
     <div class="portrait-rotate-banner">
@@ -68,6 +118,16 @@ export async function renderCashflowView(container) {
 
       <div class="toolbar-row" style="margin-bottom:0;">
         <button class="btn btn-outline btn-sm" id="cashflowAddCatBtn">+ Add Category</button>
+        <label style="font-size:12px;font-weight:700;color:#475569;display:inline-flex;align-items:center;gap:6px;">
+          Sort Categories:
+          <select id="cashflowCatSortSelect" class="select-control" style="font-size:12px;padding:4px 8px;">
+            <option value="spend_desc" ${state.cashflowCategorySort === 'spend_desc' ? 'selected' : ''}>Highest Spend ($)</option>
+            <option value="spend_asc" ${state.cashflowCategorySort === 'spend_asc' ? 'selected' : ''}>Lowest Spend ($)</option>
+            <option value="alpha_asc" ${state.cashflowCategorySort === 'alpha_asc' ? 'selected' : ''}>Alphabetical (A-Z)</option>
+            <option value="recent" ${state.cashflowCategorySort === 'recent' ? 'selected' : ''}>Recent Changes</option>
+            <option value="custom_order" ${state.cashflowCategorySort === 'custom_order' ? 'selected' : ''}>Custom Order</option>
+          </select>
+        </label>
         <div class="pill-group">
           <button class="pill-btn ${state.cashflowWindow === 'mtd' ? 'active' : ''}" data-win="mtd">Current MTD</button>
           <button class="pill-btn ${state.cashflowWindow === 'prior_month' ? 'active' : ''}" data-win="prior_month">Prior Month</button>
@@ -151,6 +211,25 @@ export async function renderCashflowView(container) {
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
           ${uncatTxs.length > 0 ? `
+            <label style="font-size:11px;font-weight:700;color:#92400E;display:inline-flex;align-items:center;gap:4px;">
+              Sort Triage:
+              <select id="triageSortSelect" class="select-control" style="font-size:12px;padding:3px 6px;">
+                <option value="amount_desc" ${state.triageSort === 'amount_desc' ? 'selected' : ''}>Highest Amount ($)</option>
+                <option value="date_desc" ${state.triageSort === 'date_desc' ? 'selected' : ''}>Newest Date</option>
+                <option value="recent" ${state.triageSort === 'recent' ? 'selected' : ''}>Recent Changes</option>
+                <option value="alpha_asc" ${state.triageSort === 'alpha_asc' ? 'selected' : ''}>Merchant (A-Z)</option>
+                <option value="count_desc" ${state.triageSort === 'count_desc' ? 'selected' : ''}>Most Frequent</option>
+              </select>
+            </label>
+            <label style="font-size:11px;font-weight:700;color:#92400E;display:inline-flex;align-items:center;gap:4px;">
+              Dropdown Order:
+              <select id="triageCatDropdownSort" class="select-control" style="font-size:12px;padding:3px 6px;">
+                <option value="alpha_asc" ${state.categoryDropdownSort === 'alpha_asc' ? 'selected' : ''}>Alphabetical (A-Z)</option>
+                <option value="recent" ${state.categoryDropdownSort === 'recent' ? 'selected' : ''}>Recent Changes</option>
+                <option value="custom_order" ${state.categoryDropdownSort === 'custom_order' ? 'selected' : ''}>Custom Order</option>
+                <option value="budget_desc" ${state.categoryDropdownSort === 'budget_desc' ? 'selected' : ''}>Highest Budget ($)</option>
+              </select>
+            </label>
             <div class="pill-group">
               <button class="pill-btn ${state.triageGroupByMerchant ? 'active' : ''}" id="triageModeGroupBtn">Group by Merchant (${merchantGroups.length})</button>
               <button class="pill-btn ${!state.triageGroupByMerchant ? 'active' : ''}" id="triageModeChronoBtn">Chronological List (${uncatTxs.length})</button>
@@ -191,7 +270,7 @@ export async function renderCashflowView(container) {
                     <div style="display:flex;gap:6px;align-items:center;">
                       <select class="select-control quick-uncat-select" data-tx-id="${g.representativeTx.transactionId}">
                         <option value="">Choose Category...</option>
-                        ${state.categories.map(c => `<option value="${c.categoryId}">${escapeHtml(c.name)}</option>`).join('')}
+                        ${sortedDropdownCategories.map(c => `<option value="${c.categoryId}">${escapeHtml(c.name)}</option>`).join('')}
                         <option value="__NEW__">+ Create New Category...</option>
                       </select>
                       <button class="btn btn-primary btn-sm quick-uncat-btn" data-tx-id="${g.representativeTx.transactionId}">Categorize (${g.transactions.length})...</button>
@@ -228,7 +307,7 @@ export async function renderCashflowView(container) {
                     <div style="display:flex;gap:6px;align-items:center;">
                       <select class="select-control quick-uncat-select" data-tx-id="${t.transactionId}">
                         <option value="">Choose Category...</option>
-                        ${state.categories.map(c => `<option value="${c.categoryId}">${escapeHtml(c.name)}</option>`).join('')}
+                        ${sortedDropdownCategories.map(c => `<option value="${c.categoryId}">${escapeHtml(c.name)}</option>`).join('')}
                         <option value="__NEW__">+ Create New Category...</option>
                       </select>
                       <button class="btn btn-primary btn-sm quick-uncat-btn" data-tx-id="${t.transactionId}">Categorize...</button>
@@ -312,6 +391,30 @@ export async function renderCashflowView(container) {
   const openAddCat = () => openCategoryManagerModal(null, () => renderCashflowView(container));
   container.querySelector('#cashflowAddCatBtn').onclick = openAddCat;
   container.querySelector('#triageNewCatBtn').onclick = openAddCat;
+
+  const cashflowCatSortSelect = container.querySelector('#cashflowCatSortSelect');
+  if (cashflowCatSortSelect) {
+    cashflowCatSortSelect.onchange = (e) => {
+      setSortPreference('cashflowCategorySort', e.target.value);
+      renderCashflowView(container);
+    };
+  }
+
+  const triageSortSelect = container.querySelector('#triageSortSelect');
+  if (triageSortSelect) {
+    triageSortSelect.onchange = (e) => {
+      setSortPreference('triageSort', e.target.value);
+      renderCashflowView(container);
+    };
+  }
+
+  const triageCatDropdownSort = container.querySelector('#triageCatDropdownSort');
+  if (triageCatDropdownSort) {
+    triageCatDropdownSort.onchange = (e) => {
+      setSortPreference('categoryDropdownSort', e.target.value);
+      renderCashflowView(container);
+    };
+  }
 
   const groupBtn = container.querySelector('#triageModeGroupBtn');
   const chronoBtn = container.querySelector('#triageModeChronoBtn');

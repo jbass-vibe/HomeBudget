@@ -54,6 +54,8 @@ public sealed class Category
     public int SortOrder { get; set; } = 100;
     public string ColorHex { get; set; } = "#3B82F6";
     public bool IsActive { get; set; } = true;
+    public string? CreatedAt { get; set; }
+    public string? UpdatedAt { get; set; }
 }
 
 public sealed class CategorizationRule
@@ -64,6 +66,8 @@ public sealed class CategorizationRule
     public int CategoryId { get; set; }
     public string? DefaultSubcategory { get; set; }
     public int Priority { get; set; } = 100;
+    public string? CreatedAt { get; set; }
+    public string? UpdatedAt { get; set; }
 }
 
 public sealed class TransactionEntity
@@ -85,6 +89,7 @@ public sealed class TransactionEntity
     public string? UploadBatchId { get; set; }
     public string? Notes { get; set; }
     public string? CreatedAt { get; set; }
+    public string? UpdatedAt { get; set; }
 }
 
 public sealed class StagingSessionEntity

@@ -73,7 +73,7 @@ public sealed class DatabaseInitializer(
 
     public static async Task ApplyIdempotentSchemaMigrationsAsync(System.Data.Common.DbConnection conn)
     {
-        // 1. Ensure StagingSessions exists for older databases created prior to v2.1
+        // 1. Ensure StagingSessions exists for older databases
         await conn.ExecuteAsync(
             """
             CREATE TABLE IF NOT EXISTS StagingSessions (
@@ -88,7 +88,33 @@ public sealed class DatabaseInitializer(
         // Prune expired staging sessions older than 24 hours
         await conn.ExecuteAsync("DELETE FROM StagingSessions WHERE CreatedAt < datetime('now', '-1 day');");
 
-        // 2. Check Transactions columns for CategorizationSource and UploadBatchId
+        // 2. Check Categories for UpdatedAt
+        var catColumns = (await conn.QueryAsync<string>("SELECT name FROM pragma_table_info('Categories');"))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (!catColumns.Contains("UpdatedAt"))
+        {
+            await conn.ExecuteAsync("ALTER TABLE Categories ADD COLUMN UpdatedAt TEXT NULL;");
+            string catBackfill = catColumns.Contains("CreatedAt")
+                ? "UPDATE Categories SET UpdatedAt = COALESCE(CreatedAt, datetime('now')) WHERE UpdatedAt IS NULL;"
+                : "UPDATE Categories SET UpdatedAt = datetime('now') WHERE UpdatedAt IS NULL;";
+            await conn.ExecuteAsync(catBackfill);
+        }
+
+        // 3. Check CategorizationRules for UpdatedAt
+        var ruleColumns = (await conn.QueryAsync<string>("SELECT name FROM pragma_table_info('CategorizationRules');"))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (ruleColumns.Count > 0 && !ruleColumns.Contains("UpdatedAt"))
+        {
+            await conn.ExecuteAsync("ALTER TABLE CategorizationRules ADD COLUMN UpdatedAt TEXT NULL;");
+            string ruleBackfill = ruleColumns.Contains("CreatedAt")
+                ? "UPDATE CategorizationRules SET UpdatedAt = COALESCE(CreatedAt, datetime('now')) WHERE UpdatedAt IS NULL;"
+                : "UPDATE CategorizationRules SET UpdatedAt = datetime('now') WHERE UpdatedAt IS NULL;";
+            await conn.ExecuteAsync(ruleBackfill);
+        }
+
+        // 4. Check Transactions columns for CategorizationSource, UploadBatchId, and UpdatedAt
         var txColumns = (await conn.QueryAsync<string>("SELECT name FROM pragma_table_info('Transactions');"))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
@@ -112,6 +138,17 @@ public sealed class DatabaseInitializer(
         {
             await conn.ExecuteAsync("ALTER TABLE Transactions ADD COLUMN UploadBatchId TEXT NULL;");
         }
+
+        if (!txColumns.Contains("UpdatedAt"))
+        {
+            await conn.ExecuteAsync("ALTER TABLE Transactions ADD COLUMN UpdatedAt TEXT NULL;");
+            string txBackfill = txColumns.Contains("CreatedAt")
+                ? "UPDATE Transactions SET UpdatedAt = COALESCE(CreatedAt, TransactionDate, datetime('now')) WHERE UpdatedAt IS NULL;"
+                : "UPDATE Transactions SET UpdatedAt = COALESCE(TransactionDate, datetime('now')) WHERE UpdatedAt IS NULL;";
+            await conn.ExecuteAsync(txBackfill);
+        }
+
+        await conn.ExecuteAsync("CREATE INDEX IF NOT EXISTS IX_Transactions_UpdatedAt ON Transactions(UpdatedAt);");
 
         // Normalize any legacy TransactionType values ('Payment' or 'Transfer') to canonical 'CreditCardPayoff'
         await conn.ExecuteAsync(

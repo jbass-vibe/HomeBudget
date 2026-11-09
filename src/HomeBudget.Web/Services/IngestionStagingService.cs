@@ -210,11 +210,13 @@ public sealed class IngestionStagingService(
                 INSERT INTO Transactions (
                     AccountId, TransactionDate, PostDate, RawDescription, CleanMerchantName,
                     Amount, TransactionType, CategoryId, Subcategory, CategorizationSource,
-                    IsCategoryManuallyLocked, ParentTransactionId, DedupHash, UploadBatchId
+                    IsCategoryManuallyLocked, ParentTransactionId, DedupHash, UploadBatchId,
+                    CreatedAt, UpdatedAt
                 ) VALUES (
                     @AccountId, @TransactionDate, @PostDate, @RawDescription, @CleanMerchantName,
                     @Amount, @TransactionType, @CategoryId, @Subcategory, @CategorizationSource,
-                    @IsLocked, NULL, @DedupHash, @UploadBatchId
+                    @IsLocked, NULL, @DedupHash, @UploadBatchId,
+                    datetime('now'), datetime('now')
                 );
                 """,
                 new
@@ -234,6 +236,14 @@ public sealed class IngestionStagingService(
                     UploadBatchId = batchId
                 },
                 tx);
+
+            if (isManuallyLocked && catId.HasValue)
+            {
+                await conn.ExecuteAsync(
+                    "UPDATE Categories SET UpdatedAt = datetime('now') WHERE CategoryId = @CatId;",
+                    new { CatId = catId.Value },
+                    tx);
+            }
 
             importedCount++;
         }
