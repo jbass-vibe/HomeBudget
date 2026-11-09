@@ -1,28 +1,26 @@
-# Local Home Budgeting & Cashflow System — Design Document (v2.2)
+# Local Home Budgeting & Cashflow System — Design Document (v2.3)
 
-**Document Version:** 2.2  
+**Document Version:** 2.3  
 **Target Platform:** Windows 11 IIS + ASP.NET Core (.NET 10 Minimal APIs) + SQLite (WAL Mode)  
 **Network Scope:** Strictly LAN-Only (`LocalSubnet` via Windows Defender Firewall, Port 8080)  
 **Primary Personas:**
 - **User (Spouse / Mobile-First on iPhone):** Reviews monthly budgets, explores the Cashflow Sankey visualization, manages categories (add/edit/delete), and rapidly categorizes or recategorizes expenses directly from the Visualization and Budgets views with automated forward/backward rule propagation prompts and flexible list sorting.
-- **Administrator (Desktop on Windows 11 PC):** Performs multi-file CSV statement ingestion (Chase & Wells Fargo), manages full category topology and rules, and uses the filtered Transaction Inspector to edit, annotate (`Notes`), split, or delete income and expense entries (with tombstone hash protection).
+- **Administrator (Desktop on Windows 11 PC):** Performs multi-file CSV statement ingestion (Chase & Wells Fargo), manages full category topology, rules, and local SQLite backup lifecycle/policies, and uses the filtered Transaction Inspector to edit, annotate (`Notes`), split, or delete income and expense entries (with tombstone hash protection).
 
 ---
 
-## 1. Summary of Requirements & Architecture Evolution (v2.0 $\rightarrow$ v2.2)
+## 1. Summary of Requirements & Architecture Evolution (v2.0 $\rightarrow$ v2.3)
 
 ### 1.1 Core Product Capabilities
-1. **Full Category Lifecycle & Dual-Persona Access (Add, Edit, Delete + Automatic DB Backup):**
+1. **Full Category Lifecycle & Dual-Persona Access (Add, Edit, Delete):**
    - Both the **User (iPhone/Mobile)** and **Administrator (Desktop)** can **add, edit, and delete** categories from any category management surface or inline during expense categorization.
    - Deleting a category supports either reassigning its existing transactions/rules to a replacement category or setting those transactions back to `Uncategorized` (`CategoryId = NULL`, `CategorizationSource = 'Uncategorized'`, `IsCategoryManuallyLocked = 0`).
-   - Every category addition, edit, deletion, or merge immediately triggers an atomic event-driven SQLite snapshot (`VACUUM INTO`).
 
 2. **Expense Recategorization with Non-Mutually Exclusive Forward & Historical Propagation Prompts:**
    - Whenever a user or administrator categorizes an uncategorized expense or recategorizes an existing expense, the UI presents an interactive confirmation prompt with two independent (non-mutually exclusive) checkboxes:
      - **Option A (Forward / Moving Forward):** *"Categorize similar expenses based on this change moving forward?"* — Creates or updates a persistent `CategorizationRule` (matched on normalized merchant name / pattern) so all future CSV uploads automatically assign this category.
      - **Option B (Historical / Past):** *"Recategorize similar expenses in the past?"* — Immediately runs a retroactive back-propagation query across existing transactions matching the merchant/pattern and updates their `CategoryId`, `CategorizationSource = 'Rule'`, and `UpdatedAt = datetime('now')` (with optional override for previously locked rows).
    - Users can check **neither** (one-off change for this transaction only), **Option A only**, **Option B only**, or **both Option A and Option B** simultaneously.
-   - Executing this change triggers an immediate SQLite database backup.
 
 3. **Administrator Income & Expense Editing, Notes & Deletion with Multi-Criteria Filtering:**
    - The Administrator can **edit, split, or delete both Income (`IncomeDeposit`) and Expense (`Expense` / `Refund` / `CreditCardPayoff`) transactions** from the database via the **Transaction Inspector**.
@@ -38,14 +36,14 @@
 4. **Visualization Page (`Uncategorized` Triage & Inline Categorization Workflow):**
    - On the **Cashflow & Sankey Visualization** page, if any expenses in the active time window are marked **`Uncategorized`**, the `Uncategorized` node in the Sankey diagram and a dedicated **"Uncategorized Expenses Triage"** card below the diagram are highlighted.
    - Supports toggling between **Merchant-Grouped View** (aggregating repeated uncategorized charges by `CleanMerchantName` with item counts and group subtotals) and **Chronological List View**.
-   - Categorizing from the triage panel updates the transaction(s), applies selected forward/past propagation options, creates a database backup, and live-refreshes the Sankey diagram in real time.
+   - Categorizing from the triage panel updates the transaction(s), applies selected forward/past propagation options, requests a coalesced database backup, and live-refreshes the Sankey diagram in real time.
 
-5. **Comprehensive List Management & Multi-Mode Sorting (New in v2.2):**
-   - Every major list, dropdown menu, visualization node column, and table across the application provides consistent, user-controllable sorting options—including **Alphabetical (A $\rightarrow$ Z / Z $\rightarrow$ A)**, **Recent Changes (`UpdatedAt DESC`)**, **Amount / Spend (High $\rightarrow$ Low / Low $\rightarrow$ High)**, and **Custom / Priority Order**:
-     - **Category Dropdown Menus (`<select>` pickers across all modals, triage rows, upload staging, and filters):** Can be sorted **Alphabetically (A $\rightarrow$ Z)**, by **Recent Changes / Recently Used (`UpdatedAt DESC`)**, by **Custom Sort Order (`SortOrder ASC`)**, or by **Budget Amount (`MonthlyBudget DESC`)**.
-     - **Cashflow Sankey Diagram & Tabular Breakdown:** Category nodes in the Sankey visualization and rows in the companion cashflow table can be sorted by **Highest Spend (`spend_desc`)**, **Lowest Spend (`spend_asc`)**, **Alphabetical (`alpha_asc`)**, **Recent Changes (`recent`)**, or **Custom Order (`custom_order`)**.
-     - **Monthly Budget Cards:** Sortable by **Custom Order**, **Alphabetical (A $\rightarrow$ Z)**, **Recent Changes**, **% Budget Used (Over-Budget First)**, **Highest Spend**, or **Lowest Remaining Budget**.
-     - **Uncategorized Triage, Categorization Rules & Transaction Inspector:** Support sorting by **Alphabetical**, **Recent Changes (`UpdatedAt DESC`)**, **Date**, and **Amount / Priority**.
+5. **Comprehensive List Management & Multi-Mode Sorting (v2.2):**
+   - Every major list, dropdown menu, visualization node column, and table across the application provides consistent, user-controllable sorting options—including **Alphabetical (A $\rightarrow$ Z / Z $\rightarrow$ A)**, **Recent Changes (`UpdatedAt DESC`)**, **Amount / Spend (High $\rightarrow$ Low / Low $\rightarrow$ High)**, and **Custom / Priority Order**.
+
+6. **Smart Coalesced SQLite Backup Policy & Admin Backup Management Suite (New in v2.3):**
+   - **Preventing Backup Sprawl (Debounce + Cooldown + Tiered Triggers):** Replaces naive synchronous per-click snapshots with a configurable policy engine (`BackupService.RequestBackupAsync`). By default (`BackupAutoMode = 'Coalesced'`), rapid interactive edits (triage categorizations, budget tweaks, rule edits, transaction edits) are coalesced across a sliding quiet window (`BackupDebounceSeconds = 30s`) and a minimum interval cooldown (`BackupMinIntervalMinutes = 10m`) so a 20-item categorization session produces **one** consolidated snapshot instead of 20 separate `.db` files. Nested duplicate snapshots inside composite service operations are also eliminated.
+   - **Full Admin Backup Management Panel (`topologyView.js`):** Allows the Administrator to configure auto-backup mode (`Coalesced`, `MajorOnly`, `ManualOnly`, `EveryChange`), retention count (`MaxRetainedBackups`, default `15`), debounce/cooldown timers, flush pending coalesced backups on demand, sort/inspect snapshots with trigger-reason badges, delete individual or bulk-selected snapshots, prune old snapshots, and safely **restore** the live database from any snapshot (with pre-restore safety backup and `PRAGMA integrity_check` verification).
 
 ### 1.2 Operational Safety & Data Integrity Refinements
 1. **Canonical Transaction Type Vocabulary:**
@@ -55,16 +53,16 @@
      - `'IncomeDeposit'` (Positive amount: verified payroll / household income deposit)
      - `'CreditCardPayoff'` (Positive amount: credit card payment or inter-account payoff transfer excluded from both spending and income totals to prevent double-counting)
 2. **Schema & Design Alignment + Idempotent Schema Evolution:**
-   - Reconciles `schema.sql` and C# entities (`IsBigBoxMerchantCategory`, `IsRegex`, `DefaultSubcategory`, `CategorizationSource`, `UploadBatchId`, `UpdatedAt`) and runs an idempotent column-migration check in `DatabaseInitializer` (`PRAGMA table_info`) so existing `budget.db` files automatically receive new columns (`CategorizationSource`, `UpdatedAt`, `StagingSessions` table) on startup without data loss.
+   - Reconciles `schema.sql` and C# entities (`IsBigBoxMerchantCategory`, `IsRegex`, `DefaultSubcategory`, `CategorizationSource`, `UploadBatchId`, `UpdatedAt`) and runs an idempotent column-migration check in `DatabaseInitializer` (`PRAGMA table_info`) so existing `budget.db` files automatically receive new columns (`CategorizationSource`, `UpdatedAt`, `StagingSessions` table, and default backup policy settings) on startup without data loss.
 3. **Hardened Wells Fargo & Chase CSV Classification (`CsvParserService`):**
    - Prevents non-payroll positive checking credits (e.g., merchant refunds, Zelle/Venmo reimbursements, account transfers) from being misclassified as `IncomeDeposit`. Only positive checking rows matching `GooglePayrollMatchPattern` are auto-classified as `IncomeDeposit`; other non-payoff positive credits default to `Refund` and are flagged with `RequiresManualReview = true` during upload staging.
 4. **SQLite-Persisted Upload Staging Sessions (`StagingSessions`):**
    - Persists staging sessions in the SQLite `StagingSessions` table (with automatic 24-hour expiration cleanup) so IIS application pool recycles or server restarts do not lose an in-progress CSV import review.
 5. **Immutable Import Fingerprint (`DedupHash`) Contract:**
    - `DedupHash` is computed once at CSV parse time from the raw bank record (`AccountId|IsoDate|RawDescription|NormalizedAmount`) and is never mutated when the user edits `CleanMerchantName`, `TransactionDate`, `Amount`, `CategoryId`, `Subcategory`, or `Notes`.
-6. **Frontend XSS Prevention (`escapeHtml` Rendering Contract) & Verified Backups (`BackupService`):**
+6. **Frontend XSS Prevention (`escapeHtml` Rendering Contract) & Verified Coalesced Backups (`BackupService`):**
    - All externally sourced CSV fields and user-editable strings are escaped via `escapeHtml()` before DOM insertion.
-   - `BackupService` verifies snapshot file existence and non-zero size after `VACUUM INTO` and returns accurate status to the caller.
+   - `BackupService` verifies snapshot file existence and non-zero size after `VACUUM INTO`, coalesces burst edits, and validates snapshot integrity (`PRAGMA integrity_check`) before any restore operation.
 
 ---
 
@@ -315,41 +313,89 @@ The `Sort By` selector in the Transaction Inspector supports:
 
 ---
 
-## 5. Updated API Contract Summary (v2.2)
+### 4.4 Smart Coalesced SQLite Backup Policy & Admin Backup Management (New in v2.3)
 
-| Method & Route | Persona | Description | Triggers DB Backup? |
+#### A. Root Cause of Excessive Backups & Policy Architecture
+In v2.0–v2.2, every single mutation endpoint invoked `CreateSnapshotImmediateAsync()` synchronously. During normal interactive sessions—such as triaging 15 uncategorized expenses, adjusting several monthly category budgets, or editing a transaction with inline rule creation and back-propagation—this produced dozens of back-to-back full-database `VACUUM INTO` copies within minutes.
+
+To prevent backup sprawl while preserving strong local data safety, `BackupService` in v2.3 introduces a **Tiered & Coalesced Backup Policy** controlled via `Settings` and manageable at runtime in the Admin Panel:
+
+| Setting Key | Default | Range / Options | Description |
 | :--- | :--- | :--- | :--- |
-| `GET /api/accounts` | Both | List active bank and credit card accounts. | No |
-| `POST /api/accounts` | Admin | Create a new account (`AccountName`, `Institution`, `AccountType`). | **Yes** (`account_create`) |
-| `GET /api/categories` | Both | List active categories (including `SortOrder`, `MonthlyBudget`, `CreatedAt`, `UpdatedAt`) with optional `?sortBy=alpha_asc\|recent\|custom_order\|budget_desc`. | No |
-| `POST /api/categories` | Both | Create a new category (`Name`, `IsBigBoxMerchantCategory`, `MonthlyBudget`, `SortOrder`, `ColorHex`). | **Yes** (`category_create`) |
-| `PUT /api/categories/{id}` | Both | Edit category properties and update `UpdatedAt`. | **Yes** (`category_update`) |
-| `PUT /api/categories/{id}/budget` | Both | Update a category's `MonthlyBudget` target and `UpdatedAt`. | **Yes** (`budget_edit`) |
-| `DELETE /api/categories/{id}` | Both | Delete category (optional `?replacementCategoryId=` to reassign transactions/rules; otherwise sets transactions to `Uncategorized`). | **Yes** (`category_delete`) |
-| `POST /api/categories/{id}/merge-into/{targetId}` | Both | Merge source category into target category and update target `UpdatedAt`. | **Yes** (`category_merge`) |
-| `GET /api/topology` | Both | Return all active categories and `CategorizationRules` (including `UpdatedAt` timestamps for sorting). | No |
-| `POST /api/rules` | Both | Create a categorization rule (validating regex syntax if `IsRegex = true`). | **Yes** (`rule_create`) |
-| `PUT /api/rules/{id}` | Both | Update an existing categorization rule and `UpdatedAt`. | **Yes** (`rule_update`) |
-| `DELETE /api/rules/{id}` | Both | Delete a categorization rule. | **Yes** (`rule_delete`) |
-| `POST /api/rules/back-propagate` | Both | Dry-run or commit retroactive rule evaluation across historical transactions. | **Yes** (when `dryRun = false`, `backprop`) |
-| `POST /api/uploads/stage` | Admin | Parse Chase/Wells Fargo CSV files, classify rows, compute `DedupHash`, and persist staging session in SQLite. | No |
-| `POST /api/uploads/commit` | Admin | Commit approved staged rows from SQLite `StagingSessions` into `Transactions` / `DeletedTransactionHashes`. | **Yes** (`csv_upload`) |
-| `POST /api/transactions/{id}/categorize` | Both | Categorize or recategorize an expense (optionally creating a new category inline) with non-mutually exclusive `applyMovingForward` and `applyToPast` flags; updates `UpdatedAt` on affected transactions and target category. | **Yes** (`recategorize`) |
-| `GET /api/transactions/similar-count` | Both | Returns count of past transactions matching `pattern` to preview in the categorization modal. | No |
-| `GET /api/transactions` | Both / Admin | Query transactions with filters (`startDate`, `endDate`, `accountId`, `categoryId`, `uncategorizedOnly`, `transactionType`, `minAmount`, `maxAmount`, `search`) and `sortBy` (`date_desc`, `date_asc`, `recent_changes`, `merchant_asc`, `merchant_desc`, `amount_desc`, `amount_asc`). | No |
-| `PUT /api/transactions/{id}` | Admin | Edit transaction fields (`Amount`, `TransactionDate`, `TransactionType`, `CleanMerchantName`, `CategoryId`, `Subcategory`, `Notes`) and update `UpdatedAt`. | **Yes** (`data_edit`) |
-| `POST /api/transactions/{id}/split` | Admin | Split a transaction into multiple categorized child legs. | **Yes** (`data_edit`) |
-| `DELETE /api/transactions/{id}` | Admin | Delete an income or expense transaction (with `?addToTombstone=true/false`). | **Yes** (`transaction_delete`) |
-| `POST /api/transactions/bulk-delete` | Admin | Bulk-delete selected income/expense transactions in one atomic transaction. | **Yes** (`transaction_delete`) |
-| `GET /api/cashflow` | Both | Returns cashflow summary, Sankey nodes/links, `uncategorizedTransactions`, and category `sortOrder` / `lastActivityAt` metadata so the Visualization page can re-sort Sankey nodes and table rows dynamically. | No |
-| `GET /api/budgets/{yearMonth?}` | Both | Returns monthly budget summary, category progress cards (with `updatedAt` / `lastActivityAt`), and uncategorized transactions for the month. | No |
-| `GET /api/settings` | Both | Returns income configuration and monthly overrides. | No |
-| `PUT /api/settings` | Admin | Updates persistent monthly income, payroll match pattern, and income mode. | **Yes** (`settings_update`) |
-| `PUT /api/settings/income-overrides` | Admin | Upserts a monthly income override for a specific `YearMonth`. | **Yes** (`income_override`) |
-| `DELETE /api/settings/income-overrides/{yearMonth}` | Admin | Deletes a monthly income override. | **Yes** (`income_override_delete`) |
-| `GET /api/backups` | Admin | Lists available SQLite backup snapshots and backup directory path. | No |
-| `POST /api/backups/trigger` | Admin | Triggers an immediate manual SQLite backup snapshot. | **Yes** (`manual`) |
-| `GET /api/backups/download/{fileName}` | Admin | Downloads a specific `.db` backup file. | No |
+| `BackupAutoMode` | `'Coalesced'` | `'Coalesced'`, `'MajorOnly'`, `'ManualOnly'`, `'EveryChange'` | Controls which events trigger automatic backups and whether rapid interactive edits are coalesced. |
+| `BackupDebounceSeconds` | `30` | `5` – `600` seconds | Sliding quiet-period window used in `'Coalesced'` mode to batch rapid consecutive edits into a single snapshot. |
+| `BackupMinIntervalMinutes` | `10` | `0` – `1440` minutes | Minimum cooldown interval between automatic snapshots. Edits occurring during an active cooldown are coalesced into a single trailing snapshot when the cooldown expires. |
+| `MaxRetainedBackups` | `15` | `1` – `200` snapshots | Maximum number of `.db` snapshots retained on disk before oldest snapshots are automatically pruned. |
+
+#### B. Behavior of `BackupAutoMode` Modes (`BackupService.RequestBackupAsync`)
+1. **`'Coalesced'` *(Default — Smart Debounce + Cooldown)*:**
+   - **Major / Bulk Operations (`isMajorOperation = true`: `csv_upload`, `category_delete`, `category_merge`, `bulk_delete`):**
+     - Cancels any pending debounce timer (since an immediate snapshot captures all prior uncommitted backup state). If outside `BackupMinIntervalMinutes`, executes `VACUUM INTO` immediately; if inside the cooldown window, schedules a single trailing snapshot at the end of the cooldown.
+   - **Routine Interactive Edits (`isMajorOperation = false`: `recategorize`, `category_create`, `category_update`, `budget_edit`, `rule_create`, `rule_update`, `rule_delete`, `data_edit`, `transaction_delete`, `settings_update`, `account_create`, `income_override`):**
+     - Increments the in-memory pending change counter (`PendingChangesCount`), records the trigger reason, and resets the sliding debounce timer (`max(BackupDebounceSeconds, remainingCooldown)`).
+     - Once the quiet window elapses, writes **one** consolidated snapshot named `budget_<timestamp>_coalesced_<N>changes.db`.
+2. **`'MajorOnly'` *(CSV Imports, Category Deletes/Merges & Bulk Deletes Only)*:**
+   - Routine single-row edits (`isMajorOperation = false`) do **not** create or schedule snapshots. Only major operations (`csv_upload`, `category_delete`, `category_merge`, `bulk_delete`) trigger automatic snapshots (respecting `BackupMinIntervalMinutes`).
+3. **`'ManualOnly'` *(Disable Automatic Backups)*:**
+   - Automatic backups are disabled across all endpoints. Snapshots are only created when the Administrator clicks **Create Manual Snapshot Now** or automatically before an in-app database restore (`pre_restore`).
+4. **`'EveryChange'` *(Legacy Immediate Mode)*:**
+   - Creates an immediate snapshot on each top-level mutation (while suppressing duplicate nested snapshots inside composite operations such as `UpdateTransactionAsync` with rule creation + back-propagation).
+
+#### C. Admin Panel Backup Management Suite (`topologyView.js` Section 4)
+The **Local SQLite Backup Management** card in the Admin Panel (`Categories, Rules, Income & Backups`) provides end-to-end control over backup policies, storage, retention, and recovery:
+1. **Storage & Queue Telemetry Bar:**
+   - Displays **Total Snapshots (`N / MaxRetained`)**, **Total Disk Usage (`KB / MB`)**, **Latest Snapshot Timestamp**, and **Pending Coalesced Changes (`N` queued edits)** with a one-click **"Flush Pending Now"** button.
+2. **Inline Backup Policy Configuration:**
+   - Allows the Administrator to adjust `Auto-Backup Mode`, `Quiet Debounce (sec)`, `Min Cooldown (min)`, and `Max Retained Snapshots` and save them via `PUT /api/backups/config` (which also immediately prunes excess files if `MaxRetainedBackups` was reduced).
+3. **Snapshot List Sorting, Single/Bulk Deletion & Pruning:**
+   - Sort snapshots by **Newest First (`date_desc`)**, **Oldest First (`date_asc`)**, **Largest Size (`size_desc`)**, **Smallest Size (`size_asc`)**, or **Trigger Reason (`reason_asc`)**.
+   - Select individual or all snapshots via checkboxes to **Bulk Delete Selected (`POST /api/backups/bulk-delete`)**, delete a single row (`DELETE /api/backups/{fileName}`), or **Prune Oldest Snapshots (`POST /api/backups/prune`)** down to any target count.
+4. **Verified In-App Database Restore (`POST /api/backups/restore/{fileName}`):**
+   - Clicking **Restore...** on any snapshot opens a confirmation modal with an option to create a `pre_restore` safety backup of the current live database first (checked by default).
+   - The backend verifies the target snapshot file is non-empty and passes `PRAGMA integrity_check;`, creates the optional `pre_restore` snapshot, uses `SqliteConnection.BackupDatabase` to atomically copy the snapshot into the live `budget.db`, and runs `DatabaseInitializer.ApplyIdempotentSchemaMigrationsAsync` so even older snapshots upgrade cleanly to the current schema.
+
+---
+
+## 5. Updated API Contract Summary (v2.3)
+
+| Method & Route | Persona | Description | Backup Behavior (`Coalesced` Default) |
+| :--- | :--- | :--- | :--- |
+| `GET /api/accounts` | Both | List active bank and credit card accounts. | None |
+| `POST /api/accounts` | Admin | Create a new account (`AccountName`, `Institution`, `AccountType`). | Coalesced (`account_create`) |
+| `GET /api/categories` | Both | List active categories with optional `?sortBy=alpha_asc\|recent\|custom_order\|budget_desc`. | None |
+| `POST /api/categories` | Both | Create a new category. | Coalesced (`category_create`) |
+| `PUT /api/categories/{id}` | Both | Edit category properties and update `UpdatedAt`. | Coalesced (`category_update`) |
+| `PUT /api/categories/{id}/budget` | Both | Update a category's `MonthlyBudget` target and `UpdatedAt`. | Coalesced (`budget_edit`) |
+| `DELETE /api/categories/{id}` | Both | Delete category (optional `?replacementCategoryId=` to reassign transactions/rules). | **Major** (`category_delete`) |
+| `POST /api/categories/{id}/merge-into/{targetId}` | Both | Merge source category into target category and update target `UpdatedAt`. | **Major** (`category_merge`) |
+| `GET /api/topology` | Both | Return all active categories and `CategorizationRules`. | None |
+| `POST /api/rules` | Both | Create a categorization rule. | Coalesced (`rule_create`) |
+| `PUT /api/rules/{id}` | Both | Update an existing categorization rule and `UpdatedAt`. | Coalesced (`rule_update`) |
+| `DELETE /api/rules/{id}` | Both | Delete a categorization rule. | Coalesced (`rule_delete`) |
+| `POST /api/rules/back-propagate` | Both | Dry-run or commit retroactive rule evaluation across historical transactions. | Coalesced (when `dryRun = false`, `backprop`) |
+| `POST /api/uploads/stage` | Admin | Parse Chase/Wells Fargo CSV files, classify rows, compute `DedupHash`, and persist staging session in SQLite. | None |
+| `POST /api/uploads/commit` | Admin | Commit approved staged rows from SQLite `StagingSessions` into `Transactions` / `DeletedTransactionHashes`. | **Major** (`csv_upload`) |
+| `POST /api/transactions/{id}/categorize` | Both | Categorize or recategorize an expense with non-mutually exclusive `applyMovingForward` and `applyToPast` flags. | Coalesced (`recategorize`) |
+| `GET /api/transactions/similar-count` | Both | Returns count of past transactions matching `pattern`. | None |
+| `GET /api/transactions` | Both / Admin | Query transactions with filters and `sortBy` (`date_desc`, `date_asc`, `recent_changes`, `merchant_asc`, `merchant_desc`, `amount_desc`, `amount_asc`). | None |
+| `PUT /api/transactions/{id}` | Admin | Edit transaction fields and `Notes` (single consolidated backup request even when creating/back-propagating a rule). | Coalesced (`data_edit`) |
+| `POST /api/transactions/{id}/split` | Admin | Split a transaction into multiple categorized child legs. | Coalesced (`data_edit`) |
+| `DELETE /api/transactions/{id}` | Admin | Delete an income or expense transaction (with `?addToTombstone=true/false`). | Coalesced (`transaction_delete`) |
+| `POST /api/transactions/bulk-delete` | Admin | Bulk-delete selected income/expense transactions in one atomic transaction. | **Major** (`bulk_delete`) |
+| `GET /api/cashflow` | Both | Returns cashflow summary, Sankey nodes/links, `uncategorizedTransactions`, and `?categorySort=` ordering. | None |
+| `GET /api/budgets/{yearMonth?}` | Both | Returns monthly budget summary, category progress cards, and uncategorized transactions for the month. | None |
+| `GET /api/settings` | Both | Returns income configuration and monthly overrides. | None |
+| `PUT /api/settings` | Admin | Updates persistent monthly income, payroll match pattern, and income mode. | Coalesced (`settings_update`) |
+| `PUT /api/settings/income-overrides` | Admin | Upserts a monthly income override for a specific `YearMonth`. | Coalesced (`income_override`) |
+| `DELETE /api/settings/income-overrides/{yearMonth}` | Admin | Deletes a monthly income override. | Coalesced (`income_override_delete`) |
+| `GET /api/backups` | Admin | Returns backup directory path, active policy `config`, storage/queue `status`, and `backups` list. | None |
+| `PUT /api/backups/config` | Admin | Updates `BackupAutoMode`, `BackupDebounceSeconds`, `BackupMinIntervalMinutes`, and `MaxRetainedBackups`, and prunes excess snapshots. | None |
+| `POST /api/backups/trigger` | Admin | Immediately flushes any pending coalesced changes and creates a verified manual snapshot. | **Immediate** (`manual`) |
+| `GET /api/backups/download/{fileName}` | Admin | Downloads a specific `.db` backup file. | None |
+| `DELETE /api/backups/{fileName}` | Admin | Deletes a single `.db` backup snapshot from disk. | None |
+| `POST /api/backups/bulk-delete` | Admin | Deletes multiple selected `.db` backup snapshots in one operation. | None |
+| `POST /api/backups/prune` | Admin | Prunes older snapshots so only the `keepCount` newest `.db` files remain. | None |
+| `POST /api/backups/restore/{fileName}` | Admin | Verifies snapshot integrity, optionally creates a `pre_restore` safety snapshot, atomically restores `budget.db`, and runs schema migrations. | **Immediate** (`pre_restore`) |
 
 ---
 
@@ -394,5 +440,26 @@ The `Sort By` selector in the Transaction Inspector supports:
 | CITY WATER UTILITY (1 charge • Mar 11)     | $137.51 | [ Categorize ] |
 | COSTCO GAS (2 charges • Mar 11 – Mar 18)   | $124.80 | [ Categorize ] |
 | APPLE.COM/BILL (1 charge • Mar 15)         |  $14.99 | [ Categorize ] |
++-----------------------------------------------------------------------+
+```
+
+### 6.3 Admin Backup Management Panel (`Categories, Rules, Income & Backups`)
+```
++-----------------------------------------------------------------------+
+| 4. Local SQLite Backup Management & Retention Policy                  |
+|-----------------------------------------------------------------------|
+| Snapshots: 8 / 15 Max  | Disk Used: 1.4 MB | Pending Edits: 0 Queued  |
+|-----------------------------------------------------------------------|
+| Auto-Backup Mode: [ Smart Coalesced (Debounce + Cooldown) ▼ ]         |
+| Debounce (sec): [ 30 ]  Min Cooldown (min): [ 10 ]  Max Kept: [ 15 ]  |
+|                                                [ Save Backup Policy ] |
+|-----------------------------------------------------------------------|
+| Sort: [ Newest First ▼ ]  [ Delete Selected (2) ] [ Prune Oldest... ] |
+|                                        [ + Create Manual Snapshot ]   |
+|-----------------------------------------------------------------------|
+| [x] budget_20261109_192000_manual.db     | Manual    | 180 KB |       |
+|     [ ⬇ Download ] [ ↺ Restore DB... ] [ 🗑 Delete ]                  |
+| [x] budget_20261109_184512_csv_upload.db | CSV Import| 180 KB |       |
+|     [ ⬇ Download ] [ ↺ Restore DB... ] [ 🗑 Delete ]                  |
 +-----------------------------------------------------------------------+
 ```

@@ -135,7 +135,7 @@ public sealed class BudgetService(SqliteConnectionFactory connectionFactory, Bac
             new { CategoryId = categoryId, MonthlyBudget = Math.Max(0m, monthlyBudget) });
 
         if (updated == 0) return null;
-        await backupService.CreateSnapshotImmediateAsync("budget_edit", ct);
+        await backupService.RequestBackupAsync("budget_edit", isMajorOperation: false, ct);
         return await conn.QuerySingleAsync<Category>(
             "SELECT * FROM Categories WHERE CategoryId = @CategoryId;",
             new { CategoryId = categoryId });

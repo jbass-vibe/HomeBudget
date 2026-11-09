@@ -10,7 +10,8 @@ const SORT_STORAGE_KEYS = {
   triageSort: 'hb_triage_sort',
   budgetsCategorySort: 'hb_budgets_cat_sort',
   topologyCategorySort: 'hb_topology_cat_sort',
-  topologyRuleSort: 'hb_topology_rule_sort'
+  topologyRuleSort: 'hb_topology_rule_sort',
+  backupsSort: 'hb_backups_sort'
 };
 
 export function getSavedSort(stateKey, fallback) {
@@ -40,6 +41,7 @@ export const state = {
   budgetsCategorySort: getSavedSort('budgetsCategorySort', 'custom_order'),
   topologyCategorySort: getSavedSort('topologyCategorySort', 'custom_order'),
   topologyRuleSort: getSavedSort('topologyRuleSort', 'priority_asc'),
+  backupsSort: getSavedSort('backupsSort', 'date_desc'),
   accounts: [],
   categories: []
 };
@@ -98,6 +100,8 @@ export function escapeHtml(val) {
 }
 
 export function formatBackupStatus(backupFileCreated) {
+  if (backupFileCreated === 'scheduled') return 'Backup scheduled (coalesced)';
+  if (backupFileCreated === 'skipped_policy') return 'Auto-backup skipped (policy)';
   return backupFileCreated ? 'DB backed up' : 'Backup skipped/failed';
 }
 

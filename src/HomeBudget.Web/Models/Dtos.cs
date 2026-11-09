@@ -262,6 +262,40 @@ public sealed class BackupFileInfoDto
     public string FileName { get; set; } = "";
     public DateTime CreatedAtUtc { get; set; }
     public long SizeBytes { get; set; }
+    public string ReasonLabel { get; set; } = "Snapshot";
+}
+
+public sealed class BackupPolicyConfigDto
+{
+    public string BackupAutoMode { get; set; } = "Coalesced";
+    public int BackupDebounceSeconds { get; set; } = 30;
+    public int BackupMinIntervalMinutes { get; set; } = 10;
+    public int MaxRetainedBackups { get; set; } = 15;
+}
+
+public sealed class BackupStatusDto
+{
+    public int TotalCount { get; set; }
+    public long TotalSizeBytes { get; set; }
+    public DateTime? LatestBackupUtc { get; set; }
+    public int PendingChangesCount { get; set; }
+    public List<string> PendingReasons { get; set; } = [];
+    public DateTime? NextScheduledBackupUtc { get; set; }
+}
+
+public sealed class BulkDeleteBackupsRequest
+{
+    public List<string> FileNames { get; set; } = [];
+}
+
+public sealed class PruneBackupsRequest
+{
+    public int KeepCount { get; set; } = 10;
+}
+
+public sealed class RestoreBackupRequest
+{
+    public bool CreatePreRestoreBackup { get; set; } = true;
 }
 
 public sealed class StagingCandidateDto

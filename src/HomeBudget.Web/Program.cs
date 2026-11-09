@@ -500,7 +500,7 @@ app.MapDelete("/api/transactions/{id:int}", async (
     await conn.ExecuteAsync("DELETE FROM Transactions WHERE TransactionId = @Id;", new { Id = id }, sqlTx);
     await sqlTx.CommitAsync(ct);
 
-    await backupService.CreateSnapshotImmediateAsync("transaction_delete", ct);
+    await backupService.RequestBackupAsync("transaction_delete", isMajorOperation: false, ct);
     return Results.NoContent();
 });
 
@@ -557,7 +557,7 @@ app.MapPost("/api/transactions/bulk-delete", async (
         sqlTx);
 
     await sqlTx.CommitAsync(ct);
-    string? backupFile = await backupService.CreateSnapshotImmediateAsync("transaction_delete", ct);
+    string? backupFile = await backupService.RequestBackupAsync("bulk_delete", isMajorOperation: true, ct);
 
     return Results.Ok(new { deletedCount, backupFileCreated = backupFile });
 });
@@ -612,7 +612,7 @@ app.MapPut("/api/settings", async (SettingsDto req, SqliteConnectionFactory db, 
     }
 
     await tx.CommitAsync(ct);
-    string? backupFile = await backupService.CreateSnapshotImmediateAsync("settings_update", ct);
+    string? backupFile = await backupService.RequestBackupAsync("settings_update", isMajorOperation: false, ct);
     return Results.Ok(new { updated = true, backupFileCreated = backupFile });
 });
 
@@ -627,7 +627,7 @@ app.MapPut("/api/settings/income-overrides", async (IncomeOverrideDto req, Sqlit
     await conn.ExecuteAsync(
         "INSERT INTO IncomeOverrides (YearMonth, IncomeAmount, Notes) VALUES (@YearMonth, @IncomeAmount, @Notes) ON CONFLICT(YearMonth) DO UPDATE SET IncomeAmount = @IncomeAmount, Notes = @Notes;",
         req);
-    await backupService.CreateSnapshotImmediateAsync("income_override", ct);
+    await backupService.RequestBackupAsync("income_override", isMajorOperation: false, ct);
     return Results.Ok(req);
 });
 
@@ -635,25 +635,42 @@ app.MapDelete("/api/settings/income-overrides/{yearMonth}", async (string yearMo
 {
     await using var conn = await db.CreateOpenConnectionAsync(ct);
     await conn.ExecuteAsync("DELETE FROM IncomeOverrides WHERE YearMonth = @YearMonth;", new { YearMonth = yearMonth });
-    await backupService.CreateSnapshotImmediateAsync("income_override_delete", ct);
+    await backupService.RequestBackupAsync("income_override_delete", isMajorOperation: false, ct);
     return Results.NoContent();
 });
 
-app.MapGet("/api/backups", (BackupService backupService) =>
-    Results.Ok(new
+app.MapGet("/api/backups", async (BackupService backupService, CancellationToken ct) =>
+{
+    var config = await backupService.GetPolicyConfigAsync(ct);
+    var backups = backupService.ListBackups();
+    var status = backupService.GetStatus(backups);
+    return Results.Ok(new
     {
         backupDirectoryPath = backupService.BackupDirectoryPath,
-        backups = backupService.ListBackups()
-    }));
+        config,
+        status,
+        backups
+    });
+});
 
-app.MapPost("/api/backups/trigger", async (BackupService backupService, CancellationToken ct) =>
+app.MapPut("/api/backups/config", async (BackupPolicyConfigDto req, BackupService backupService, CancellationToken ct) =>
 {
-    string? fileName = await backupService.CreateSnapshotImmediateAsync("manual", ct);
+    var config = await backupService.UpdatePolicyConfigAsync(req, ct);
+    var backups = backupService.ListBackups();
+    var status = backupService.GetStatus(backups);
+    return Results.Ok(new { config, status, backups });
+});
+
+app.MapPost("/api/backups/trigger", async (string? reason, BackupService backupService, CancellationToken ct) =>
+{
+    string effectiveReason = string.IsNullOrWhiteSpace(reason) ? "manual" : reason.Trim();
+    string? fileName = await backupService.FlushPendingSnapshotAsync(effectiveReason, ct);
     if (string.IsNullOrWhiteSpace(fileName))
     {
         return Results.Problem("Failed to create SQLite backup snapshot.", statusCode: 500);
     }
-    return Results.Ok(new { fileName, backupSucceeded = true });
+    var backups = backupService.ListBackups();
+    return Results.Ok(new { fileName, backupSucceeded = true, status = backupService.GetStatus(backups) });
 });
 
 app.MapGet("/api/backups/download/{fileName}", (string fileName, BackupService backupService) =>
@@ -667,4 +684,50 @@ app.MapGet("/api/backups/download/{fileName}", (string fileName, BackupService b
     return Results.File(fullPath, "application/octet-stream", safeName);
 });
 
+app.MapDelete("/api/backups/{fileName}", (string fileName, BackupService backupService) =>
+{
+    bool deleted = backupService.DeleteBackup(fileName);
+    if (!deleted)
+    {
+        return Results.NotFound(new { error = "Backup snapshot not found." });
+    }
+    var backups = backupService.ListBackups();
+    return Results.Ok(new { deleted = true, status = backupService.GetStatus(backups) });
+});
+
+app.MapPost("/api/backups/bulk-delete", (BulkDeleteBackupsRequest req, BackupService backupService) =>
+{
+    int deletedCount = backupService.BulkDeleteBackups(req.FileNames ?? []);
+    var backups = backupService.ListBackups();
+    return Results.Ok(new { deletedCount, status = backupService.GetStatus(backups) });
+});
+
+app.MapPost("/api/backups/prune", (PruneBackupsRequest req, BackupService backupService) =>
+{
+    int deletedCount = backupService.PruneBackupsToCount(req.KeepCount);
+    var backups = backupService.ListBackups();
+    return Results.Ok(new { deletedCount, status = backupService.GetStatus(backups) });
+});
+
+app.MapPost("/api/backups/restore/{fileName}", async (
+    string fileName,
+    RestoreBackupRequest? req,
+    BackupService backupService,
+    CancellationToken ct) =>
+{
+    try
+    {
+        var result = await backupService.RestoreSnapshotAsync(
+            fileName,
+            req?.CreatePreRestoreBackup ?? true,
+            ct);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+});
+
 app.Run();
+

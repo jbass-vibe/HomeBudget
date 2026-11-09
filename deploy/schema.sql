@@ -123,4 +123,8 @@ INSERT OR IGNORE INTO Settings (Key, Value) VALUES
 ('PersistentMonthlyIncome', '10000.00'),
 ('GooglePayrollMatchPattern', 'GOOGLE'),
 ('CurrentMonthIncomeMode', 'Auto'),
-('GeminiApiKey', '');
+('GeminiApiKey', ''),
+('BackupAutoMode', 'Coalesced'),
+('BackupDebounceSeconds', '30'),
+('BackupMinIntervalMinutes', '10'),
+('MaxRetainedBackups', '15');

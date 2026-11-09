@@ -258,7 +258,7 @@ public sealed class IngestionStagingService(
         string? backupFile = null;
         if (importedCount > 0 || tombstonedCount > 0)
         {
-            backupFile = await backupService.CreateSnapshotImmediateAsync("csv_upload", ct);
+            backupFile = await backupService.RequestBackupAsync("csv_upload", isMajorOperation: true, ct);
         }
 
         return new

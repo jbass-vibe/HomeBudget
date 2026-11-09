@@ -45,6 +45,40 @@ export function sortRules(rules, catNameById = {}, sortMode = 'priority_asc') {
   });
 }
 
+export function sortBackups(backups, sortMode = 'date_desc') {
+  const list = Array.isArray(backups) ? [...backups] : [];
+  return list.sort((a, b) => {
+    const tsA = new Date(a.createdAtUtc || 0).getTime();
+    const tsB = new Date(b.createdAtUtc || 0).getTime();
+    const sizeA = Number(a.sizeBytes || 0);
+    const sizeB = Number(b.sizeBytes || 0);
+    const reasonA = String(a.reasonLabel || a.fileName || '');
+    const reasonB = String(b.reasonLabel || b.fileName || '');
+
+    switch (sortMode) {
+      case 'date_asc':
+        return tsA - tsB;
+      case 'size_desc':
+        return sizeB - sizeA || (tsB - tsA);
+      case 'size_asc':
+        return sizeA - sizeB || (tsB - tsA);
+      case 'reason_asc':
+        return reasonA.localeCompare(reasonB, undefined, { sensitivity: 'base' }) || (tsB - tsA);
+      case 'date_desc':
+      default:
+        return tsB - tsA;
+    }
+  });
+}
+
+function formatByteSize(bytes) {
+  const n = Number(bytes || 0);
+  if (n >= 1024 * 1024) {
+    return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+  }
+  return `${(n / 1024).toFixed(1)} KB`;
+}
+
 export async function renderTopologyView(container) {
   const [topology, settings, backupInfo] = await Promise.all([
     apiFetch('/api/topology'),
@@ -57,6 +91,22 @@ export async function renderTopologyView(container) {
   const categories = sortCategories(rawCategories, state.topologyCategorySort);
   const dropdownCategories = sortCategories(rawCategories, state.categoryDropdownSort);
   const rules = sortRules(topology.rules, catNameById, state.topologyRuleSort);
+
+  const backupConfig = backupInfo.config || {
+    autoBackupMode: 'Coalesced',
+    debounceSeconds: 30,
+    minIntervalMinutes: 10,
+    maxRetainedBackups: 15
+  };
+  const backupStatus = backupInfo.status || {
+    totalSnapshotCount: (backupInfo.backups || []).length,
+    totalBytesOnDisk: (backupInfo.backups || []).reduce((acc, b) => acc + (b.sizeBytes || 0), 0),
+    pendingChangesCount: 0,
+    pendingReasonSummary: '',
+    nextScheduledBackupUtc: null,
+    lastSnapshotUtc: backupInfo.backups?.[0]?.createdAtUtc || null
+  };
+  const sortedBackups = sortBackups(backupInfo.backups || [], state.backupsSort);
 
   container.innerHTML = `
     <div class="page-header">
@@ -196,40 +246,144 @@ export async function renderTopologyView(container) {
       </div>
     </div>
 
-    <!-- 4. Event-Driven Local SQLite Backups -->
+    <!-- 4. Local SQLite Backup Management & Retention Policy -->
     <div class="card-panel">
-      <div class="toolbar-row">
+      <div class="toolbar-row" style="margin-bottom:14px;">
         <div>
-          <h2 style="margin:0;font-size:17px;font-weight:800;">4. Event-Driven Local SQLite Backups</h2>
+          <h2 style="margin:0;font-size:17px;font-weight:800;">4. Local SQLite Backup Management &amp; Retention Policy</h2>
           <p style="margin:2px 0 0 0;font-size:12px;color:#64748B;">
-            Path: <code>${escapeHtml(backupInfo.backupDirectoryPath)}</code> &bull; Automatically triggered on CSV upload or recategorization (retains 30 newest)
+            Path: <code>${escapeHtml(backupInfo.backupDirectoryPath)}</code> &bull; Smart Coalesced Policy prevents excessive backup churn during rapid edits
           </p>
         </div>
-        <button class="btn btn-outline btn-sm" id="manualBackupBtn">Create Manual Snapshot Now</button>
+        <div style="display:flex;gap:8px;align-items:center;">
+          ${backupStatus.pendingChangesCount > 0 ? `
+            <button class="btn btn-outline btn-sm" id="flushPendingBackupBtn" style="border-color:#2563EB;color:#1D4ED8;">
+              &#9201; Flush ${backupStatus.pendingChangesCount} Pending Edit(s) Now
+            </button>
+          ` : ''}
+          <button class="btn btn-primary btn-sm" id="manualBackupBtn">+ Create Manual Snapshot Now</button>
+        </div>
+      </div>
+
+      <!-- Storage & Coalesced Queue KPI Summary -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px;">
+        <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:10px 14px;">
+          <div style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;">Total Snapshots</div>
+          <div style="font-size:18px;font-weight:800;color:#0F172A;margin-top:2px;">
+            ${backupStatus.totalSnapshotCount} <span style="font-size:12px;font-weight:600;color:#64748B;">/ max ${backupConfig.maxRetainedBackups}</span>
+          </div>
+        </div>
+        <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:10px 14px;">
+          <div style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;">Disk Usage</div>
+          <div style="font-size:18px;font-weight:800;color:#0F172A;margin-top:2px;">
+            ${formatByteSize(backupStatus.totalBytesOnDisk)}
+          </div>
+        </div>
+        <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:10px 14px;">
+          <div style="font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;">Latest Snapshot</div>
+          <div style="font-size:13px;font-weight:700;color:#0F172A;margin-top:4px;">
+            ${backupStatus.lastSnapshotUtc ? escapeHtml(new Date(backupStatus.lastSnapshotUtc).toLocaleString()) : 'None'}
+          </div>
+        </div>
+        <div style="background:${backupStatus.pendingChangesCount > 0 ? '#EFF6FF' : '#F8FAFC'};border:1px solid ${backupStatus.pendingChangesCount > 0 ? '#BFDBFE' : '#E2E8F0'};border-radius:10px;padding:10px 14px;">
+          <div style="font-size:11px;font-weight:700;color:${backupStatus.pendingChangesCount > 0 ? '#1E40AF' : '#64748B'};text-transform:uppercase;">Coalesced Queue</div>
+          <div style="font-size:13px;font-weight:700;color:${backupStatus.pendingChangesCount > 0 ? '#1D4ED8' : '#0F172A'};margin-top:4px;">
+            ${backupStatus.pendingChangesCount > 0
+              ? `${backupStatus.pendingChangesCount} edit(s) pending (${escapeHtml(backupStatus.pendingReasonSummary)})`
+              : 'Idle (0 pending)'}
+          </div>
+        </div>
+      </div>
+
+      <!-- Backup Policy Configuration Form -->
+      <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:14px;margin-bottom:16px;">
+        <div style="font-size:13px;font-weight:800;color:#0F172A;margin-bottom:10px;">
+          Automatic Snapshot Frequency &amp; Retention Policy
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;align-items:end;">
+          <div>
+            <label style="font-size:11px;font-weight:700;color:#475569;display:block;margin-bottom:4px;">Auto-Backup Mode</label>
+            <select id="backupAutoModeSelect" class="select-control" style="width:100%;">
+              <option value="Coalesced" ${backupConfig.autoBackupMode === 'Coalesced' ? 'selected' : ''}>Smart Coalesced (Recommended)</option>
+              <option value="MajorOnly" ${backupConfig.autoBackupMode === 'MajorOnly' ? 'selected' : ''}>Major Operations Only (CSV / Bulk / Merge)</option>
+              <option value="ManualOnly" ${backupConfig.autoBackupMode === 'ManualOnly' ? 'selected' : ''}>Manual Snapshots Only</option>
+              <option value="EveryChange" ${backupConfig.autoBackupMode === 'EveryChange' ? 'selected' : ''}>Every Mutation (Legacy)</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px;font-weight:700;color:#475569;display:block;margin-bottom:4px;">Quiet Debounce Window (sec)</label>
+            <input type="number" min="5" max="600" id="backupDebounceInput" class="input-control" style="width:100%;" value="${backupConfig.debounceSeconds}" />
+          </div>
+          <div>
+            <label style="font-size:11px;font-weight:700;color:#475569;display:block;margin-bottom:4px;">Min Cooldown Interval (min)</label>
+            <input type="number" min="0" max="240" id="backupCooldownInput" class="input-control" style="width:100%;" value="${backupConfig.minIntervalMinutes}" />
+          </div>
+          <div>
+            <label style="font-size:11px;font-weight:700;color:#475569;display:block;margin-bottom:4px;">Max Retained Snapshots</label>
+            <input type="number" min="3" max="200" id="backupMaxRetainedInput" class="input-control" style="width:100%;" value="${backupConfig.maxRetainedBackups}" />
+          </div>
+          <div>
+            <button class="btn btn-primary" id="saveBackupPolicyBtn" style="width:100%;">Save Policy &amp; Enforce Retention</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Snapshot List Toolbar -->
+      <div class="toolbar-row" style="margin-bottom:10px;">
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px;">
+          <label style="font-size:12px;font-weight:700;color:#475569;display:inline-flex;align-items:center;gap:6px;">
+            Sort Snapshots:
+            <select id="backupSortSelect" class="select-control" style="font-size:12px;padding:4px 8px;">
+              <option value="date_desc" ${state.backupsSort === 'date_desc' ? 'selected' : ''}>Newest First</option>
+              <option value="date_asc" ${state.backupsSort === 'date_asc' ? 'selected' : ''}>Oldest First</option>
+              <option value="size_desc" ${state.backupsSort === 'size_desc' ? 'selected' : ''}>Largest Size</option>
+              <option value="size_asc" ${state.backupsSort === 'size_asc' ? 'selected' : ''}>Smallest Size</option>
+              <option value="reason_asc" ${state.backupsSort === 'reason_asc' ? 'selected' : ''}>Trigger Reason (A-Z)</option>
+            </select>
+          </label>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;">
+          <button class="btn btn-danger btn-sm" id="bulkDeleteBackupsBtn" disabled>Delete Selected (0)</button>
+          <button class="btn btn-outline btn-sm" id="pruneBackupsBtn">Prune Old Snapshots...</button>
+        </div>
       </div>
 
       <div class="table-responsive">
         <table class="data-table">
           <thead>
             <tr>
+              <th style="width:36px;"><input type="checkbox" id="selectAllBackupsCheck" title="Select all snapshots" /></th>
               <th>Snapshot Filename</th>
-              <th>Created (UTC)</th>
+              <th>Trigger / Reason</th>
+              <th>Created (Local Time)</th>
               <th>Size</th>
-              <th>Download (For Manual Google Drive Archive)</th>
+              <th>Actions (Download / Restore / Delete)</th>
             </tr>
           </thead>
           <tbody>
-            ${backupInfo.backups.length === 0 ? `
-              <tr><td colspan="4" style="text-align:center;color:#64748B;">No snapshots created yet.</td></tr>
-            ` : backupInfo.backups.map(b => `
-              <tr>
+            ${sortedBackups.length === 0 ? `
+              <tr><td colspan="6" style="text-align:center;color:#64748B;">No snapshots created yet.</td></tr>
+            ` : sortedBackups.map(b => `
+              <tr data-backup-file="${escapeHtml(b.fileName)}">
+                <td><input type="checkbox" class="backup-row-check" value="${escapeHtml(b.fileName)}" /></td>
                 <td><code>${escapeHtml(b.fileName)}</code></td>
-                <td>${escapeHtml(new Date(b.createdAtUtc).toLocaleString())}</td>
-                <td>${(b.sizeBytes / 1024).toFixed(1)} KB</td>
                 <td>
+                  <span style="display:inline-block;background:#EFF6FF;color:#1D4ED8;border:1px solid #BFDBFE;border-radius:999px;padding:2px 8px;font-size:11px;font-weight:700;">
+                    ${escapeHtml(b.reasonLabel || 'Snapshot')}
+                  </span>
+                </td>
+                <td>${escapeHtml(new Date(b.createdAtUtc).toLocaleString())}</td>
+                <td>${formatByteSize(b.sizeBytes)}</td>
+                <td style="white-space:nowrap;display:flex;gap:6px;align-items:center;">
                   <a class="btn btn-outline btn-sm" href="/api/backups/download/${encodeURIComponent(b.fileName)}" download>
-                    &#11015; Download .db
+                    &#11015; Download
                   </a>
+                  <button class="btn btn-outline btn-sm restore-backup-btn" data-file="${escapeHtml(b.fileName)}" style="border-color:#D97706;color:#B45309;">
+                    &#8634; Restore DB...
+                  </button>
+                  <button class="btn btn-danger btn-sm del-backup-btn" data-file="${escapeHtml(b.fileName)}">
+                    Delete
+                  </button>
                 </td>
               </tr>
             `).join('')}
@@ -477,14 +631,185 @@ export async function renderTopologyView(container) {
     showToast(`Household income settings saved • ${formatBackupStatus(res?.backupFileCreated)}`);
   };
 
+  // ============================================================================
+  // 4. BACKUP MANAGEMENT HANDLERS
+  // ============================================================================
+
+  const backupSortSelect = container.querySelector('#backupSortSelect');
+  if (backupSortSelect) {
+    backupSortSelect.onchange = (e) => {
+      setSortPreference('backupsSort', e.target.value);
+      renderTopologyView(container);
+    };
+  }
+
+  // Save Backup Policy Config
+  const saveBackupPolicyBtn = container.querySelector('#saveBackupPolicyBtn');
+  if (saveBackupPolicyBtn) {
+    saveBackupPolicyBtn.onclick = async () => {
+      const autoBackupMode = container.querySelector('#backupAutoModeSelect').value;
+      const debounceSeconds = Number(container.querySelector('#backupDebounceInput').value || 30);
+      const minIntervalMinutes = Number(container.querySelector('#backupCooldownInput').value || 10);
+      const maxRetainedBackups = Number(container.querySelector('#backupMaxRetainedInput').value || 15);
+
+      await apiFetch('/api/backups/config', {
+        method: 'PUT',
+        body: JSON.stringify({
+          autoBackupMode,
+          debounceSeconds,
+          minIntervalMinutes,
+          maxRetainedBackups
+        })
+      });
+      showToast(`Saved backup policy (${autoBackupMode}, max ${maxRetainedBackups} snapshots)`);
+      renderTopologyView(container);
+    };
+  }
+
+  // Flush Pending Coalesced Edits Now
+  const flushPendingBtn = container.querySelector('#flushPendingBackupBtn');
+  if (flushPendingBtn) {
+    flushPendingBtn.onclick = async () => {
+      const res = await apiFetch('/api/backups/trigger?reason=coalesced_flush', { method: 'POST' });
+      showToast(`Flushed pending edits to ${res.fileName}`);
+      renderTopologyView(container);
+    };
+  }
+
   // Trigger Manual Snapshot
   container.querySelector('#manualBackupBtn').onclick = async () => {
     try {
-      const res = await apiFetch('/api/backups/trigger', { method: 'POST' });
+      const res = await apiFetch('/api/backups/trigger?reason=manual', { method: 'POST' });
       showToast(`Created snapshot ${res.fileName}`);
       renderTopologyView(container);
     } catch (err) {
       showToast(`Backup failed: ${err.message}`);
     }
   };
+
+  // Multi-select checkboxes for bulk backup deletion
+  const selectAllBackupsCheck = container.querySelector('#selectAllBackupsCheck');
+  const rowChecks = Array.from(container.querySelectorAll('.backup-row-check'));
+  const bulkDeleteBackupsBtn = container.querySelector('#bulkDeleteBackupsBtn');
+
+  function updateSelectedBackupsState() {
+    const selectedFiles = rowChecks.filter(ch => ch.checked).map(ch => ch.value);
+    if (bulkDeleteBackupsBtn) {
+      bulkDeleteBackupsBtn.disabled = selectedFiles.length === 0;
+      bulkDeleteBackupsBtn.textContent = `Delete Selected (${selectedFiles.length})`;
+    }
+    if (selectAllBackupsCheck && rowChecks.length > 0) {
+      selectAllBackupsCheck.checked = selectedFiles.length === rowChecks.length;
+    }
+    return selectedFiles;
+  }
+
+  if (selectAllBackupsCheck) {
+    selectAllBackupsCheck.onchange = () => {
+      rowChecks.forEach(ch => { ch.checked = selectAllBackupsCheck.checked; });
+      updateSelectedBackupsState();
+    };
+  }
+
+  rowChecks.forEach(ch => {
+    ch.onchange = updateSelectedBackupsState;
+  });
+
+  if (bulkDeleteBackupsBtn) {
+    bulkDeleteBackupsBtn.onclick = async () => {
+      const fileNames = updateSelectedBackupsState();
+      if (fileNames.length === 0) return;
+      if (!confirm(`Delete ${fileNames.length} selected backup snapshot(s)?`)) return;
+
+      const res = await apiFetch('/api/backups/bulk-delete', {
+        method: 'POST',
+        body: JSON.stringify({ fileNames })
+      });
+      showToast(`Deleted ${res.deletedCount} snapshot(s)`);
+      renderTopologyView(container);
+    };
+  }
+
+  // Prune Old Snapshots Modal
+  const pruneBackupsBtn = container.querySelector('#pruneBackupsBtn');
+  if (pruneBackupsBtn) {
+    pruneBackupsBtn.onclick = () => {
+      openModal(`
+        <h3 style="margin-top:0;">Prune Old Backup Snapshots</h3>
+        <p style="font-size:13px;color:#64748B;">
+          Keep only the newest <strong>N</strong> snapshots and permanently delete all older snapshot files from disk.
+        </p>
+        <div style="margin:14px 0;">
+          <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Number of Newest Snapshots to Keep</label>
+          <input type="number" min="0" max="200" id="pruneKeepCountInput" class="input-control" style="width:100%;" value="5" />
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:10px;">
+          <button class="btn btn-outline" id="cancelPruneBtn">Cancel</button>
+          <button class="btn btn-danger" id="confirmPruneBtn">Prune Snapshots</button>
+        </div>
+      `, (m) => {
+        m.querySelector('#cancelPruneBtn').onclick = closeModal;
+        m.querySelector('#confirmPruneBtn').onclick = async () => {
+          const keepCount = Math.max(0, Number(m.querySelector('#pruneKeepCountInput').value || 0));
+          const res = await apiFetch('/api/backups/prune', {
+            method: 'POST',
+            body: JSON.stringify({ keepCount })
+          });
+          closeModal();
+          showToast(`Pruned ${res.deletedCount} old snapshot(s) (kept ${keepCount} newest)`);
+          renderTopologyView(container);
+        };
+      });
+    };
+  }
+
+  // Single Delete Snapshot
+  container.querySelectorAll('.del-backup-btn').forEach(btn => {
+    btn.onclick = async () => {
+      const fileName = btn.dataset.file;
+      if (!confirm(`Delete backup snapshot "${fileName}"?`)) return;
+      await apiFetch(`/api/backups/${encodeURIComponent(fileName)}`, { method: 'DELETE' });
+      showToast(`Deleted ${fileName}`);
+      renderTopologyView(container);
+    };
+  });
+
+  // Restore Snapshot Modal
+  container.querySelectorAll('.restore-backup-btn').forEach(btn => {
+    btn.onclick = () => {
+      const fileName = btn.dataset.file;
+      openModal(`
+        <h3 style="margin-top:0;color:#B45309;">Restore Database from Snapshot</h3>
+        <div style="background:#FFFBEB;border:1px solid #FDE68A;border-radius:10px;padding:12px;margin:12px 0;font-size:13px;color:#92400E;">
+          <strong>Warning:</strong> Restoring <code>${escapeHtml(fileName)}</code> will overwrite your live SQLite database with the state from this snapshot.
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;margin:14px 0;">
+          <input type="checkbox" id="preRestoreSafetyCheck" checked />
+          <span>Create an automatic <code>pre_restore</code> safety backup of the current live database before restoring (Recommended)</span>
+        </label>
+        <div style="display:flex;justify-content:flex-end;gap:10px;">
+          <button class="btn btn-outline" id="cancelRestoreBtn">Cancel</button>
+          <button class="btn btn-danger" id="confirmRestoreBtn">Verify Integrity &amp; Restore Database</button>
+        </div>
+      `, (m) => {
+        m.querySelector('#cancelRestoreBtn').onclick = closeModal;
+        m.querySelector('#confirmRestoreBtn').onclick = async () => {
+          const createPreRestoreBackup = m.querySelector('#preRestoreSafetyCheck').checked;
+          try {
+            const res = await apiFetch(`/api/backups/restore/${encodeURIComponent(fileName)}`, {
+              method: 'POST',
+              body: JSON.stringify({ createPreRestoreBackup })
+            });
+            closeModal();
+            await refreshReferenceData();
+            showToast(`Restored database from ${res.restoredFrom}${res.preRestoreSnapshot ? ` (Safety backup: ${res.preRestoreSnapshot})` : ''}`);
+            renderTopologyView(container);
+          } catch (err) {
+            alert(`Restore failed: ${err.message}`);
+          }
+        };
+      });
+    };
+  });
 }
+

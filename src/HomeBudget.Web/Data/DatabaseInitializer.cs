@@ -153,5 +153,20 @@ public sealed class DatabaseInitializer(
         // Normalize any legacy TransactionType values ('Payment' or 'Transfer') to canonical 'CreditCardPayoff'
         await conn.ExecuteAsync(
             "UPDATE Transactions SET TransactionType = 'CreditCardPayoff' WHERE TransactionType IN ('Payment', 'Transfer');");
+
+        // 5. Ensure Settings table exists and seed default backup policy keys if absent
+        await conn.ExecuteAsync(
+            """
+            CREATE TABLE IF NOT EXISTS Settings (
+                Key       TEXT PRIMARY KEY,
+                Value     TEXT NOT NULL,
+                UpdatedAt TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            INSERT OR IGNORE INTO Settings (Key, Value) VALUES
+                ('BackupAutoMode', 'Coalesced'),
+                ('BackupDebounceSeconds', '30'),
+                ('BackupMinIntervalMinutes', '10'),
+                ('MaxRetainedBackups', '15');
+            """);
     }
 }

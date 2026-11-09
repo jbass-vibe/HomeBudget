@@ -180,16 +180,65 @@ public sealed class DatabaseAndServicesIntegrationTests : IDisposable
         Assert.Equal("Leg 1", splitRows[0].Notes);
         Assert.Equal("Leg 2", splitRows[1].Notes);
 
-        // Verify backups were created and are non-empty
+        // Verify routine edits were coalesced into the pending queue and split created a major snapshot
+        var statusBeforeFlush = _backupService.GetStatus();
+        Assert.True(statusBeforeFlush.PendingChangesCount > 0);
+
+        string? flushedFile = await _backupService.FlushPendingSnapshotAsync("coalesced_flush");
+        Assert.False(string.IsNullOrWhiteSpace(flushedFile));
+
         var backups = _backupService.ListBackups();
         Assert.NotEmpty(backups);
         Assert.All(backups, b => Assert.True(b.SizeBytes > 0));
+    }
+
+    [Fact]
+    public async Task SmartBackupPolicyAndAdminLifecycle_SupportsCoalescingPruningDeletionAndIntegrityVerifiedRestore()
+    {
+        await using var conn = await _connectionFactory.CreateOpenConnectionAsync();
+        string schemaPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "deploy", "schema.sql"));
+        await conn.ExecuteAsync(await File.ReadAllTextAsync(schemaPath));
+
+        // 1. Default policy is Coalesced
+        var policy = await _backupService.GetPolicyConfigAsync();
+        Assert.Equal("Coalesced", policy.AutoBackupMode);
+
+        // 2. Routine edits coalesce into pending queue without writing immediate disk snapshots
+        string? res1 = await _backupService.RequestBackupAsync("category_update", isMajorOperation: false);
+        string? res2 = await _backupService.RequestBackupAsync("rule_create", isMajorOperation: false);
+        Assert.Equal("scheduled", res1);
+        Assert.Equal("scheduled", res2);
+        Assert.Equal(2, _backupService.GetStatus().PendingChangesCount);
+
+        // 3. Flush creates a single snapshot and clears the pending queue
+        string? snap1 = await _backupService.FlushPendingSnapshotAsync("manual");
+        Assert.NotNull(snap1);
+        Assert.Equal(0, _backupService.GetStatus().PendingChangesCount);
+
+        // 4. Modify live DB, then restore from snap1 with pre_restore safety snapshot
+        await conn.ExecuteAsync("INSERT INTO Categories (Name, MonthlyBudget, SortOrder, ColorHex) VALUES ('TempCategory', 99, 999, '#000000');");
+        int countBeforeRestore = await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM Categories WHERE Name = 'TempCategory';");
+        Assert.Equal(1, countBeforeRestore);
+
+        var restoreRes = await _backupService.RestoreSnapshotAsync(snap1!, createPreRestoreBackup: true);
+        Assert.Equal(snap1, restoreRes.RestoredFrom);
+        Assert.False(string.IsNullOrWhiteSpace(restoreRes.PreRestoreSnapshot));
+
+        await using var connAfter = await _connectionFactory.CreateOpenConnectionAsync();
+        int countAfterRestore = await connAfter.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM Categories WHERE Name = 'TempCategory';");
+        Assert.Equal(0, countAfterRestore);
+
+        // 5. Prune & delete snapshots
+        int pruned = _backupService.PruneBackupsToCount(1);
+        Assert.True(pruned >= 1);
+        Assert.Single(_backupService.ListBackups());
     }
 
     public void Dispose()
     {
         try
         {
+            _backupService.Dispose();
             if (Directory.Exists(_tempDir))
             {
                 Directory.Delete(_tempDir, recursive: true);
@@ -200,3 +249,4 @@ public sealed class DatabaseAndServicesIntegrationTests : IDisposable
         }
     }
 }
+

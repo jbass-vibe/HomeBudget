@@ -414,7 +414,7 @@ public sealed class CategorizationService(
 
         await dbTx.CommitAsync(ct);
 
-        string? backupFile = await backupService.CreateSnapshotImmediateAsync("recategorize", ct);
+        string? backupFile = await backupService.RequestBackupAsync("recategorize", isMajorOperation: false, ct);
 
         var updatedTx = await conn.QuerySingleAsync<TransactionDto>(
             """
@@ -436,7 +436,10 @@ public sealed class CategorizationService(
         };
     }
 
-    public async Task<CategorizationRule> CreateRuleAsync(UpsertRuleRequest req, CancellationToken ct = default)
+    public async Task<CategorizationRule> CreateRuleAsync(
+        UpsertRuleRequest req,
+        CancellationToken ct = default,
+        bool suppressBackup = false)
     {
         ValidateRuleRequest(req);
 
@@ -458,7 +461,11 @@ public sealed class CategorizationService(
                 req.Priority
             });
 
-        await backupService.CreateSnapshotImmediateAsync("rule_create", ct);
+        if (!suppressBackup)
+        {
+            await backupService.RequestBackupAsync("rule_create", isMajorOperation: false, ct);
+        }
+
         return await conn.QuerySingleAsync<CategorizationRule>("SELECT * FROM CategorizationRules WHERE RuleId = @Id;", new { Id = id });
     }
 
@@ -491,7 +498,7 @@ public sealed class CategorizationService(
             });
 
         if (rows == 0) return null;
-        await backupService.CreateSnapshotImmediateAsync("rule_update", ct);
+        await backupService.RequestBackupAsync("rule_update", isMajorOperation: false, ct);
         return await conn.QuerySingleAsync<CategorizationRule>("SELECT * FROM CategorizationRules WHERE RuleId = @Id;", new { Id = ruleId });
     }
 
@@ -501,13 +508,16 @@ public sealed class CategorizationService(
         int rows = await conn.ExecuteAsync("DELETE FROM CategorizationRules WHERE RuleId = @RuleId;", new { RuleId = ruleId });
         if (rows > 0)
         {
-            await backupService.CreateSnapshotImmediateAsync("rule_delete", ct);
+            await backupService.RequestBackupAsync("rule_delete", isMajorOperation: false, ct);
             return true;
         }
         return false;
     }
 
-    public async Task<BackPropagateResponse> BackPropagateRulesAsync(BackPropagateRequest request, CancellationToken ct = default)
+    public async Task<BackPropagateResponse> BackPropagateRulesAsync(
+        BackPropagateRequest request,
+        CancellationToken ct = default,
+        bool suppressBackup = false)
     {
         await using var conn = await connectionFactory.CreateOpenConnectionAsync(ct);
 
@@ -588,7 +598,10 @@ public sealed class CategorizationService(
             }
             await dbTx.CommitAsync(ct);
 
-            backupFile = await backupService.CreateSnapshotImmediateAsync("backprop", ct);
+            if (!suppressBackup)
+            {
+                backupFile = await backupService.RequestBackupAsync("backprop", isMajorOperation: false, ct);
+            }
         }
 
         return new BackPropagateResponse
@@ -687,7 +700,7 @@ public sealed class CategorizationService(
                 CategoryId = newCatId.Value,
                 DefaultSubcategory = newSubcat,
                 Priority = req.CreateRulePriority ?? 50
-            }, ct);
+            }, ct, suppressBackup: true);
 
             if (req.BackPropagateRule)
             {
@@ -695,12 +708,12 @@ public sealed class CategorizationService(
                 {
                     IncludeManuallyLocked = false,
                     DryRun = false
-                }, ct);
+                }, ct, suppressBackup: true);
                 backPropagatedCount = bpResult.AffectedTransactionsCount;
             }
         }
 
-        string? backupFile = await backupService.CreateSnapshotImmediateAsync("data_edit", ct);
+        string? backupFile = await backupService.RequestBackupAsync("data_edit", isMajorOperation: false, ct);
 
         var updated = await conn.QuerySingleAsync<TransactionDto>(
             """
@@ -796,7 +809,7 @@ public sealed class CategorizationService(
         await conn.ExecuteAsync("DELETE FROM Transactions WHERE TransactionId = @Id;", new { Id = transactionId }, tx);
         await tx.CommitAsync(ct);
 
-        await backupService.CreateSnapshotImmediateAsync("data_edit", ct);
+        await backupService.RequestBackupAsync("data_edit", isMajorOperation: false, ct);
 
         var rows = await conn.QueryAsync<TransactionDto>(
             """
