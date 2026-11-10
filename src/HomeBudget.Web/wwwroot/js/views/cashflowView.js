@@ -278,32 +278,56 @@ export async function renderCashflowView(container) {
               </tr>
             </thead>
             <tbody>
-              ${merchantGroups.map(g => `
-                <tr data-uncat-id="${g.representativeTx.transactionId}">
-                  <td>
-                    <strong>${escapeHtml(g.merchantName)}</strong>
-                    <div style="font-size:11px;color:#64748B;">Sample: <code>${escapeHtml(g.representativeTx.rawDescription)}</code></div>
-                  </td>
-                  <td style="white-space:nowrap;">
-                    <span class="bigbox-pill">${g.transactions.length} item${g.transactions.length === 1 ? '' : 's'}</span>
-                    <div style="font-size:11px;color:#64748B;margin-top:2px;">
-                      ${g.minDate === g.maxDate ? escapeHtml(g.minDate) : `${escapeHtml(g.minDate)} &ndash; ${escapeHtml(g.maxDate)}`}
-                    </div>
-                  </td>
-                  <td>${escapeHtml(Array.from(g.accounts).join(', '))}</td>
-                  <td class="${g.totalAmount < 0 ? 'amount-refund' : 'amount-expense'}"><strong>${formatCurrency(g.totalAmount)}</strong></td>
-                  <td style="white-space:nowrap;">
-                    <div style="display:flex;gap:6px;align-items:center;">
-                      <select class="select-control quick-uncat-select" data-tx-id="${g.representativeTx.transactionId}">
-                        <option value="">Choose Category...</option>
-                        ${sortedDropdownCategories.map(c => `<option value="${c.categoryId}">${escapeHtml(c.name)}</option>`).join('')}
-                        <option value="__NEW__">+ Create New Category...</option>
-                      </select>
-                      <button class="btn btn-primary btn-sm quick-uncat-btn" data-tx-id="${g.representativeTx.transactionId}">Categorize (${g.transactions.length})...</button>
-                    </div>
-                  </td>
-                </tr>
-              `).join('')}
+              ${merchantGroups.map((g, gIdx) => {
+                const isGroupExpanded = state.expandedCashflowMerchants.includes(g.merchantName);
+                return `
+                  <tr class="triage-merchant-row" data-expand-merchant="${gIdx}" data-merchant-key="${escapeHtml(g.merchantName)}" style="cursor:pointer;">
+                    <td>
+                      <strong>${escapeHtml(g.merchantName)}</strong>
+                      <span class="merchant-expand-indicator" style="font-size:11px;color:#64748B;margin-left:6px;">(${g.transactions.length}) ${isGroupExpanded ? '&#9652;' : '&#9662;'}</span>
+                      <div style="font-size:11px;color:#64748B;">Sample: <code>${escapeHtml(g.representativeTx.rawDescription)}</code></div>
+                    </td>
+                    <td style="white-space:nowrap;">
+                      <span class="bigbox-pill">${g.transactions.length} item${g.transactions.length === 1 ? '' : 's'}</span>
+                      <div style="font-size:11px;color:#64748B;margin-top:2px;">
+                        ${g.minDate === g.maxDate ? escapeHtml(g.minDate) : `${escapeHtml(g.minDate)} &ndash; ${escapeHtml(g.maxDate)}`}
+                      </div>
+                    </td>
+                    <td>${escapeHtml(Array.from(g.accounts).join(', '))}</td>
+                    <td class="${g.totalAmount < 0 ? 'amount-refund' : 'amount-expense'}"><strong>${formatCurrency(g.totalAmount)}</strong></td>
+                    <td style="white-space:nowrap;" onclick="event.stopPropagation();">
+                      <div style="display:flex;gap:6px;align-items:center;">
+                        <select class="select-control quick-uncat-select" data-tx-id="${g.representativeTx.transactionId}">
+                          <option value="">Choose Category...</option>
+                          ${sortedDropdownCategories.map(c => `<option value="${c.categoryId}">${escapeHtml(c.name)}</option>`).join('')}
+                          <option value="__NEW__">+ Create New Category...</option>
+                        </select>
+                        <button class="btn btn-primary btn-sm quick-uncat-btn" data-tx-id="${g.representativeTx.transactionId}">Categorize (${g.transactions.length})...</button>
+                      </div>
+                    </td>
+                  </tr>
+                  <tr id="merchant_detail_${gIdx}" style="display:${isGroupExpanded ? 'table-row' : 'none'};background:#FFFBEB;">
+                    <td colspan="5" style="padding:10px 18px;">
+                      <div style="font-size:11px;font-weight:700;color:#92400E;margin-bottom:6px;">
+                        Individual Uncategorized Charges for ${escapeHtml(g.merchantName)} (${g.transactions.length}):
+                      </div>
+                      ${g.transactions.map(t => `
+                        <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px dashed #FDE68A;font-size:12px;">
+                          <span>
+                            <strong>${escapeHtml(t.transactionDate)}</strong> &bull;
+                            <code>${escapeHtml(t.rawDescription)}</code>
+                            <span style="color:#64748B;">(${escapeHtml(t.accountName)})</span>
+                          </span>
+                          <div style="display:flex;align-items:center;gap:8px;">
+                            <span class="${t.amount < 0 ? 'amount-refund' : 'amount-expense'}">${formatCurrency(t.amount)}</span>
+                            <button class="btn btn-outline btn-sm quick-uncat-btn" data-tx-id="${t.transactionId}">Categorize...</button>
+                          </div>
+                        </div>
+                      `).join('')}
+                    </td>
+                  </tr>
+                `;
+              }).join('')}
             </tbody>
           </table>
         </div>
@@ -625,6 +649,31 @@ export async function renderCashflowView(container) {
       renderCashflowView(container);
     };
   }
+
+  container.querySelectorAll('[data-expand-merchant]').forEach(rowEl => {
+    rowEl.onclick = () => {
+      const idx = rowEl.dataset.expandMerchant;
+      const merchantKey = rowEl.dataset.merchantKey;
+      const detailEl = container.querySelector(`#merchant_detail_${idx}`);
+      if (detailEl) {
+        const willExpand = detailEl.style.display === 'none';
+        detailEl.style.display = willExpand ? 'table-row' : 'none';
+        if (merchantKey) {
+          if (willExpand && !state.expandedCashflowMerchants.includes(merchantKey)) {
+            state.expandedCashflowMerchants.push(merchantKey);
+          } else if (!willExpand) {
+            state.expandedCashflowMerchants = state.expandedCashflowMerchants.filter(k => k !== merchantKey);
+          }
+        }
+        const indicator = rowEl.querySelector('.merchant-expand-indicator');
+        if (indicator) {
+          const countMatch = indicator.textContent.match(/\(\d+\)/);
+          const countPart = countMatch ? countMatch[0] : '';
+          indicator.innerHTML = `${countPart} ${willExpand ? '&#9652;' : '&#9662;'}`;
+        }
+      }
+    };
+  });
 
   container.querySelectorAll('[data-expand-row]').forEach(rowEl => {
     rowEl.onclick = () => {

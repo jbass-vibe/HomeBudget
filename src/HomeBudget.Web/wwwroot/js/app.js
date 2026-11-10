@@ -15,6 +15,7 @@ const SORT_STORAGE_KEYS = {
   inspectorTransactionSort: 'hb_inspector_tx_sort',
   topologyCategorySort: 'hb_topology_cat_sort',
   topologyRuleSort: 'hb_topology_rule_sort',
+  backPropSort: 'hb_backprop_sort',
   backupsSort: 'hb_backups_sort'
 };
 
@@ -49,6 +50,7 @@ export const state = {
   inspectorTransactionSort: getSavedSort('inspectorTransactionSort', 'date_desc'),
   topologyCategorySort: getSavedSort('topologyCategorySort', 'custom_order'),
   topologyRuleSort: getSavedSort('topologyRuleSort', 'priority_asc'),
+  backPropSort: getSavedSort('backPropSort', 'date_desc'),
   backupsSort: getSavedSort('backupsSort', 'date_desc'),
   expandedCashflowCategories: [],
   expandedCashflowMerchants: [],

@@ -485,7 +485,7 @@ app.MapDelete("/api/transactions/{id:int}", async (
     if (addToTombstone ?? true)
     {
         await conn.ExecuteAsync(
-            "INSERT OR IGNORE INTO DeletedTransactionHashes (DedupHash, RawDescription, TransactionDate, Amount) VALUES (@DedupHash, @RawDescription, @TransactionDate, @Amount);",
+            "INSERT OR IGNORE INTO DeletedTransactionHashes (DedupHash, AccountId, RawDescription, TransactionDate, Amount) VALUES (@DedupHash, @AccountId, @RawDescription, @TransactionDate, @Amount);",
             txRow,
             sqlTx);
 
@@ -493,8 +493,8 @@ app.MapDelete("/api/transactions/{id:int}", async (
         if (!string.Equals(baseHash, txRow.DedupHash, StringComparison.OrdinalIgnoreCase))
         {
             await conn.ExecuteAsync(
-                "INSERT OR IGNORE INTO DeletedTransactionHashes (DedupHash, RawDescription, TransactionDate, Amount) VALUES (@BaseHash, @RawDescription, @TransactionDate, @Amount);",
-                new { BaseHash = baseHash, txRow.RawDescription, txRow.TransactionDate, txRow.Amount },
+                "INSERT OR IGNORE INTO DeletedTransactionHashes (DedupHash, AccountId, RawDescription, TransactionDate, Amount) VALUES (@BaseHash, @AccountId, @RawDescription, @TransactionDate, @Amount);",
+                new { BaseHash = baseHash, txRow.AccountId, txRow.RawDescription, txRow.TransactionDate, txRow.Amount },
                 sqlTx);
         }
     }
@@ -538,7 +538,7 @@ app.MapPost("/api/transactions/bulk-delete", async (
         foreach (var txRow in rows)
         {
             await conn.ExecuteAsync(
-                "INSERT OR IGNORE INTO DeletedTransactionHashes (DedupHash, RawDescription, TransactionDate, Amount) VALUES (@DedupHash, @RawDescription, @TransactionDate, @Amount);",
+                "INSERT OR IGNORE INTO DeletedTransactionHashes (DedupHash, AccountId, RawDescription, TransactionDate, Amount) VALUES (@DedupHash, @AccountId, @RawDescription, @TransactionDate, @Amount);",
                 txRow,
                 sqlTx);
 
@@ -546,8 +546,8 @@ app.MapPost("/api/transactions/bulk-delete", async (
             if (!string.Equals(baseHash, txRow.DedupHash, StringComparison.OrdinalIgnoreCase))
             {
                 await conn.ExecuteAsync(
-                    "INSERT OR IGNORE INTO DeletedTransactionHashes (DedupHash, RawDescription, TransactionDate, Amount) VALUES (@BaseHash, @RawDescription, @TransactionDate, @Amount);",
-                    new { BaseHash = baseHash, txRow.RawDescription, txRow.TransactionDate, txRow.Amount },
+                    "INSERT OR IGNORE INTO DeletedTransactionHashes (DedupHash, AccountId, RawDescription, TransactionDate, Amount) VALUES (@BaseHash, @AccountId, @RawDescription, @TransactionDate, @Amount);",
+                    new { BaseHash = baseHash, txRow.AccountId, txRow.RawDescription, txRow.TransactionDate, txRow.Amount },
                     sqlTx);
             }
         }
@@ -567,10 +567,20 @@ app.MapPost("/api/transactions/bulk-delete", async (
 app.MapPost("/api/transactions/clear-history", async (
     ClearTransactionHistoryRequest? req,
     CategorizationService catService,
+    ILoggerFactory loggerFactory,
     CancellationToken ct) =>
 {
-    var result = await catService.ClearTransactionHistoryAsync(req ?? new ClearTransactionHistoryRequest(), ct);
-    return Results.Ok(result);
+    try
+    {
+        var result = await catService.ClearTransactionHistoryAsync(req ?? new ClearTransactionHistoryRequest(), ct);
+        return Results.Ok(result);
+    }
+    catch (Exception ex)
+    {
+        var logger = loggerFactory.CreateLogger("ClearHistory");
+        logger.LogError(ex, "ClearTransactionHistoryAsync failed");
+        return Results.Problem(detail: ex.Message, statusCode: 500, title: "Failed to clear transaction history");
+    }
 });
 
 app.MapPost("/api/admin/reset-all", async (

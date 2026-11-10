@@ -43,7 +43,7 @@ public sealed class CategorizationService(
         var created = await conn.QuerySingleAsync<Category>(
             "SELECT * FROM Categories WHERE CategoryId = @Id;", new { Id = id });
 
-        await backupService.CreateSnapshotImmediateAsync("category_create", ct);
+        await backupService.RequestBackupAsync("category_create", isMajorOperation: false, ct);
         return created;
     }
 
@@ -78,7 +78,7 @@ public sealed class CategorizationService(
         var updated = await conn.QuerySingleAsync<Category>(
             "SELECT * FROM Categories WHERE CategoryId = @Id;", new { Id = categoryId });
 
-        await backupService.CreateSnapshotImmediateAsync("category_update", ct);
+        await backupService.RequestBackupAsync("category_update", isMajorOperation: false, ct);
         return updated;
     }
 
@@ -146,7 +146,7 @@ public sealed class CategorizationService(
 
         await tx.CommitAsync(ct);
 
-        string? backupFile = await backupService.CreateSnapshotImmediateAsync("category_delete", ct);
+        string? backupFile = await backupService.RequestBackupAsync("category_delete", isMajorOperation: true, ct);
 
         return new
         {
@@ -190,7 +190,7 @@ public sealed class CategorizationService(
 
         await tx.CommitAsync(ct);
 
-        string? backupFile = await backupService.CreateSnapshotImmediateAsync("category_merge", ct);
+        string? backupFile = await backupService.RequestBackupAsync("category_merge", isMajorOperation: true, ct);
 
         return new
         {
@@ -833,301 +833,135 @@ public sealed class CategorizationService(
         if (request.CreateBackupFirst)
         {
             preClearBackupFile = await backupService.FlushPendingSnapshotAsync("pre_clear_history", ct);
+            if (string.IsNullOrWhiteSpace(preClearBackupFile))
+            {
+                throw new InvalidOperationException("Pre-clear safety backup creation failed. Aborting transaction history clear to protect your data.");
+            }
         }
 
-        await using var conn = await connectionFactory.CreateOpenConnectionAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
-
-        int deletedTransactions = request.AccountId.HasValue
-            ? await conn.ExecuteAsync(
-                "DELETE FROM Transactions WHERE AccountId = @AccountId;",
-                new { AccountId = request.AccountId.Value },
-                tx)
-            : await conn.ExecuteAsync("DELETE FROM Transactions;", transaction: tx);
-
-        int deletedTombstones = 0;
-        if (request.ClearDeletedTombstones)
+        return await backupService.ExecuteExclusiveLifecycleActionAsync(async token =>
         {
-            deletedTombstones = await conn.ExecuteAsync("DELETE FROM DeletedTransactionHashes;", transaction: tx);
-        }
+            await using var conn = await connectionFactory.CreateOpenConnectionAsync(token);
+            await using var tx = await conn.BeginTransactionAsync(token);
 
-        int deletedStaging = 0;
-        if (request.ClearStagingSessions)
-        {
-            deletedStaging = request.AccountId.HasValue
+            int deletedTransactions = request.AccountId.HasValue
                 ? await conn.ExecuteAsync(
-                    "DELETE FROM StagingSessions WHERE AccountId = @AccountId;",
+                    "DELETE FROM Transactions WHERE AccountId = @AccountId;",
                     new { AccountId = request.AccountId.Value },
                     tx)
-                : await conn.ExecuteAsync("DELETE FROM StagingSessions;", transaction: tx);
-        }
+                : await conn.ExecuteAsync("DELETE FROM Transactions;", transaction: tx);
 
-        await tx.CommitAsync(ct);
+            int deletedTombstones = 0;
+            if (request.ClearDeletedTombstones)
+            {
+                deletedTombstones = request.AccountId.HasValue
+                    ? await conn.ExecuteAsync(
+                        "DELETE FROM DeletedTransactionHashes WHERE AccountId = @AccountId;",
+                        new { AccountId = request.AccountId.Value },
+                        tx)
+                    : await conn.ExecuteAsync("DELETE FROM DeletedTransactionHashes;", transaction: tx);
+            }
 
-        return new ClearTransactionHistoryResultDto
-        {
-            DeletedTransactionsCount = deletedTransactions,
-            DeletedTombstonesCount = deletedTombstones,
-            DeletedStagingSessionsCount = deletedStaging,
-            PreClearBackupFile = preClearBackupFile
-        };
+            int deletedStaging = 0;
+            if (request.ClearStagingSessions)
+            {
+                deletedStaging = request.AccountId.HasValue
+                    ? await conn.ExecuteAsync(
+                        "DELETE FROM StagingSessions WHERE AccountId = @AccountId;",
+                        new { AccountId = request.AccountId.Value },
+                        tx)
+                    : await conn.ExecuteAsync("DELETE FROM StagingSessions;", transaction: tx);
+            }
+
+            await tx.CommitAsync(token);
+
+            return new ClearTransactionHistoryResultDto
+            {
+                DeletedTransactionsCount = deletedTransactions,
+                DeletedTombstonesCount = deletedTombstones,
+                DeletedStagingSessionsCount = deletedStaging,
+                PreClearBackupFile = preClearBackupFile
+            };
+        }, ct);
     }
 
     public async Task<ResetAllDatabaseResultDto> ResetAllDatabaseAsync(
         ResetAllDatabaseRequest request,
         CancellationToken ct = default)
     {
+        var preservedBackupPolicy = await backupService.GetPolicyConfigAsync(ct);
+
         string? preResetBackupFile = null;
         if (request.CreateBackupFirst)
         {
             preResetBackupFile = await backupService.FlushPendingSnapshotAsync("pre_reset_all", ct);
+            if (string.IsNullOrWhiteSpace(preResetBackupFile))
+            {
+                throw new InvalidOperationException("Pre-reset safety backup creation failed. Aborting database reset to protect your data.");
+            }
         }
 
-        await using var conn = await connectionFactory.CreateOpenConnectionAsync(ct);
-
-        async Task<int> SafeCountAsync(string tableName)
+        return await backupService.ExecuteExclusiveLifecycleActionAsync(async token =>
         {
-            int exists = await conn.ExecuteScalarAsync<int>(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = @Name;",
-                new { Name = tableName });
-            if (exists == 0) return 0;
-            return await conn.ExecuteScalarAsync<int>($"SELECT COUNT(*) FROM \"{tableName}\";");
-        }
+            await using var conn = await connectionFactory.CreateOpenConnectionAsync(token);
 
-        int deletedTransactions = await SafeCountAsync("Transactions");
-        int deletedTombstones = await SafeCountAsync("DeletedTransactionHashes");
-        int deletedStaging = await SafeCountAsync("StagingSessions");
-        int deletedOverrides = await SafeCountAsync("IncomeOverrides");
-        int deletedRules = await SafeCountAsync("CategorizationRules");
-        int deletedCategories = await SafeCountAsync("Categories");
+            async Task<int> SafeCountAsync(string tableName)
+            {
+                int exists = await conn.ExecuteScalarAsync<int>(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = @Name;",
+                    new { Name = tableName });
+                if (exists == 0) return 0;
+                return await conn.ExecuteScalarAsync<int>($"SELECT COUNT(*) FROM \"{tableName}\";");
+            }
 
-        // SQLite requires PRAGMA foreign_keys = OFF to be executed outside a transaction
-        await conn.ExecuteAsync("PRAGMA foreign_keys = OFF;");
-        try
-        {
-            await using var tx = await conn.BeginTransactionAsync(ct);
+            int deletedTransactions = await SafeCountAsync("Transactions");
+            int deletedTombstones = await SafeCountAsync("DeletedTransactionHashes");
+            int deletedStaging = await SafeCountAsync("StagingSessions");
+            int deletedOverrides = await SafeCountAsync("IncomeOverrides");
+            int deletedRules = await SafeCountAsync("CategorizationRules");
+            int deletedCategories = await SafeCountAsync("Categories");
+
+            // SQLite requires PRAGMA foreign_keys = OFF to be executed outside a transaction
+            await conn.ExecuteAsync("PRAGMA foreign_keys = OFF;");
             try
             {
-                var userTables = (await conn.QueryAsync<string>(
-                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%';",
-                    transaction: tx)).ToList();
-
-                foreach (var tableName in userTables)
+                await using var tx = await conn.BeginTransactionAsync(token);
+                try
                 {
-                    string safeIdentifier = tableName.Replace("\"", "\"\"");
-                    await conn.ExecuteAsync($"DROP TABLE IF EXISTS \"{safeIdentifier}\";", transaction: tx);
-                }
+                    await DatabaseInitializer.RecreateCleanSchemaAsync(
+                        conn,
+                        tx,
+                        request.ReseedDefaultCategoriesAndRules,
+                        preservedBackupPolicy);
 
-                int seqExists = await conn.ExecuteScalarAsync<int>(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence';",
-                    transaction: tx);
-                if (seqExists > 0)
+                    await tx.CommitAsync(token);
+                }
+                catch
                 {
-                    await conn.ExecuteAsync("DELETE FROM sqlite_sequence;", transaction: tx);
+                    await tx.RollbackAsync(token);
+                    throw;
                 }
-
-                // Recreate clean v2.5 schema tables and indexes
-                await conn.ExecuteAsync(
-                    """
-                    CREATE TABLE Accounts (
-                        AccountId       INTEGER PRIMARY KEY AUTOINCREMENT,
-                        AccountName     TEXT    NOT NULL,
-                        Institution     TEXT    NOT NULL,
-                        AccountType     TEXT    NOT NULL,
-                        IsActive        INTEGER NOT NULL DEFAULT 1,
-                        CreatedAt       TEXT    NOT NULL DEFAULT (datetime('now'))
-                    );
-
-                    CREATE TABLE Categories (
-                        CategoryId               INTEGER PRIMARY KEY AUTOINCREMENT,
-                        Name                     TEXT    NOT NULL UNIQUE,
-                        IsBigBoxMerchantCategory INTEGER NOT NULL DEFAULT 0,
-                        MonthlyBudget            NUMERIC NOT NULL DEFAULT 0.00,
-                        SortOrder                INTEGER NOT NULL DEFAULT 100,
-                        ColorHex                 TEXT    NOT NULL DEFAULT '#3B82F6',
-                        IsActive                 INTEGER NOT NULL DEFAULT 1,
-                        CreatedAt                TEXT    NOT NULL DEFAULT (datetime('now')),
-                        UpdatedAt                TEXT    NOT NULL DEFAULT (datetime('now'))
-                    );
-
-                    CREATE TABLE CategorizationRules (
-                        RuleId              INTEGER PRIMARY KEY AUTOINCREMENT,
-                        MatchPattern        TEXT    NOT NULL,
-                        IsRegex             INTEGER NOT NULL DEFAULT 0,
-                        CategoryId          INTEGER NOT NULL,
-                        DefaultSubcategory  TEXT    NULL,
-                        Priority            INTEGER NOT NULL DEFAULT 100,
-                        CreatedAt           TEXT    NOT NULL DEFAULT (datetime('now')),
-                        UpdatedAt           TEXT    NOT NULL DEFAULT (datetime('now')),
-                        FOREIGN KEY (CategoryId) REFERENCES Categories(CategoryId) ON DELETE CASCADE
-                    );
-
-                    CREATE TABLE Transactions (
-                        TransactionId            INTEGER PRIMARY KEY AUTOINCREMENT,
-                        AccountId                INTEGER NOT NULL,
-                        TransactionDate          TEXT    NOT NULL,
-                        PostDate                 TEXT    NULL,
-                        RawDescription           TEXT    NOT NULL,
-                        CleanMerchantName        TEXT    NOT NULL,
-                        Amount                   NUMERIC NOT NULL,
-                        TransactionType          TEXT    NOT NULL,
-                        CategoryId               INTEGER NULL,
-                        Subcategory              TEXT    NULL,
-                        CategorizationSource     TEXT    NOT NULL DEFAULT 'Uncategorized',
-                        IsCategoryManuallyLocked INTEGER NOT NULL DEFAULT 0,
-                        ParentTransactionId      INTEGER NULL,
-                        DedupHash                TEXT    NOT NULL,
-                        UploadBatchId            TEXT    NULL,
-                        Notes                    TEXT    NULL,
-                        CreatedAt                TEXT    NOT NULL DEFAULT (datetime('now')),
-                        UpdatedAt                TEXT    NOT NULL DEFAULT (datetime('now')),
-                        FOREIGN KEY (AccountId)  REFERENCES Accounts(AccountId),
-                        FOREIGN KEY (CategoryId) REFERENCES Categories(CategoryId) ON DELETE SET NULL
-                    );
-
-                    CREATE TABLE DeletedTransactionHashes (
-                        DedupHash       TEXT PRIMARY KEY,
-                        RawDescription  TEXT NOT NULL,
-                        TransactionDate TEXT NOT NULL,
-                        Amount          NUMERIC NOT NULL,
-                        DeletedAt       TEXT NOT NULL DEFAULT (datetime('now'))
-                    );
-
-                    CREATE TABLE StagingSessions (
-                        StagingSessionId TEXT PRIMARY KEY,
-                        AccountId        INTEGER NOT NULL,
-                        FileNamesJson    TEXT    NOT NULL,
-                        CandidatesJson   TEXT    NOT NULL,
-                        CreatedAt        TEXT    NOT NULL DEFAULT (datetime('now'))
-                    );
-
-                    CREATE TABLE Settings (
-                        Key             TEXT PRIMARY KEY,
-                        Value           TEXT NOT NULL,
-                        UpdatedAt       TEXT NOT NULL DEFAULT (datetime('now'))
-                    );
-
-                    CREATE TABLE IncomeOverrides (
-                        YearMonth       TEXT PRIMARY KEY,
-                        IncomeAmount    NUMERIC NOT NULL,
-                        Notes           TEXT NULL,
-                        UpdatedAt       TEXT NOT NULL DEFAULT (datetime('now'))
-                    );
-
-                    CREATE INDEX IX_Transactions_Date ON Transactions(TransactionDate);
-                    CREATE INDEX IX_Transactions_Category ON Transactions(CategoryId);
-                    CREATE INDEX IX_Transactions_Type ON Transactions(TransactionType);
-                    CREATE INDEX IX_Transactions_Merchant ON Transactions(CleanMerchantName);
-                    CREATE INDEX IX_Transactions_DedupHash ON Transactions(DedupHash);
-                    CREATE INDEX IX_Transactions_UpdatedAt ON Transactions(UpdatedAt);
-                    """,
-                    transaction: tx);
-
-                // Re-seed default Household Accounts with canonical AccountIds
-                await conn.ExecuteAsync(
-                    """
-                    INSERT INTO Accounts (AccountId, AccountName, Institution, AccountType, IsActive) VALUES
-                    (1, 'Wells Fargo Household Checking', 'WellsFargo', 'Checking', 1),
-                    (2, 'Chase Household Credit Card', 'Chase', 'CreditCard', 1);
-                    """,
-                    transaction: tx);
-
-                // Re-seed default Settings (preserving clean defaults)
-                await conn.ExecuteAsync(
-                    """
-                    INSERT INTO Settings (Key, Value) VALUES
-                    ('PersistentMonthlyIncome', '10000.00'),
-                    ('GooglePayrollMatchPattern', 'GOOGLE'),
-                    ('CurrentMonthIncomeMode', 'Auto'),
-                    ('GeminiApiKey', ''),
-                    ('BackupAutoMode', 'Coalesced'),
-                    ('BackupDebounceSeconds', '30'),
-                    ('BackupMinIntervalMinutes', '10'),
-                    ('MaxRetainedBackups', '15');
-                    """,
-                    transaction: tx);
-
-                if (request.ReseedDefaultCategoriesAndRules)
-                {
-                    await conn.ExecuteAsync(
-                        """
-                        INSERT INTO Categories (Name, IsBigBoxMerchantCategory, MonthlyBudget, SortOrder, ColorHex, IsActive) VALUES
-                        ('Housing & Utilities',  0, 3200.00,  10, '#2563EB', 1),
-                        ('Groceries',            0, 1000.00,  20, '#10B981', 1),
-                        ('Costco',               1,  600.00,  30, '#E11D48', 1),
-                        ('Amazon',               1,  400.00,  40, '#F59E0B', 1),
-                        ('Target',               1,  300.00,  50, '#DC2626', 1),
-                        ('Walmart',              1,  200.00,  60, '#0284C7', 1),
-                        ('Dining & Coffee',      0,  500.00,  70, '#8B5CF6', 1),
-                        ('Transportation & Gas', 0,  350.00,  80, '#14B8A6', 1),
-                        ('Subscriptions',        0,  150.00,  90, '#6366F1', 1),
-                        ('Healthcare',           0,  250.00, 100, '#EC4899', 1),
-                        ('Shopping & Household', 0,  400.00, 110, '#0EA5E9', 1),
-                        ('Entertainment & Misc', 0,  300.00, 120, '#64748B', 1);
-                        """,
-                        transaction: tx);
-
-                    var categories = await conn.QueryAsync<Category>(
-                        "SELECT CategoryId, Name FROM Categories;",
-                        transaction: tx);
-
-                    var catMap = categories.ToDictionary(x => x.Name, x => x.CategoryId, StringComparer.OrdinalIgnoreCase);
-
-                    async Task AddDefaultRule(string pattern, string catName, int priority)
-                    {
-                        if (catMap.TryGetValue(catName, out int catId))
-                        {
-                            await conn.ExecuteAsync(
-                                "INSERT INTO CategorizationRules (MatchPattern, IsRegex, CategoryId, Priority) VALUES (@Pattern, 0, @CatId, @Priority);",
-                                new { Pattern = pattern, CatId = catId, Priority = priority },
-                                transaction: tx);
-                        }
-                    }
-
-                    await AddDefaultRule("COSTCO", "Costco", 10);
-                    await AddDefaultRule("AMZN", "Amazon", 15);
-                    await AddDefaultRule("AMAZON", "Amazon", 15);
-                    await AddDefaultRule("TARGET", "Target", 20);
-                    await AddDefaultRule("WAL-MART", "Walmart", 25);
-                    await AddDefaultRule("WALMART", "Walmart", 25);
-                    await AddDefaultRule("WHOLEFDS", "Groceries", 30);
-                    await AddDefaultRule("TRADER JOE", "Groceries", 30);
-                    await AddDefaultRule("SAFEWAY", "Groceries", 30);
-                    await AddDefaultRule("MORTGAGE", "Housing & Utilities", 40);
-                    await AddDefaultRule("PG&E", "Housing & Utilities", 40);
-                    await AddDefaultRule("CHEVRON", "Transportation & Gas", 50);
-                    await AddDefaultRule("SHELL", "Transportation & Gas", 50);
-                    await AddDefaultRule("NETFLIX", "Subscriptions", 60);
-                    await AddDefaultRule("COFFEE", "Dining & Coffee", 70);
-                }
-
-                await tx.CommitAsync(ct);
             }
-            catch
+            finally
             {
-                await tx.RollbackAsync(ct);
-                throw;
+                await conn.ExecuteAsync("PRAGMA foreign_keys = ON;");
             }
-        }
-        finally
-        {
-            await conn.ExecuteAsync("PRAGMA foreign_keys = ON;");
-        }
 
-        int retainedBackupsCount = backupService.ListBackups().Count;
+            int retainedBackupsCount = backupService.ListBackups().Count;
 
-        return new ResetAllDatabaseResultDto
-        {
-            DeletedTransactionsCount = deletedTransactions,
-            DeletedCategoriesCount = deletedCategories,
-            DeletedRulesCount = deletedRules,
-            DeletedTombstonesCount = deletedTombstones,
-            DeletedStagingSessionsCount = deletedStaging,
-            DeletedIncomeOverridesCount = deletedOverrides,
-            ReseededDefaults = request.ReseedDefaultCategoriesAndRules,
-            PreResetBackupFile = preResetBackupFile,
-            RetainedBackupFilesCount = retainedBackupsCount
-        };
+            return new ResetAllDatabaseResultDto
+            {
+                DeletedTransactionsCount = deletedTransactions,
+                DeletedCategoriesCount = deletedCategories,
+                DeletedRulesCount = deletedRules,
+                DeletedTombstonesCount = deletedTombstones,
+                DeletedStagingSessionsCount = deletedStaging,
+                DeletedIncomeOverridesCount = deletedOverrides,
+                ReseededDefaults = request.ReseedDefaultCategoriesAndRules,
+                PreResetBackupFile = preResetBackupFile,
+                RetainedBackupFilesCount = retainedBackupsCount
+            };
+        }, ct);
     }
 
 

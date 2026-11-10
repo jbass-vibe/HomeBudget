@@ -165,6 +165,30 @@ assert.ok(
   'app.js reset all modal must call POST /api/admin/reset-all'
 );
 
-console.log('✔ Frontend v2.2–v2.5 list sorting, simplified cashflow table, account spend summary, backup/restore, and clean-slate reset assertions passed.');
+// 7. Verify v2.6 #backPropSortSelect, inline triage merchant group expansion, and canonical schema.sql guards
+assert.ok(
+  topologySource.includes('id="backPropSortSelect"'),
+  'topologyView.js back-propagation dry-run preview must include #backPropSortSelect'
+);
+assert.ok(
+  cashflowSource.includes('data-expand-merchant='),
+  'cashflowView.js triage merchant groups must support inline expansion via data-expand-merchant'
+);
+assert.ok(
+  cashflowSource.includes('expandedCashflowMerchants'),
+  'cashflowView.js must persist expanded merchant groups in state.expandedCashflowMerchants'
+);
+
+const schemaSql = fs.readFileSync(path.resolve('deploy/schema.sql'), 'utf8');
+assert.ok(
+  schemaSql.includes('DefaultTaxonomySeeded'),
+  'deploy/schema.sql must guard default category/rule seeding with DefaultTaxonomySeeded'
+);
+assert.ok(
+  /CREATE TABLE IF NOT EXISTS DeletedTransactionHashes[\s\S]*?AccountId\s+INTEGER\s+NULL/i.test(schemaSql),
+  'deploy/schema.sql DeletedTransactionHashes table must include AccountId INTEGER NULL'
+);
+
+console.log('✔ Frontend & schema v2.2–v2.6 verification assertions passed.');
 
 

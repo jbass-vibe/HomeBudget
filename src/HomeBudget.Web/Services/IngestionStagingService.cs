@@ -171,10 +171,17 @@ public sealed class IngestionStagingService(
             {
                 await conn.ExecuteAsync(
                     """
-                    INSERT OR IGNORE INTO DeletedTransactionHashes (DedupHash, RawDescription, TransactionDate, Amount)
-                    VALUES (@DedupHash, @RawDescription, @TransactionDate, @Amount);
+                    INSERT OR IGNORE INTO DeletedTransactionHashes (DedupHash, AccountId, RawDescription, TransactionDate, Amount)
+                    VALUES (@DedupHash, @AccountId, @RawDescription, @TransactionDate, @Amount);
                     """,
-                    candidate,
+                    new
+                    {
+                        candidate.DedupHash,
+                        session.AccountId,
+                        candidate.RawDescription,
+                        candidate.TransactionDate,
+                        candidate.Amount
+                    },
                     tx);
                 tombstonedCount++;
                 continue;

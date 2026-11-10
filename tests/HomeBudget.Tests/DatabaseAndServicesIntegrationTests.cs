@@ -228,49 +228,71 @@ public sealed class DatabaseAndServicesIntegrationTests : IDisposable
         int countAfterRestore = await connAfter.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM Categories WHERE Name = 'TempCategory';");
         Assert.Equal(0, countAfterRestore);
 
-        // 5. Clear transaction history with pre-clear backup and tombstone reset, then restore from pre_clear_history snapshot
+        // 5. Clear transaction history scoped to Account 1 with pre-clear backup and account-scoped tombstone reset
         await connAfter.ExecuteAsync(
             """
             INSERT INTO Transactions (AccountId, TransactionDate, RawDescription, CleanMerchantName, Amount, TransactionType, DedupHash)
-            VALUES (1, '2026-11-08', 'TEST CHARGE', 'TEST CHARGE', 99.95, 'Expense', 'CLEAR_TEST_HASH');
-            INSERT INTO DeletedTransactionHashes (DedupHash, RawDescription, TransactionDate, Amount)
-            VALUES ('TOMBSTONE_HASH', 'OLD DELETED', '2026-11-01', 12.00);
+            VALUES (1, '2026-11-08', 'TEST CHARGE ACCT 1', 'TEST CHARGE', 99.95, 'Expense', 'CLEAR_TEST_HASH_1'),
+                   (2, '2026-11-08', 'TEST CHARGE ACCT 2', 'TEST CHARGE', 42.00, 'Expense', 'CLEAR_TEST_HASH_2');
+            INSERT INTO DeletedTransactionHashes (DedupHash, AccountId, RawDescription, TransactionDate, Amount)
+            VALUES ('TOMBSTONE_ACCT_1', 1, 'OLD DELETED 1', '2026-11-01', 12.00),
+                   ('TOMBSTONE_ACCT_2', 2, 'OLD DELETED 2', '2026-11-01', 19.00);
             """);
 
-        var clearRes = await _categorizationService.ClearTransactionHistoryAsync(new ClearTransactionHistoryRequest
+        var clearAcct1Res = await _categorizationService.ClearTransactionHistoryAsync(new ClearTransactionHistoryRequest
         {
+            AccountId = 1,
             CreateBackupFirst = true,
             ClearDeletedTombstones = true,
             ClearStagingSessions = true
         });
 
-        Assert.Equal(1, clearRes.DeletedTransactionsCount);
-        Assert.Equal(1, clearRes.DeletedTombstonesCount);
-        Assert.False(string.IsNullOrWhiteSpace(clearRes.PreClearBackupFile));
-        Assert.Equal(0, await connAfter.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM Transactions;"));
-        Assert.Equal(0, await connAfter.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM DeletedTransactionHashes;"));
+        Assert.Equal(1, clearAcct1Res.DeletedTransactionsCount);
+        Assert.Equal(1, clearAcct1Res.DeletedTombstonesCount);
+        Assert.False(string.IsNullOrWhiteSpace(clearAcct1Res.PreClearBackupFile));
+        Assert.Equal(1, await connAfter.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM Transactions WHERE AccountId = 2;"));
+        Assert.Equal(1, await connAfter.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM DeletedTransactionHashes WHERE AccountId = 2;"));
 
-        // Restore the pre-clear snapshot and verify the transaction is restored
-        await _backupService.RestoreSnapshotAsync(clearRes.PreClearBackupFile!, createPreRestoreBackup: false);
+        // Restore the pre-clear snapshot and verify Account 1's transaction is restored
+        await _backupService.RestoreSnapshotAsync(clearAcct1Res.PreClearBackupFile!, createPreRestoreBackup: false);
         await using var connRestored = await _connectionFactory.CreateOpenConnectionAsync();
-        Assert.Equal(1, await connRestored.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM Transactions WHERE DedupHash = 'CLEAR_TEST_HASH';"));
+        Assert.Equal(1, await connRestored.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM Transactions WHERE DedupHash = 'CLEAR_TEST_HASH_1';"));
 
-        // 6. Reset all information (clean history) while preserving all backup databases
+        // 6. Configure custom MaxRetainedBackups (50) and verify ResetAllDatabaseAsync preserves backup policy & all backup files
+        await _backupService.UpdatePolicyConfigAsync(new BackupPolicyConfigDto
+        {
+            AutoBackupMode = "Coalesced",
+            DebounceSeconds = 45,
+            MinIntervalMinutes = 15,
+            MaxRetainedBackups = 50
+        });
+
         int backupsBeforeReset = _backupService.ListBackups().Count;
         var resetRes = await _categorizationService.ResetAllDatabaseAsync(new ResetAllDatabaseRequest
         {
             CreateBackupFirst = true,
             ReseedDefaultCategoriesAndRules = true
         });
-        Assert.Equal(1, resetRes.DeletedTransactionsCount);
+        Assert.Equal(2, resetRes.DeletedTransactionsCount);
         Assert.True(resetRes.ReseededDefaults);
         Assert.False(string.IsNullOrWhiteSpace(resetRes.PreResetBackupFile));
         Assert.Equal(backupsBeforeReset + 1, resetRes.RetainedBackupFilesCount);
         Assert.Equal(0, await connRestored.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM Transactions;"));
         Assert.Equal(12, await connRestored.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM Categories;"));
         Assert.Equal(15, await connRestored.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM CategorizationRules;"));
+        Assert.Equal(50, (await _backupService.GetPolicyConfigAsync()).MaxRetainedBackups);
 
-        // 7. Prune & delete snapshots
+        // 7. Reset with ReseedDefaultCategoriesAndRules = false and verify re-running schema.sql does NOT resurrect defaults
+        await _categorizationService.ResetAllDatabaseAsync(new ResetAllDatabaseRequest
+        {
+            CreateBackupFirst = false,
+            ReseedDefaultCategoriesAndRules = false
+        });
+        await connRestored.ExecuteAsync(await File.ReadAllTextAsync(schemaPath));
+        Assert.Equal(0, await connRestored.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM Categories;"));
+        Assert.Equal(0, await connRestored.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM CategorizationRules;"));
+
+        // 8. Prune & delete snapshots
         int pruned = _backupService.PruneBackupsToCount(1);
         Assert.True(pruned >= 1);
         Assert.Single(_backupService.ListBackups());

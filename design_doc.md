@@ -1,15 +1,28 @@
-# Local Home Budgeting & Cashflow System — Design Document (v2.5)
+# Local Home Budgeting & Cashflow System — Design Document (v2.6)
 
-**Document Version:** 2.5  
+**Document Version:** 2.6  
 **Target Platform:** Windows 11 IIS + ASP.NET Core (.NET 10 Minimal APIs) + SQLite (WAL Mode)  
 **Network Scope:** Strictly LAN-Only (`LocalSubnet` via Windows Defender Firewall, Port 8080)  
 **Primary Personas:**
 - **User (Spouse / Mobile-First on iPhone):** Reviews monthly budgets, explores the Cashflow Sankey visualization, manages categories (add/edit/delete), and rapidly categorizes or recategorizes expenses directly from the Visualization and Budgets views with automated forward/backward rule propagation prompts and flexible list sorting.
 - **Administrator (Desktop on Windows 11 PC):** Performs multi-file CSV statement ingestion (Chase & Wells Fargo), manages full category topology, rules, and local SQLite backup/restore lifecycle & policies, clears transaction history or resets all live database information to a clean state while preserving backup databases, and uses the filtered Transaction Inspector to edit, annotate (`Notes`), split, or delete income and expense entries (with tombstone hash protection).
 
+> [!NOTE]
+> **Household LAN Trust Model:** This system runs exclusively on a private household LAN behind a Windows Defender Firewall `LocalSubnet` rule. The **User** and **Administrator** personas represent ergonomic device/view workflows (mobile daily budgeting vs. desktop statement administration) rather than authenticated security boundaries; destructive operations are protected by explicit confirmation modals and automatic pre-operation SQLite snapshots rather than login/password gates.
+
 ---
 
-## 1. Summary of Requirements & Architecture Evolution (v2.0 $\rightarrow$ v2.5)
+## 1. Summary of Requirements & Architecture Evolution (v2.0 $\rightarrow$ v2.6)
+
+### 1.0 Version Changelog
+| Version | Summary of Architectural & Functional Changes |
+| :--- | :--- |
+| **v2.0 – v2.1** | Initial .NET 10 + SQLite WAL architecture, Chase/Wells Fargo CSV staging (`StagingSessions`), canonical `TransactionType` vocabulary, immutable `DedupHash`, Cashflow Sankey, and iPhone-responsive UI. |
+| **v2.2** | Unified multi-mode list sorting (`sortCategories`, `sortTransactions`, `UpdatedAt` tracking) across all dropdowns, Sankey nodes, tables, and drill-downs with `localStorage` persistence. |
+| **v2.3** | Smart Coalesced SQLite Backup Policy (`Coalesced`, `MajorOnly`, `ManualOnly`, `EveryChange`) with sliding debounce + minimum cooldown timers and Admin backup telemetry/pruning. |
+| **v2.4** | Verified in-app database restore (from local `Backups/` or external `.db` upload with `PRAGMA integrity_check`) and Clear Transaction History (`POST /api/transactions/clear-history`). |
+| **v2.5** | Simplified top-level Tabular Cashflow Breakdown (removing top-level per-account columns while retaining dashboard account spend pills and drill-downs) and Reset All Information (`POST /api/admin/reset-all`). |
+| **v2.6** | Unified canonical schema/seed contract (`DefaultTaxonomySeeded` guard preventing seed resurrection on restart), pre-schema migration ordering for v1 database upgrades (removing legacy `UploadBatches` FK and `Accounts` `CHECK` constraints), preserved backup retention policy across resets, fail-fast safety backup verification, account-scoped tombstones (`DeletedTransactionHashes.AccountId`), exclusive lifecycle mutex across Reset/Restore/Clear/Backup, and inline triage merchant group expansion + `#backPropSortSelect`. |
 
 ### 1.1 Core Product Capabilities
 1. **Full Category Lifecycle & Dual-Persona Access (Add, Edit, Delete):**
@@ -31,22 +44,22 @@
      - **Account:** Filter by specific bank/credit card account.
      - **Amount Range:** Optional `Min Amount` / `Max Amount` filter.
      - **Search Query:** Instant substring filter across `RawDescription`, `CleanMerchantName`, `Subcategory`, and `Notes`.
-   - When deleting an income or expense record (individually or in bulk), the Administrator can choose whether to record its `DedupHash` in `DeletedTransactionHashes` (Tombstone table, enabled by default) so future overlapping CSV uploads do not resurrect the deleted entry.
+   - When deleting an income or expense record (individually or in bulk), the Administrator can choose whether to record its `DedupHash` and `AccountId` in `DeletedTransactionHashes` (Tombstone table, enabled by default) so future overlapping CSV uploads do not resurrect the deleted entry.
 
 4. **Visualization Page (`Uncategorized` Triage, Simplified Top-Level Category Table & Account Spend Summary):**
    - On the **Cashflow & Sankey Visualization** page, if any expenses in the active time window are marked **`Uncategorized`**, the `Uncategorized` node in the Sankey diagram and a dedicated **"Uncategorized Expenses Triage"** card below the diagram are highlighted.
-   - Supports toggling between **Merchant-Grouped View** (aggregating repeated uncategorized charges by `CleanMerchantName` with item counts and group subtotals) and **Chronological List View**.
+   - Supports toggling between **Merchant-Grouped View** (aggregating repeated uncategorized charges by `CleanMerchantName` with item counts, group subtotals, and click-to-expand inline charge rows) and **Chronological List View**.
    - The **Tabular Cashflow Breakdown** table keeps top-level category summary rows clean and focused (`Category`, `Net Spend`, `% of Spend`, `% of Income`, `Manage`) without separate `"Wells Fargo Checking"` and `"Chase Credit Card"` columns, while keeping account-level spend totals in the dashboard Account Spend Summary and inside expanded category drill-downs.
 
-5. **Comprehensive List Management & Multi-Mode Sorting (v2.2):**
-   - Every major list, dropdown menu, visualization node column, and table across the application provides consistent, user-controllable sorting options—including **Alphabetical (A $\rightarrow$ Z / Z $\rightarrow$ A)**, **Recent Changes (`UpdatedAt DESC`)**, **Amount / Spend (High $\rightarrow$ Low / Low $\rightarrow$ High)**, and **Custom / Priority Order**.
+5. **Comprehensive List Management & Multi-Mode Sorting (v2.2 $\rightarrow$ v2.6):**
+   - Every major list, dropdown menu, visualization node column, dry-run preview, and table across the application provides consistent, user-controllable sorting options—including **Alphabetical (A $\rightarrow$ Z / Z $\rightarrow$ A)**, **Recent Changes (`UpdatedAt DESC`)**, **Amount / Spend (High $\rightarrow$ Low / Low $\rightarrow$ High)**, and **Custom / Priority Order**.
 
-6. **Smart Coalesced SQLite Backup Policy, Full Database Restore, Clear History & Clean-Slate Reset (v2.3 $\rightarrow$ v2.5):**
-   - **Preventing Backup Sprawl (Debounce + Cooldown + Tiered Triggers):** Replaces naive synchronous per-click snapshots with a configurable policy engine (`BackupService.RequestBackupAsync`). By default (`BackupAutoMode = 'Coalesced'`), rapid interactive edits (triage categorizations, budget tweaks, rule edits, transaction edits) are coalesced across a sliding quiet window (`BackupDebounceSeconds = 30s`) and a minimum interval cooldown (`BackupMinIntervalMinutes = 10m`) so a 20-item categorization session produces **one** consolidated snapshot instead of 20 separate `.db` files. Nested duplicate snapshots inside composite service operations are also eliminated.
+6. **Smart Coalesced SQLite Backup Policy, Full Database Restore, Clear History & Clean-Slate Reset (v2.3 $\rightarrow$ v2.6):**
+   - **Preventing Backup Sprawl (Debounce + Cooldown + Tiered Triggers):** All category, account, rule, budget, settings, and transaction mutations route through `BackupService.RequestBackupAsync`. By default (`BackupAutoMode = 'Coalesced'`), rapid interactive edits are coalesced across a sliding quiet window (`BackupDebounceSeconds = 30s`) and a minimum interval cooldown (`BackupMinIntervalMinutes = 10m`) so a 20-item categorization session produces **one** consolidated snapshot instead of 20 separate `.db` files. Nested duplicate snapshots inside composite service operations are also eliminated.
    - **Full Admin Backup & Database Restore Suite (`topologyView.js`):** Allows the Administrator to configure auto-backup mode (`Coalesced`, `MajorOnly`, `ManualOnly`, `EveryChange`), retention count (`MaxRetainedBackups`, default `15`), debounce/cooldown timers, flush pending coalesced backups on demand, sort/inspect snapshots with trigger-reason badges, delete individual or bulk-selected snapshots, prune old snapshots, and safely **restore** the live database either from any local snapshot (`POST /api/backups/restore/{fileName}`) or by uploading an external `.db` snapshot file (`POST /api/backups/restore-upload`)—with automatic `pre_restore` safety backup and `PRAGMA integrity_check` verification.
    - **Clear Transaction History (`POST /api/transactions/clear-history`) & Reset All Information (`POST /api/admin/reset-all`):**
-     - **Clear Transaction History:** Wipes imported transactions (and optionally `DeletedTransactionHashes` tombstones and `StagingSessions`) while preserving all Categories, Auto-Categorization Rules, Accounts, Monthly Budgets, and Income Settings, with a pre-checked option to create a `pre_clear_history` backup first.
-     - **Reset All Information (Start from Clean History):** Resets the entire live database (transactions, tombstones, staging sessions, income overrides, categories, rules, accounts, and settings) back to a clean initial state via a confirmation modal (`openResetAllDatabaseModal`), while **strictly preserving all SQLite backup databases in `Backups/`** (and optionally taking a `pre_reset_all` snapshot before resetting).
+     - **Clear Transaction History:** Wipes imported transactions (and optionally account-scoped `DeletedTransactionHashes` tombstones and `StagingSessions`) while preserving all Categories, Auto-Categorization Rules, Accounts, Monthly Budgets, and Income Settings, with a pre-checked option to create a verified `pre_clear_history` backup first.
+     - **Reset All Information (Start from Clean History):** Resets the entire live database (dropping and recreating clean v2.6 tables under an exclusive lifecycle mutex) via a confirmation modal (`openResetAllDatabaseModal`), while **strictly preserving all SQLite backup databases in `Backups/` and preserving the user's configured backup retention policy (`MaxRetainedBackups`, `BackupAutoMode`, debounce/cooldown settings)** so future snapshots never prune existing backups unexpectedly.
 
 ### 1.2 Operational Safety & Data Integrity Refinements
 1. **Canonical Transaction Type Vocabulary:**
@@ -55,17 +68,18 @@
      - `'Refund'` (Negative amount: merchant return, credit, or non-payroll reimbursement netted against spending)
      - `'IncomeDeposit'` (Positive amount: verified payroll / household income deposit)
      - `'CreditCardPayoff'` (Positive amount: credit card payment or inter-account payoff transfer excluded from both spending and income totals to prevent double-counting)
-2. **Schema & Design Alignment + Idempotent Schema Evolution:**
-   - Reconciles `schema.sql` and C# entities (`IsBigBoxMerchantCategory`, `IsRegex`, `DefaultSubcategory`, `CategorizationSource`, `UploadBatchId`, `UpdatedAt`) and runs an idempotent column-migration check in `DatabaseInitializer` (`PRAGMA table_info`) so existing `budget.db` files automatically receive new columns (`CategorizationSource`, `UpdatedAt`, `StagingSessions` table, and default backup policy settings) on startup without data loss.
+2. **Pre-Schema Idempotent Upgrade & Single-Source Seed Contract (`DatabaseInitializer`):**
+   - On startup, if an existing database already contains user tables, `DatabaseInitializer` runs `ApplyIdempotentSchemaMigrationsAsync` **before** executing index/seed statements in `schema.sql`. This guarantees older v1/v2.0 databases gain `CreatedAt`/`UpdatedAt`, `CategorizationSource`, `UploadBatchId`, and `DeletedTransactionHashes.AccountId`, and have legacy v1 `UploadBatches` foreign keys and `Accounts` `CHECK` constraints removed before any indexes on migrated columns are created.
+   - Default category and rule seeding is gated by `Settings.Key = 'DefaultTaxonomySeeded'` (`'1'`), ensuring that once initialized (or after a clean reset with `ReseedDefaultCategoriesAndRules = false`), deleted default categories and rules never resurrect on server restart.
 3. **Hardened Wells Fargo & Chase CSV Classification (`CsvParserService`):**
    - Prevents non-payroll positive checking credits (e.g., merchant refunds, Zelle/Venmo reimbursements, account transfers) from being misclassified as `IncomeDeposit`. Only positive checking rows matching `GooglePayrollMatchPattern` are auto-classified as `IncomeDeposit`; other non-payoff positive credits default to `Refund` and are flagged with `RequiresManualReview = true` during upload staging.
 4. **SQLite-Persisted Upload Staging Sessions (`StagingSessions`):**
    - Persists staging sessions in the SQLite `StagingSessions` table (with automatic 24-hour expiration cleanup) so IIS application pool recycles or server restarts do not lose an in-progress CSV import review.
 5. **Immutable Import Fingerprint (`DedupHash`) Contract:**
    - `DedupHash` is computed once at CSV parse time from the raw bank record (`AccountId|IsoDate|RawDescription|NormalizedAmount`) and is never mutated when the user edits `CleanMerchantName`, `TransactionDate`, `Amount`, `CategoryId`, `Subcategory`, or `Notes`.
-6. **Frontend XSS Prevention (`escapeHtml` Rendering Contract) & Verified Coalesced Backups (`BackupService`):**
+6. **Frontend XSS Prevention (`escapeHtml` Rendering Contract) & Fail-Fast Verified Backups (`BackupService`):**
    - All externally sourced CSV fields and user-editable strings are escaped via `escapeHtml()` before DOM insertion.
-   - `BackupService` verifies snapshot file existence and non-zero size after `VACUUM INTO`, coalesces burst edits, and validates snapshot integrity (`PRAGMA integrity_check`) before any restore operation.
+   - `BackupService` verifies snapshot file existence and non-zero size after `VACUUM INTO`, coalesces burst edits, validates snapshot integrity (`PRAGMA integrity_check`) before any restore operation, and aborts any destructive Reset/Clear/Restore operation if a requested pre-operation safety snapshot fails.
 
 ---
 
@@ -76,19 +90,19 @@
 | **Host OS & Web Server** | Windows 11 Pro/Home with IIS (`AspNetCoreModuleV2`, In-Process Hosting on Port `8080`) |
 | **Backend Framework** | ASP.NET Core Minimal APIs targeting **.NET 10.0 (`net10.0`)** |
 | **Database Engine** | **SQLite 3.53+** (`Microsoft.Data.Sqlite` `10.0.0` + `SQLitePCLRaw.lib.e_sqlite3` `3.53.3`) |
-| **Concurrency & Durability** | `PRAGMA journal_mode=WAL;`, `PRAGMA synchronous=NORMAL;`, `PRAGMA foreign_keys=ON;`, `PRAGMA busy_timeout=5000;` |
+| **Concurrency & Durability** | `PRAGMA journal_mode=WAL;`, `PRAGMA synchronous=NORMAL;`, `PRAGMA foreign_keys=ON;`, `PRAGMA busy_timeout=5000;` + `BackupService` lifecycle `SemaphoreSlim` mutex |
 | **Data Access Layer** | **Dapper** (`2.1.35`) with custom `SqliteDecimalHandler` and `SqliteBoolHandler` for strict `.NET 10` type safety |
 | **Frontend Architecture** | Zero-build Vanilla ES6 Modules (`app.js`, view modules, custom responsive SVG `sankeyChart.js`), centralized list-sorting helpers & `escapeHtml()` sanitization, Mobile-First CSS |
 | **Network Isolation** | Bound to `*:8080`; Windows Firewall rule restricts inbound TCP `8080` to `LocalSubnet` on `Private` profile |
 
 ---
 
-## 3. Database Schema (DDL v2.2)
+## 3. Database Schema & Canonical Seed Data (DDL v2.6)
 
 Default Database file location: `C:\ProgramData\HomeBudget\budget.db` (configurable via `HomeBudget:DatabasePath`)  
 Default Automated Backup directory: `<DatabaseDirectory>\Backups\` (e.g., `C:\ProgramData\HomeBudget\Backups\`, configurable via `HomeBudget:BackupDirectoryPath`)
 
-### 3.1 Core Tables (`deploy/schema.sql`)
+### 3.1 Core Tables & Indexes (`deploy/schema.sql` & `DatabaseInitializer`)
 
 ```sql
 PRAGMA journal_mode = WAL;
@@ -98,8 +112,8 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS Accounts (
     AccountId       INTEGER PRIMARY KEY AUTOINCREMENT,
     AccountName     TEXT    NOT NULL,
-    Institution     TEXT    NOT NULL, -- 'WellsFargo', 'Chase'
-    AccountType     TEXT    NOT NULL, -- 'Checking', 'CreditCard'
+    Institution     TEXT    NOT NULL, -- e.g. 'WellsFargo', 'Chase', or any custom institution
+    AccountType     TEXT    NOT NULL, -- 'Checking', 'CreditCard', 'Savings', etc.
     IsActive        INTEGER NOT NULL DEFAULT 1,
     CreatedAt       TEXT    NOT NULL DEFAULT (datetime('now'))
 );
@@ -152,11 +166,12 @@ CREATE TABLE IF NOT EXISTS Transactions (
 );
 
 CREATE TABLE IF NOT EXISTS DeletedTransactionHashes (
-    DedupHash       TEXT PRIMARY KEY,
-    RawDescription  TEXT NOT NULL,
-    TransactionDate TEXT NOT NULL,
+    DedupHash       TEXT    PRIMARY KEY,
+    AccountId       INTEGER NULL, -- Scopes tombstones to the originating account for per-account Clear History
+    RawDescription  TEXT    NOT NULL,
+    TransactionDate TEXT    NOT NULL,
     Amount          NUMERIC NOT NULL,
-    DeletedAt       TEXT NOT NULL DEFAULT (datetime('now'))
+    DeletedAt       TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS StagingSessions (
@@ -188,12 +203,29 @@ CREATE INDEX IF NOT EXISTS IX_Transactions_DedupHash ON Transactions(DedupHash);
 CREATE INDEX IF NOT EXISTS IX_Transactions_UpdatedAt ON Transactions(UpdatedAt);
 ```
 
-### 3.2 Idempotent Schema Upgrade Strategy (`DatabaseInitializer`)
-On startup, `DatabaseInitializer.InitializeAsync()` executes `schema.sql` and then runs `ApplyIdempotentSchemaMigrationsAsync()`:
-1. Inspects `pragma_table_info('Categories')`, `pragma_table_info('CategorizationRules')`, and `pragma_table_info('Transactions')`.
-2. Adds `UpdatedAt TEXT NOT NULL DEFAULT (datetime('now'))` (backfilled from `CreatedAt` where available) to `Categories`, `CategorizationRules`, and `Transactions` if missing on an older database.
-3. Adds `CategorizationSource` and `UploadBatchId` to `Transactions` if missing, backfilling `CategorizationSource` (`'Manual'`, `'Rule'`, or `'Uncategorized'`).
-4. Ensures `StagingSessions` exists and prunes expired staging sessions older than 24 hours.
+### 3.2 Canonical Seed Data & `DefaultTaxonomySeeded` Guard
+Both `deploy/schema.sql` and `DatabaseInitializer` share a single canonical seed specification:
+1. **Default Household Accounts (seeded when `Accounts` is empty):**
+   - `AccountId = 1`: `'Wells Fargo Household Checking'` (`Institution = 'WellsFargo'`, `AccountType = 'Checking'`)
+   - `AccountId = 2`: `'Chase Household Credit Card'` (`Institution = 'Chase'`, `AccountType = 'CreditCard'`)
+2. **Default Settings (`INSERT OR IGNORE INTO Settings`):**
+   - `PersistentMonthlyIncome = '10000.00'`, `GooglePayrollMatchPattern = 'GOOGLE'`, `CurrentMonthIncomeMode = 'Auto'`, `GeminiApiKey = ''`
+   - `BackupAutoMode = 'Coalesced'`, `BackupDebounceSeconds = '30'`, `BackupMinIntervalMinutes = '10'`, `MaxRetainedBackups = '15'`
+3. **One-Time Starter Categories (12) & Auto-Categorization Rules (15) Gated by `DefaultTaxonomySeeded`:**
+   - Starter categories (`Housing & Utilities`, `Groceries`, `Costco`, `Amazon`, `Target`, `Walmart`, `Dining & Coffee`, `Transportation & Gas`, `Subscriptions`, `Healthcare`, `Shopping & Household`, `Entertainment & Misc`) and 15 starter merchant rules (`COSTCO`, `AMZN`, `AMAZON`, `TARGET`, `WAL-MART`, `WALMART`, `WHOLEFDS`, `TRADER JOE`, `SAFEWAY`, `MORTGAGE`, `PG&E`, `CHEVRON`, `SHELL`, `NETFLIX`, `COFFEE`) are seeded **only** when `Settings` does not yet contain `Key = 'DefaultTaxonomySeeded'`.
+   - Immediately after initial seeding (or after `ResetAllDatabaseAsync` even when `ReseedDefaultCategoriesAndRules = false`), `('DefaultTaxonomySeeded', '1')` is recorded in `Settings` so subsequent server restarts never resurrect deleted default categories or rules.
+
+### 3.3 Idempotent Schema Upgrade & Startup Ordering Strategy (`DatabaseInitializer`)
+On startup, `DatabaseInitializer.InitializeAsync()` inspects whether legacy tables already exist:
+1. **Pre-Schema Migration on Existing Databases:** If `Transactions` or `Accounts` already exists in `sqlite_master`, `ApplyIdempotentSchemaMigrationsAsync()` executes **before** running `schema.sql` so that migrated columns (`UpdatedAt`, `CreatedAt`, `CategorizationSource`, `UploadBatchId`, `DeletedTransactionHashes.AccountId`) are added prior to creating `IX_Transactions_UpdatedAt` or other indexes.
+2. **Column Backfills & Table Normalization (`ApplyIdempotentSchemaMigrationsAsync`):**
+   - Ensures `StagingSessions` and `Settings` exist and prunes expired staging sessions older than 24 hours.
+   - Adds missing `CreatedAt` and/or `UpdatedAt` columns to `Accounts`, `Categories`, `CategorizationRules`, `IncomeOverrides`, and `Transactions`, backfilling from existing timestamps or `TransactionDate`.
+   - Adds missing `AccountId INTEGER NULL` to `DeletedTransactionHashes` and backfills `AccountId` from `DedupHash` or matching transactions where possible.
+   - Adds missing `CategorizationSource` and `UploadBatchId` to `Transactions`, backfilling `CategorizationSource` (`'Manual'`, `'Rule'`, or `'Uncategorized'`).
+   - Rebuilds `Accounts` under `PRAGMA foreign_keys = OFF` if a legacy v1 `CHECK (Institution IN ('Chase', 'WellsFargo'))` constraint is detected, allowing arbitrary institutions/account types.
+   - Rebuilds `Transactions` under `PRAGMA foreign_keys = OFF` if a legacy v1 `UploadBatches` foreign key is present and drops the obsolete `UploadBatches` table.
+   - Normalizes legacy `TransactionType` values (`'Payment'`, `'Transfer'`) to `'CreditCardPayoff'` and marks `DefaultTaxonomySeeded = '1'` on existing populated databases.
 
 ---
 
@@ -208,11 +240,12 @@ On startup, `DatabaseInitializer.InitializeAsync()` executes `schema.sql` and th
   3. **Cashflow & Sankey View** (`cashflowView.js`: `+ Add Category` button in header and triage panel, `Edit / Delete` button in tabular breakdown, and `+ Create New Category...` inside quick-categorize dropdowns).
   4. **Transaction Inspector** (`inspectorView.js`: `+ Add New Category...` option inside category dropdowns and the Categorize modal).
 - **Operations & Timestamp Tracking:**
-  - **Add Category (`POST /api/categories`):** Validates non-empty `Name` and `MonthlyBudget >= 0`. Sets `CreatedAt = datetime('now')`, `UpdatedAt = datetime('now')`, and triggers a `"category_create"` backup snapshot.
-  - **Edit Category (`PUT /api/categories/{id}`):** Updates `Name`, `IsBigBoxMerchantCategory`, `MonthlyBudget`, `SortOrder`, `ColorHex`, and sets `UpdatedAt = datetime('now')`. Triggers a `"category_update"` backup snapshot.
+  - **Add Category (`POST /api/categories`):** Validates non-empty `Name` and `MonthlyBudget >= 0`. Sets `CreatedAt = datetime('now')`, `UpdatedAt = datetime('now')`, and requests a `"category_create"` backup via `BackupService.RequestBackupAsync("category_create", isMajorOperation: false)`.
+  - **Edit Category (`PUT /api/categories/{id}`):** Updates `Name`, `IsBigBoxMerchantCategory`, `MonthlyBudget`, `SortOrder`, `ColorHex`, and sets `UpdatedAt = datetime('now')`. Requests a `"category_update"` backup via `BackupService.RequestBackupAsync("category_update", isMajorOperation: false)`.
   - **Delete Category (`DELETE /api/categories/{id}?replacementCategoryId={optionalId}`):**
     - If `replacementCategoryId` is provided: atomically reassigns all `Transactions` and `CategorizationRules` from `id` to `replacementCategoryId` (updating `UpdatedAt = datetime('now')` on the target category and affected rows), then deletes category `id`.
     - If `replacementCategoryId` is omitted: sets `CategoryId = NULL`, `CategorizationSource = 'Uncategorized'`, `IsCategoryManuallyLocked = 0`, and `UpdatedAt = datetime('now')` on affected `Transactions`, deletes rules tied to `id`, and deletes category `id`.
+    - Requests a `"category_delete"` major backup via `BackupService.RequestBackupAsync("category_delete", isMajorOperation: true)`.
 
 #### B. Expense Categorization / Recategorization with Forward & Historical Options
 Whenever a user or administrator assigns or changes the category of an expense:
@@ -226,7 +259,7 @@ Whenever a user or administrator assigns or changes the category of an expense:
 
 ---
 
-### 4.2 Unified List Management & Multi-Mode Sorting Specification (v2.2 $\rightarrow$ v2.4)
+### 4.2 Unified List Management & Multi-Mode Sorting Specification (v2.2 $\rightarrow$ v2.6)
 
 To make navigating categories, visualizations, budgets, rules, backups, and transaction lists fast and consistent on both mobile (iPhone) and desktop, the system provides a **Unified List Sorting Architecture** across every list in the application. All sort preferences are persisted in `state` and `localStorage` via `setSortPreference(stateKey, value)` so user choices survive view navigation and page reloads. In addition, expanded category drill-downs (`state.expandedCashflowCategories` and `state.expandedBudgetCategories`) remain open when changing sort modes or recategorizing items.
 
@@ -263,10 +296,10 @@ Every transaction list in the application shares the canonical `sortTransactions
 
 **Surfaces Powered by `sortTransactions`:**
 1. **Cashflow & Sankey — Expanded Category Transaction Lists (`cashflowView.js`, `state.cashflowTransactionSort`):**
-   - Controlled via the **`Sort Transactions:` (`#cashflowTxSortSelect`)** selector in the **Tabular Cashflow & Account Source Breakdown** header **and** the inline **`.cat-detail-tx-sort`** selector inside each expanded category row (`#cat_detail_{idx}`).
+   - Controlled via the **`Sort Transactions:` (`#cashflowTxSortSelect`)** selector in the **Tabular Cashflow Breakdown** header **and** the inline **`.cat-detail-tx-sort`** selector inside each expanded category row (`#cat_detail_{idx}`).
    - Expanding any category row shows its constituent transactions ordered by `state.cashflowTransactionSort` (with date, merchant, account, optional subcategory/notes, amount, and a `Recategorize` button). Changing either the table-level or inline sort selector immediately re-orders all expanded category transaction lists while keeping the expanded rows open.
 2. **Cashflow & Sankey — Uncategorized Expenses Triage (`cashflowView.js`, `state.triageSort`):**
-   - Controlled via **`Sort Triage:` (`#triageSortSelect`)**, supporting all standard transaction sort modes (`amount_desc`, `amount_asc`, `date_desc`, `date_asc`, `recent`, `alpha_asc`, `alpha_desc`) plus **`count_desc` (Most Frequent Merchant)** when grouped by merchant. Merchant groups can also be expanded inline to inspect individual charges sorted by `state.triageSort`.
+   - Controlled via **`Sort Triage:` (`#triageSortSelect`)**, supporting all standard transaction sort modes (`amount_desc`, `amount_asc`, `date_desc`, `date_asc`, `recent`, `alpha_asc`, `alpha_desc`) plus **`count_desc` (Most Frequent Merchant)** when grouped by merchant. Merchant groups can also be expanded inline (`state.expandedCashflowMerchants`) to inspect individual charges sorted by `state.triageSort`.
 3. **Monthly Budgets — Category Card Transaction Drill-Downs & Uncategorized Banner (`budgetsView.js`, `state.budgetsTransactionSort`):**
    - Controlled via **`Sort Transactions:` (`#budgetsTxSortSelect`)** in the Monthly Budgets toolbar **and** the inline **`.budget-drill-tx-sort`** selector inside each expanded category card (`#drill_{categoryId}`).
    - Applies to both the uncategorized expenses banner for the selected month and every category card's expandable transaction list, preserving open drill-downs across sort changes.
@@ -274,17 +307,17 @@ Every transaction list in the application shares the canonical `sortTransactions
    - Controlled via **`Sort Staged Rows:` (`#uploadTxSortSelect`)**, supporting **`status_priority` (Review / Collisions First — Default)** as well as `date_desc`, `date_asc`, `amount_desc`, `amount_asc`, `alpha_asc`, and `alpha_desc`, while preserving any in-progress user edits in the staging table.
 5. **Transaction Inspector (`inspectorView.js` & `GET /api/transactions`, `state.inspectorTransactionSort`):**
    - Controlled via **`Sort Transactions:` (`#fltSort`)**, persisted across sessions and evaluated in SQL (`ORDER BY`) across all matching pages.
-6. **Rule Back-Propagation Dry-Run Preview (`topologyView.js`):**
-   - Controlled via **`#backPropSortSelect`** inside the dry-run preview panel so the Administrator can sort proposed historical rule changes by `date_desc`, `amount_desc`, `alpha_asc`, or ` category_asc` before committing.
+6. **Rule Back-Propagation Dry-Run Preview (`topologyView.js`, `state.backPropSort`):**
+   - Controlled via **`#backPropSortSelect`** inside the dry-run preview panel so the Administrator can sort proposed historical rule changes by `date_desc`, `amount_desc`, `alpha_asc`, or `category_asc` before committing.
 
 #### C. Cashflow Sankey Visualization & Category Breakdown Sorting (`cashflowView.js` & `sankeyChart.js`)
-On the **Cashflow & Sankey Visualization** page, the **`Sort Categories:` (`#cashflowCatSortSelect`)** selector in the page toolbar controls the vertical ordering of **both** the **Sankey Diagram Category Nodes (Column 2) & Subcategory Nodes (Column 3)** and the **Tabular Cashflow Breakdown category rows**:
+The Sankey graph is organized into a 3-to-4-column flow: **Column 1 (`Household Income` / `Spending Outrun`) $\rightarrow$ Column 2 (`Total Spending` / `Net Savings`) $\rightarrow$ Column 3 (`Spending Categories`) $\rightarrow$ Column 4 (`Subcategories`, when enabled)**. On the **Cashflow & Sankey Visualization** page, the **`Sort Categories:` (`#cashflowCatSortSelect`)** selector in the page toolbar controls the vertical ordering of **both** the **Sankey Diagram Category Nodes (Column 3) & Subcategory Nodes (Column 4)** and the **Tabular Cashflow Breakdown category rows**:
 
 | Sort Mode Key | Label | Ordering Logic in Sankey & Table |
 | :--- | :--- | :--- |
 | `spend_desc` *(Default)* | **Highest Spend ($)** | `NetSpend DESC, CategoryName ASC` — largest spending flows appear at the top of the Sankey diagram and table. |
 | `spend_asc` | **Lowest Spend ($)** | `NetSpend ASC, CategoryName ASC` — smallest positive spending flows appear first. |
-| `alpha_asc` | **Alphabetical (A $\rightarrow$ Z)** | `CategoryName ASC` (with `Uncategorized` pinned at the bottom of the category list so named categories stay strictly A $\rightarrow$ Z). Subcategory nodes in Column 3 also sort alphabetically within each category. |
+| `alpha_asc` | **Alphabetical (A $\rightarrow$ Z)** | `CategoryName ASC` (with `Uncategorized` pinned at the bottom of the category list so named categories stay strictly A $\rightarrow$ Z). Subcategory nodes in Column 4 also sort alphabetically within each category. |
 | `alpha_desc` | **Alphabetical (Z $\rightarrow$ A)** | `CategoryName DESC` (with `Uncategorized` pinned at the bottom). |
 | `recent` | **Recent Changes** | Ordered by `LastActivityAt DESC` (the latest `UpdatedAt` across the category and its transactions in the window), surfacing categories that were recently recategorized or modified at the top of the visualization and table. |
 | `custom_order` | **Custom Order** | Ordered by `Categories.SortOrder ASC, CategoryName ASC`. |
@@ -326,16 +359,16 @@ In the **Monthly Budgets** header, **`Sort Categories:` (`#budgetsSortSelect`)**
 #### B. Deduplication & Immutable Provenance (`DedupHash`)
 - **Base Fingerprint:** `ComputeBaseHash(accountId, isoDate, rawDesc, normalizedAmt)` computes the first 24 hex characters of `SHA256("{accountId}|{isoDate}|{rawDesc.Trim().ToUpperInvariant()}|{Math.Abs(normalizedAmt):F2}")`.
 - **Immutability Across Edits:** Subsequent edits to `TransactionDate`, `Amount`, `CleanMerchantName`, `TransactionType`, `CategoryId`, `Subcategory`, or `Notes` via the Transaction Inspector update `UpdatedAt = datetime('now')` but do **not** overwrite `DedupHash`.
-- **Tombstone Protection on Splits & Deletes:** Deleting a transaction (or a split child leg) with `addToTombstone = true` records both the row's `DedupHash` and its base hash (stripping any `_SPLIT_n` suffix) in `DeletedTransactionHashes`.
+- **Account-Scoped Tombstone Protection on Splits & Deletes:** Deleting a transaction (or a split child leg) with `addToTombstone = true`, or skipping a staged row with `SkipAndRemember`, records `DedupHash` (and its base hash stripped of any `_SPLIT_n` suffix) together with `AccountId` in `DeletedTransactionHashes`.
 
 ---
 
-### 4.4 Smart Coalesced SQLite Backup Policy & Admin Backup Management (New in v2.3)
+### 4.4 Smart Coalesced SQLite Backup Policy & Admin Backup Management (v2.3 $\rightarrow$ v2.6)
 
 #### A. Root Cause of Excessive Backups & Policy Architecture
 In v2.0–v2.2, every single mutation endpoint invoked `CreateSnapshotImmediateAsync()` synchronously. During normal interactive sessions—such as triaging 15 uncategorized expenses, adjusting several monthly category budgets, or editing a transaction with inline rule creation and back-propagation—this produced dozens of back-to-back full-database `VACUUM INTO` copies within minutes.
 
-To prevent backup sprawl while preserving strong local data safety, `BackupService` in v2.3 introduces a **Tiered & Coalesced Backup Policy** controlled via `Settings` and manageable at runtime in the Admin Panel:
+To prevent backup sprawl while preserving strong local data safety, `BackupService` introduces a **Tiered & Coalesced Backup Policy** controlled via `Settings` and manageable at runtime in the Admin Panel:
 
 | Setting Key | Default | Range / Options | Description |
 | :--- | :--- | :--- | :--- |
@@ -346,19 +379,19 @@ To prevent backup sprawl while preserving strong local data safety, `BackupServi
 
 #### B. Behavior of `BackupAutoMode` Modes (`BackupService.RequestBackupAsync`)
 1. **`'Coalesced'` *(Default — Smart Debounce + Cooldown)*:**
-   - **Major / Bulk Operations (`isMajorOperation = true`: `csv_upload`, `category_delete`, `category_merge`, `bulk_delete`):**
+   - **Major / Bulk Operations (`isMajorOperation = true`: `csv_upload`, `category_delete`, `category_merge`, `transaction_split`, `bulk_delete`):**
      - Cancels any pending debounce timer (since an immediate snapshot captures all prior uncommitted backup state). If outside `BackupMinIntervalMinutes`, executes `VACUUM INTO` immediately; if inside the cooldown window, schedules a single trailing snapshot at the end of the cooldown.
-   - **Routine Interactive Edits (`isMajorOperation = false`: `recategorize`, `category_create`, `category_update`, `budget_edit`, `rule_create`, `rule_update`, `rule_delete`, `data_edit`, `transaction_delete`, `settings_update`, `account_create`, `income_override`):**
+   - **Routine Interactive Edits (`isMajorOperation = false`: `recategorize`, `category_create`, `category_update`, `budget_edit`, `rule_create`, `rule_update`, `rule_delete`, `backprop`, `data_edit`, `transaction_delete`, `settings_update`, `account_create`, `income_override`, `income_override_delete`):**
      - Increments the in-memory pending change counter (`PendingChangesCount`), records the trigger reason, and resets the sliding debounce timer (`max(BackupDebounceSeconds, remainingCooldown)`).
      - Once the quiet window elapses, writes **one** consolidated snapshot named `budget_<timestamp>_coalesced_<N>changes.db`.
-2. **`'MajorOnly'` *(CSV Imports, Category Deletes/Merges & Bulk Deletes Only)*:**
-   - Routine single-row edits (`isMajorOperation = false`) do **not** create or schedule snapshots. Only major operations (`csv_upload`, `category_delete`, `category_merge`, `bulk_delete`) trigger automatic snapshots (respecting `BackupMinIntervalMinutes`).
+2. **`'MajorOnly'` *(CSV Imports, Category Deletes/Merges, Transaction Splits & Bulk Deletes Only)*:**
+   - Routine single-row edits (`isMajorOperation = false`) do **not** create or schedule snapshots. Only major operations (`isMajorOperation = true`) trigger automatic snapshots (respecting `BackupMinIntervalMinutes`).
 3. **`'ManualOnly'` *(Disable Automatic Backups)*:**
-   - Automatic backups are disabled across all endpoints. Snapshots are only created when the Administrator clicks **Create Manual Snapshot Now** or automatically before an in-app database restore (`pre_restore`).
+   - Automatic backups are disabled across all endpoints (`RequestBackupAsync` returns `null`). Snapshots are only created when the Administrator clicks **Create Manual Snapshot Now** or explicitly requests a pre-operation safety snapshot before Restore, Clear History, or Reset All.
 4. **`'EveryChange'` *(Legacy Immediate Mode)*:**
    - Creates an immediate snapshot on each top-level mutation (while suppressing duplicate nested snapshots inside composite operations such as `UpdateTransactionAsync` with rule creation + back-propagation).
 
-#### C. Admin Panel Backup, Restore & Transaction History Management (`topologyView.js` Section 4 & `inspectorView.js`)
+#### C. Admin Panel Backup, Restore, Clear History & Reset All Contract (`topologyView.js` Section 4 & `inspectorView.js`)
 The **Local SQLite Backup, Restore & Database Management** card in the Admin Panel (`Categories, Rules, Income & Backups`) and the **Transaction Inspector** header provide end-to-end control over backup policies, storage, retention, recovery, and transaction history reset:
 1. **Storage & Queue Telemetry Bar:**
    - Displays **Total Snapshots (`N / MaxRetained`)**, **Total Disk Usage (`KB / MB`)**, **Latest Snapshot Timestamp**, and **Pending Coalesced Changes (`N` queued edits)** with a one-click **"Flush Pending Now"** button.
@@ -372,19 +405,23 @@ The **Local SQLite Backup, Restore & Database Management** card in the Admin Pan
      - **Restore from Local Snapshot:** Select any snapshot from `Backups/` (pre-selected when launched from a row).
      - **Upload & Restore External `.db` Snapshot:** Upload a `.db` file previously downloaded to the user's computer or Google Drive (`POST /api/backups/restore-upload`), which saves the file into `Backups/`, verifies its SQLite integrity, and restores it.
    - Both restore workflows include a pre-checked option to **create an automatic `pre_restore` safety backup** of the current live database first.
-   - The backend verifies the target snapshot file is non-empty and passes `PRAGMA integrity_check;`, creates the optional `pre_restore` snapshot, uses `SqliteConnection.BackupDatabase` to atomically copy the snapshot into the live `budget.db`, and runs `DatabaseInitializer.ApplyIdempotentSchemaMigrationsAsync` so even older snapshots upgrade cleanly to the current schema.
+   - The backend verifies the target snapshot file is non-empty and passes `PRAGMA integrity_check;`, creates the optional `pre_restore` snapshot (aborting if requested and snapshot creation fails), uses `SqliteConnection.BackupDatabase` to atomically copy the snapshot into the live `budget.db`, and runs `DatabaseInitializer.ApplyIdempotentSchemaMigrationsAsync` so even older snapshots upgrade cleanly to the current schema.
 5. **Clear Transaction History with Pre-Clear Backup (`POST /api/transactions/clear-history`):**
    - Available from both the **Admin Panel (Section 4)** and the **Transaction Inspector** header via the **`🗑 Clear Transaction History...`** button (`openClearTransactionHistoryModal`).
    - Designed for rapid iteration on category topology, rules, and CSV parsing without losing configured `Categories`, `CategorizationRules`, `Accounts`, `MonthlyBudget` targets, or `Settings` / `IncomeOverrides`.
    - Presents an interactive modal with:
      - **Scope Selector:** Clear **All Accounts (Full Transaction History)** or only transactions belonging to a **Specific Account**.
-     - **`[x] Create a database backup snapshot ("pre_clear_history") before clearing`** *(Checked by default)*: Immediately writes a verified SQLite snapshot before deleting any rows so the user can restore with one click.
-     - **`[x] Also reset deleted transaction tombstones (DeletedTransactionHashes)`** *(Checked by default)*: Clears tombstone hashes so previously deleted transactions do not block re-importing the same CSV files.
-     - **`[x] Clear uncommitted CSV upload staging sessions (StagingSessions)`** *(Checked by default)*.
+     - **`[x] Create a database backup snapshot ("pre_clear_history") before clearing`** *(Checked by default)*: Immediately writes a verified SQLite snapshot before deleting any rows; if snapshot creation fails, the operation aborts before deleting data.
+     - **`[x] Also reset deleted transaction tombstones (DeletedTransactionHashes)`** *(Checked by default)*: Clears tombstone hashes (scoped to `AccountId` when a single account is selected, or all tombstones when clearing all accounts) so previously deleted transactions do not block re-importing CSV files.
+     - **`[x] Clear uncommitted CSV upload staging sessions (StagingSessions)`** *(Checked by default, scoped to `AccountId` when selected)*.
 6. **Reset All Information — Start from Clean History (`POST /api/admin/reset-all`):**
-   - Available in the **Admin Panel (Section 4)** via the **`⚠️ Reset All Information...`** button (`openResetAllDatabaseModal`).
-   - Provides a complete clean-slate factory reset of all live SQLite tables (`Transactions`, `DeletedTransactionHashes`, `StagingSessions`, `IncomeOverrides`, `CategorizationRules`, `Categories`, `Accounts`, and `Settings`), re-seeding the default household accounts and settings (and optionally the starter categories and auto-categorization rules).
-   - **Strict Backup Preservation Guarantee:** Resetting all live database information **never deletes or modifies any backup `.db` files** in `Backups/`.
+   - Available in the **Admin Panel (Section 4)** and the **Transaction Inspector** header via the **`⚠️ Reset All Information...`** button (`openResetAllDatabaseModal`).
+   - Executes under `BackupService.ExecuteExclusiveLifecycleActionAsync` (canceling any pending debounce timer and holding the backup/lifecycle mutex) and uses `DatabaseInitializer.RecreateCleanSchemaAsync` to drop all user tables (including any legacy `UploadBatches` table) under `PRAGMA foreign_keys = OFF` and recreate a clean v2.6 schema.
+   - **Strict Backup & Policy Preservation Guarantee:**
+     - Resetting all live database information **never deletes or modifies any backup `.db` files** in `Backups/`.
+     - Preserves the user's configured backup policy settings (`BackupAutoMode`, `BackupDebounceSeconds`, `BackupMinIntervalMinutes`, `MaxRetainedBackups`) across the reset so subsequent snapshots never prune existing backup files back down to `15`.
+     - If `CreateBackupFirst = true` and the `"pre_reset_all"` safety snapshot fails, the reset aborts immediately without modifying the database.
+     - Records `('DefaultTaxonomySeeded', '1')` in `Settings` regardless of whether `ReseedDefaultCategoriesAndRules` is checked or unchecked, ensuring a clean zero-category reset stays empty across future application restarts.
    - Presents a dedicated confirmation modal with:
      - **`[x] Back up database before resetting ("pre_reset_all" snapshot)`** *(Checked by default)*.
      - **`[x] Re-seed default starter Categories (12) & Auto-Categorization Rules (15)`** *(Checked by default; unchecking starts with 0 categories and 0 rules)*.
@@ -392,7 +429,7 @@ The **Local SQLite Backup, Restore & Database Management** card in the Admin Pan
 
 ---
 
-## 5. Updated API Contract Summary (v2.5)
+## 5. Updated API Contract Summary (v2.6)
 
 | Method & Route | Persona | Description | Backup Behavior (`Coalesced` Default) |
 | :--- | :--- | :--- | :--- |
@@ -418,8 +455,8 @@ The **Local SQLite Backup, Restore & Database Management** card in the Admin Pan
 | `POST /api/transactions/{id}/split` | Admin | Split a transaction into multiple categorized child legs. | **Major** (`transaction_split`) |
 | `DELETE /api/transactions/{id}` | Admin | Delete an income or expense transaction (with `?addToTombstone=true/false`). | Coalesced (`transaction_delete`) |
 | `POST /api/transactions/bulk-delete` | Admin | Bulk-delete selected income/expense transactions in one atomic transaction. | **Major** (`bulk_delete`) |
-| `POST /api/transactions/clear-history` | Admin | Clear all transactions (or a single account's transactions), optionally resetting `DeletedTransactionHashes` and `StagingSessions`, with an optional pre-clear backup (`createBackupFirst = true`). | **Immediate Pre-Clear** (`pre_clear_history`) |
-| `POST /api/admin/reset-all` | Admin | Reset all live database tables to a clean state (optionally creating a `pre_reset_all` snapshot first and optionally re-seeding default starter categories/rules) while preserving all backup databases in `Backups/`. | **Immediate Pre-Reset** (`pre_reset_all`) |
+| `POST /api/transactions/clear-history` | Admin | Clear all transactions (or a single account's transactions), optionally resetting account-scoped `DeletedTransactionHashes` and `StagingSessions`, with an optional pre-clear backup (`createBackupFirst = true`). | **Immediate Pre-Clear** (`pre_clear_history`) |
+| `POST /api/admin/reset-all` | Admin | Reset all live database tables to a clean state (optionally creating a `pre_reset_all` snapshot first and optionally re-seeding default starter categories/rules) while preserving all backup databases and backup retention policy. | **Immediate Pre-Reset** (`pre_reset_all`) |
 | `GET /api/cashflow` | Both | Returns cashflow summary, Sankey nodes/links, `uncategorizedTransactions`, and `?categorySort=` ordering. | None |
 | `GET /api/budgets/{yearMonth?}` | Both | Returns monthly budget summary, category progress cards, and uncategorized transactions for the month. | None |
 | `GET /api/settings` | Both | Returns income configuration and monthly overrides. | None |
@@ -476,21 +513,24 @@ The **Local SQLite Backup, Restore & Database Management** card in the Admin Pan
 | ⚠️ Uncategorized Expenses Triage (4 items • $277.30)                  |
 | View: [ Group by Merchant (3) ] [ List (4) ]   Sort: [ Highest $ ▼ ]  |
 |-----------------------------------------------------------------------|
-| CITY WATER UTILITY (1 charge • Mar 11)     | $137.51 | [ Categorize ] |
-| COSTCO GAS (2 charges • Mar 11 – Mar 18)   | $124.80 | [ Categorize ] |
-| APPLE.COM/BILL (1 charge • Mar 15)         |  $14.99 | [ Categorize ] |
+| ▸ CITY WATER UTILITY (1 charge • Mar 11)   | $137.51 | [ Categorize ] |
+| ▾ COSTCO GAS (2 charges • Mar 11 – Mar 18) | $124.80 | [ Categorize ] |
+|   • 2026-03-18 COSTCO GAS #042 (Chase Household Credit Card)   $64.80 |
+|   • 2026-03-11 COSTCO GAS #042 (Chase Household Credit Card)   $60.00 |
+| ▸ APPLE.COM/BILL (1 charge • Mar 15)       |  $14.99 | [ Categorize ] |
 +-----------------------------------------------------------------------+
 | Tabular Cashflow Breakdown                                            |
 | Sort Category Rows: [ Highest Spend ▼ ]  Sort Tx: [ Newest Date ▼ ]   |
-| Account Spend Summary: [ Wells Fargo Checking: $3,200 ] [ Chase: $980]|
+| Account Spend in Window:                                              |
+| [ Wells Fargo Household Checking: $3,200 ] [ Chase Household CC: $980]|
 |-----------------------------------------------------------------------|
 | Category                 | Net Spend | % Spend | % Income | Manage    |
 |-----------------------------------------------------------------------|
 | ▾ ● Groceries (6)        |   $542.18 |   28.4% |     5.4% | [ Edit ]  |
 |   +---------------------------------------------------------------+   |
-|   | 6 Transactions • Account Breakdown: Chase Credit Card: $542.18|   |
-|   | 2026-03-14 • TRADER JOE'S (Chase Credit Card) | $142.80 |[Rec]|   |
-|   | 2026-03-08 • WHOLE FOODS (Chase Credit Card)  |  $98.40 |[Rec]|   |
+|   | 6 Transactions (Chase Household Credit Card: $542.18)         |   |
+|   | 2026-03-14 • TRADER JOE'S (Chase Household CC) | $142.80|[Rec]|   |
+|   | 2026-03-08 • WHOLE FOODS (Chase Household CC)  |  $98.40|[Rec]|   |
 |   +---------------------------------------------------------------+   |
 +-----------------------------------------------------------------------+
 ```
@@ -563,5 +603,24 @@ The **Local SQLite Backup, Restore & Database Management** card in the Admin Pan
 |                      [ Cancel ]  [ Backup & Reset All Information ]   |
 +-----------------------------------------------------------------------+
 ```
+
+---
+
+## 7. Trust Model, Error Handling & Verification Strategy
+
+### 7.1 Household LAN Trust Model & Persona Boundaries
+- **Network Boundary:** The service is deployed on a trusted home PC behind a Windows Defender Firewall rule restricting TCP port `8080` to `LocalSubnet` (`Private` network profile).
+- **Ergonomic Personas:** Because only household members on the local Wi-Fi/LAN can reach the application, endpoints do not require user authentication tokens. Instead, destructive administrative actions (`Reset All Information`, `Clear Transaction History`, `Restore Database`, `Bulk Delete`) enforce multi-step confirmation modals and pre-checked SQLite safety snapshots (`pre_reset_all`, `pre_clear_history`, `pre_restore`).
+
+### 7.2 Error Handling & Diagnostic Reporting Contract
+- **Structured Problem Details (`Results.Problem` / `{ error }`):** Endpoints performing database mutations or administrative operations catch `InvalidOperationException` and `SqliteException`, log full diagnostic context on the server, and return structured JSON (`{ error }` or RFC 7807 `ProblemDetails` with `detail` and `title`).
+- **Frontend `apiFetch` Extraction (`app.js`):** The client `apiFetch` wrapper parses `errObj.error || errObj.detail || errObj.title` from non-2xx JSON responses and displays actionable error messages in toast notifications so database or validation errors are immediately visible.
+
+### 7.3 Automated Verification & Upgrade Testing Strategy
+1. **Frontend Module & Contract Verification (`node tests/frontend_verification.mjs`):**
+   - Verifies ES6 syntax (`node --check`) across all frontend modules (`app.js`, `sankeyChart.js`, and all view modules), validates sorting algorithms (`sortCategories`, `sortTransactions`), verifies XSS escaping (`escapeHtml`), and asserts that all required modal and toolbar element IDs (`#resetAllDatabaseAdminBtn`, `#clearHistoryAdminBtn`, `#restoreDatabaseModalBtn`, `#backPropSortSelect`, etc.) are mounted.
+2. **Backend Integration & Schema Upgrade Verification (`tests/HomeBudget.Tests`):**
+   - Covers legacy v1/v2.0 database migration (`ApplyIdempotentSchemaMigrationsAsync`, including `UploadBatches` FK removal, `Accounts` `CHECK` removal, and `DeletedTransactionHashes.AccountId`), CSV ingestion & provenance immutability, coalesced backup scheduling/pruning, verified restore, account-scoped Clear History, and Reset All Information (both with and without default re-seeding, verifying backup retention policy preservation and non-resurrection across restarts).
+
 
 

@@ -601,32 +601,81 @@ export async function renderTopologyView(container) {
       return;
     }
 
-    previewMount.innerHTML = `
-      <div style="padding:14px;margin-bottom:14px;background:#EFF6FF;border:1px solid #BFDBFE;border-radius:10px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-          <strong>Dry-Run Preview: ${res.affectedTransactionsCount} of ${res.evaluatedCount} historical transactions will be updated</strong>
-          <button class="btn btn-primary btn-sm" id="commitBackPropBtn">Commit Back-Propagation &amp; Backup</button>
-        </div>
-        <div style="max-height:200px;overflow-y:auto;font-size:12px;">
-          ${res.changes.map(ch => `
-            <div style="padding:4px 0;border-bottom:1px dashed #CBD5E1;">
-              ${escapeHtml(ch.transactionDate)} &bull; <strong>${escapeHtml(ch.rawDescription)}</strong> (${formatCurrency(ch.amount)}):
-              <span style="color:#64748B;">${escapeHtml(ch.oldCategoryName)}</span> &rarr;
-              <strong style="color:#2563EB;">${escapeHtml(ch.newCategoryName)}</strong> (Rule: <code>${escapeHtml(ch.matchedRulePattern)}</code>)
-            </div>
-          `).join('')}
-        </div>
-      </div>
-    `;
-
-    previewMount.querySelector('#commitBackPropBtn').onclick = async () => {
-      const committed = await apiFetch('/api/rules/back-propagate', {
-        method: 'POST',
-        body: JSON.stringify({ includeManuallyLocked: false, dryRun: false })
+    const sortBackPropChanges = (changes, sortMode) => {
+      const list = Array.isArray(changes) ? [...changes] : [];
+      return list.sort((a, b) => {
+        switch (sortMode) {
+          case 'amount_desc': {
+            const diff = Math.abs(Number(b.amount || 0)) - Math.abs(Number(a.amount || 0));
+            if (diff !== 0) return diff;
+            return String(b.transactionDate || '').localeCompare(String(a.transactionDate || ''));
+          }
+          case 'alpha_asc':
+            return String(a.rawDescription || '').localeCompare(String(b.rawDescription || ''), undefined, { sensitivity: 'base' });
+          case 'category_asc': {
+            const catDiff = String(a.newCategoryName || '').localeCompare(String(b.newCategoryName || ''), undefined, { sensitivity: 'base' });
+            if (catDiff !== 0) return catDiff;
+            return String(b.transactionDate || '').localeCompare(String(a.transactionDate || ''));
+          }
+          case 'date_desc':
+          default:
+            return String(b.transactionDate || '').localeCompare(String(a.transactionDate || ''));
+        }
       });
-      showToast(`Back-propagated ${committed.affectedTransactionsCount} transactions • ${formatBackupStatus(committed.backupFileCreated)}`);
-      renderTopologyView(container);
     };
+
+    const renderBackPropPreview = () => {
+      const currentSort = state.backPropSort || 'date_desc';
+      const sortedChanges = sortBackPropChanges(res.changes, currentSort);
+
+      previewMount.innerHTML = `
+        <div style="padding:14px;margin-bottom:14px;background:#EFF6FF;border:1px solid #BFDBFE;border-radius:10px;">
+          <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px;">
+            <strong>Dry-Run Preview: ${res.affectedTransactionsCount} of ${res.evaluatedCount} historical transactions will be updated</strong>
+            <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;">
+              <label style="font-size:12px;font-weight:700;color:#475569;display:inline-flex;align-items:center;gap:6px;">
+                Sort Preview:
+                <select id="backPropSortSelect" class="select-control" style="font-size:12px;padding:3px 6px;">
+                  <option value="date_desc" ${currentSort === 'date_desc' ? 'selected' : ''}>Newest Date</option>
+                  <option value="amount_desc" ${currentSort === 'amount_desc' ? 'selected' : ''}>Highest Amount ($)</option>
+                  <option value="alpha_asc" ${currentSort === 'alpha_asc' ? 'selected' : ''}>Merchant (A-Z)</option>
+                  <option value="category_asc" ${currentSort === 'category_asc' ? 'selected' : ''}>New Category (A-Z)</option>
+                </select>
+              </label>
+              <button class="btn btn-primary btn-sm" id="commitBackPropBtn">Commit Back-Propagation &amp; Backup</button>
+            </div>
+          </div>
+          <div style="max-height:200px;overflow-y:auto;font-size:12px;">
+            ${sortedChanges.map(ch => `
+              <div style="padding:4px 0;border-bottom:1px dashed #CBD5E1;">
+                ${escapeHtml(ch.transactionDate)} &bull; <strong>${escapeHtml(ch.rawDescription)}</strong> (${formatCurrency(ch.amount)}):
+                <span style="color:#64748B;">${escapeHtml(ch.oldCategoryName)}</span> &rarr;
+                <strong style="color:#2563EB;">${escapeHtml(ch.newCategoryName)}</strong> (Rule: <code>${escapeHtml(ch.matchedRulePattern)}</code>)
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
+
+      const sortSel = previewMount.querySelector('#backPropSortSelect');
+      if (sortSel) {
+        sortSel.onchange = (e) => {
+          setSortPreference('backPropSort', e.target.value);
+          renderBackPropPreview();
+        };
+      }
+
+      previewMount.querySelector('#commitBackPropBtn').onclick = async () => {
+        const committed = await apiFetch('/api/rules/back-propagate', {
+          method: 'POST',
+          body: JSON.stringify({ includeManuallyLocked: false, dryRun: false })
+        });
+        showToast(`Back-propagated ${committed.affectedTransactionsCount} transactions • ${formatBackupStatus(committed.backupFileCreated)}`);
+        renderTopologyView(container);
+      };
+    };
+
+    renderBackPropPreview();
   };
 
   // Save Income Settings

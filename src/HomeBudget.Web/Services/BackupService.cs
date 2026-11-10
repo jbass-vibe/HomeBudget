@@ -449,6 +449,10 @@ public sealed class BackupService
         if (createPreRestoreBackup && File.Exists(_connectionFactory.DatabasePath))
         {
             preRestoreFile = await CreateSnapshotImmediateAsync("pre_restore", ct);
+            if (string.IsNullOrWhiteSpace(preRestoreFile))
+            {
+                throw new InvalidOperationException("Pre-restore safety backup creation failed. Aborting database restore to protect your live data.");
+            }
         }
 
         // 3. Perform online SQLite page backup from snapshot into the live database
@@ -482,6 +486,24 @@ public sealed class BackupService
         }
         finally
         {
+            _mutex.Release();
+        }
+    }
+
+    public async Task<T> ExecuteExclusiveLifecycleActionAsync<T>(
+        Func<CancellationToken, Task<T>> action,
+        CancellationToken ct = default)
+    {
+        await _mutex.WaitAsync(ct);
+        try
+        {
+            CancelPendingSchedule();
+            _cachedPolicy = null;
+            return await action(ct);
+        }
+        finally
+        {
+            _cachedPolicy = null;
             _mutex.Release();
         }
     }
