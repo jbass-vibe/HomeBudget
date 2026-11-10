@@ -576,10 +576,19 @@ app.MapPost("/api/transactions/clear-history", async (
 app.MapPost("/api/admin/reset-all", async (
     ResetAllDatabaseRequest? req,
     CategorizationService catService,
+    ILogger<CategorizationService> logger,
     CancellationToken ct) =>
 {
-    var result = await catService.ResetAllDatabaseAsync(req ?? new ResetAllDatabaseRequest(), ct);
-    return Results.Ok(result);
+    try
+    {
+        var result = await catService.ResetAllDatabaseAsync(req ?? new ResetAllDatabaseRequest(), ct);
+        return Results.Ok(result);
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to reset database: {Message}", ex.Message);
+        return Results.Problem(detail: ex.Message, title: "Database Reset Error", statusCode: StatusCodes.Status500InternalServerError);
+    }
 });
 
 

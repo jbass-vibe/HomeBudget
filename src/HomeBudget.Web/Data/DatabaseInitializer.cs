@@ -38,8 +38,8 @@ public sealed class DatabaseInitializer(
         int ruleCount = await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM CategorizationRules;");
         if (ruleCount == 0)
         {
-            var catMap = (await conn.QueryAsync<(int CategoryId, string Name)>("SELECT CategoryId, Name FROM Categories;"))
-                .ToDictionary(x => x.Name, x => x.CategoryId, StringComparer.OrdinalIgnoreCase);
+            var categories = await conn.QueryAsync<HomeBudget.Web.Models.Category>("SELECT CategoryId, Name FROM Categories;");
+            var catMap = categories.ToDictionary(x => x.Name, x => x.CategoryId, StringComparer.OrdinalIgnoreCase);
 
             async Task AddDefaultRule(string pattern, string catName, int priority)
             {
