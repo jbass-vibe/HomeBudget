@@ -9,7 +9,9 @@ import {
   showToast,
   openModal,
   closeModal,
-  openCategorizeExpenseModal
+  openCategorizeExpenseModal,
+  openClearTransactionHistoryModal,
+  openResetAllDatabaseModal
 } from '../app.js';
 
 const filterState = {
@@ -33,6 +35,14 @@ export async function renderInspectorView(container) {
       <div>
         <h1 class="page-title">Transaction Inspector (Income &amp; Expenses)</h1>
         <p class="page-subtitle">Filter, recategorize with forward/past automation, edit fields &amp; notes, split, or delete income and expense entries</p>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+        <button class="btn btn-outline btn-sm" id="clearHistoryInspectorBtn" style="border-color:#DC2626;color:#DC2626;">
+          &#128465; Clear Transaction History...
+        </button>
+        <button class="btn btn-danger btn-sm" id="resetAllInspectorBtn">
+          &#9888;&#65039; Reset All Information...
+        </button>
       </div>
     </div>
 
@@ -165,6 +175,13 @@ export async function renderInspectorView(container) {
   if (clearHistoryBtn) {
     clearHistoryBtn.onclick = () => {
       openClearTransactionHistoryModal(() => renderInspectorView(container));
+    };
+  }
+
+  const resetAllBtn = container.querySelector('#resetAllInspectorBtn');
+  if (resetAllBtn) {
+    resetAllBtn.onclick = () => {
+      openResetAllDatabaseModal(() => renderInspectorView(container));
     };
   }
 

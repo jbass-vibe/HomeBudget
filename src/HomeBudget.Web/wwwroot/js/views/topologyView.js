@@ -12,6 +12,7 @@ import {
   refreshReferenceData,
   openCategoryManagerModal,
   openClearTransactionHistoryModal,
+  openResetAllDatabaseModal,
   openRestoreDatabaseModal
 } from '../app.js';
 
@@ -248,21 +249,30 @@ export async function renderTopologyView(container) {
       </div>
     </div>
 
-    <!-- 4. Local SQLite Backup Management & Retention Policy -->
+    <!-- 4. Local SQLite Backup, Restore & Database Management -->
     <div class="card-panel">
       <div class="toolbar-row" style="margin-bottom:14px;">
         <div>
-          <h2 style="margin:0;font-size:17px;font-weight:800;">4. Local SQLite Backup Management &amp; Retention Policy</h2>
+          <h2 style="margin:0;font-size:17px;font-weight:800;">4. Local SQLite Backup, Restore &amp; Database Management</h2>
           <p style="margin:2px 0 0 0;font-size:12px;color:#64748B;">
             Path: <code>${escapeHtml(backupInfo.backupDirectoryPath)}</code> &bull; Smart Coalesced Policy prevents excessive backup churn during rapid edits
           </p>
         </div>
-        <div style="display:flex;gap:8px;align-items:center;">
+        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
           ${backupStatus.pendingChangesCount > 0 ? `
             <button class="btn btn-outline btn-sm" id="flushPendingBackupBtn" style="border-color:#2563EB;color:#1D4ED8;">
               &#9201; Flush ${backupStatus.pendingChangesCount} Pending Edit(s) Now
             </button>
           ` : ''}
+          <button class="btn btn-outline btn-sm" id="clearHistoryAdminBtn" style="border-color:#DC2626;color:#DC2626;">
+            &#128465; Clear Transaction History...
+          </button>
+          <button class="btn btn-danger btn-sm" id="resetAllDatabaseAdminBtn">
+            &#9888;&#65039; Reset All Information...
+          </button>
+          <button class="btn btn-outline btn-sm" id="restoreDatabaseModalBtn" style="border-color:#D97706;color:#B45309;">
+            &#8634; Restore Database...
+          </button>
           <button class="btn btn-primary btn-sm" id="manualBackupBtn">+ Create Manual Snapshot Now</button>
         </div>
       </div>

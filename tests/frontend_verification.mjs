@@ -133,6 +133,26 @@ assert.ok(
   'cashflowView.js must keep per-account spend breakdown inside expanded category rows'
 );
 assert.ok(
+  topologySource.includes('id="resetAllDatabaseAdminBtn"'),
+  'topologyView.js HTML template must contain #resetAllDatabaseAdminBtn button'
+);
+assert.ok(
+  topologySource.includes('id="clearHistoryAdminBtn"'),
+  'topologyView.js HTML template must contain #clearHistoryAdminBtn button'
+);
+assert.ok(
+  topologySource.includes('id="restoreDatabaseModalBtn"'),
+  'topologyView.js HTML template must contain #restoreDatabaseModalBtn button'
+);
+assert.ok(
+  inspectorSource.includes('id="resetAllInspectorBtn"'),
+  'inspectorView.js HTML template must contain #resetAllInspectorBtn button'
+);
+assert.ok(
+  inspectorSource.includes('id="clearHistoryInspectorBtn"'),
+  'inspectorView.js HTML template must contain #clearHistoryInspectorBtn button'
+);
+assert.ok(
   appSource.includes('export function openResetAllDatabaseModal('),
   'app.js must export openResetAllDatabaseModal'
 );
