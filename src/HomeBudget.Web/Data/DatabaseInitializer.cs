@@ -88,11 +88,27 @@ public sealed class DatabaseInitializer(
         // Prune expired staging sessions older than 24 hours
         await conn.ExecuteAsync("DELETE FROM StagingSessions WHERE CreatedAt < datetime('now', '-1 day');");
 
-        // 2. Check Categories for UpdatedAt
+        // 2. Check Accounts for CreatedAt
+        var acctColumns = (await conn.QueryAsync<string>("SELECT name FROM pragma_table_info('Accounts');"))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (acctColumns.Count > 0 && !acctColumns.Contains("CreatedAt"))
+        {
+            await conn.ExecuteAsync("ALTER TABLE Accounts ADD COLUMN CreatedAt TEXT NULL;");
+            await conn.ExecuteAsync("UPDATE Accounts SET CreatedAt = datetime('now') WHERE CreatedAt IS NULL;");
+        }
+
+        // 3. Check Categories for CreatedAt and UpdatedAt
         var catColumns = (await conn.QueryAsync<string>("SELECT name FROM pragma_table_info('Categories');"))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        if (!catColumns.Contains("UpdatedAt"))
+        if (catColumns.Count > 0 && !catColumns.Contains("CreatedAt"))
+        {
+            await conn.ExecuteAsync("ALTER TABLE Categories ADD COLUMN CreatedAt TEXT NULL;");
+            await conn.ExecuteAsync("UPDATE Categories SET CreatedAt = datetime('now') WHERE CreatedAt IS NULL;");
+            catColumns.Add("CreatedAt");
+        }
+
+        if (catColumns.Count > 0 && !catColumns.Contains("UpdatedAt"))
         {
             await conn.ExecuteAsync("ALTER TABLE Categories ADD COLUMN UpdatedAt TEXT NULL;");
             string catBackfill = catColumns.Contains("CreatedAt")
@@ -101,9 +117,16 @@ public sealed class DatabaseInitializer(
             await conn.ExecuteAsync(catBackfill);
         }
 
-        // 3. Check CategorizationRules for UpdatedAt
+        // 4. Check CategorizationRules for CreatedAt and UpdatedAt
         var ruleColumns = (await conn.QueryAsync<string>("SELECT name FROM pragma_table_info('CategorizationRules');"))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (ruleColumns.Count > 0 && !ruleColumns.Contains("CreatedAt"))
+        {
+            await conn.ExecuteAsync("ALTER TABLE CategorizationRules ADD COLUMN CreatedAt TEXT NULL;");
+            await conn.ExecuteAsync("UPDATE CategorizationRules SET CreatedAt = datetime('now') WHERE CreatedAt IS NULL;");
+            ruleColumns.Add("CreatedAt");
+        }
 
         if (ruleColumns.Count > 0 && !ruleColumns.Contains("UpdatedAt"))
         {
@@ -114,7 +137,16 @@ public sealed class DatabaseInitializer(
             await conn.ExecuteAsync(ruleBackfill);
         }
 
-        // 4. Check Transactions columns for CategorizationSource, UploadBatchId, and UpdatedAt
+        // 5. Check IncomeOverrides for UpdatedAt
+        var overrideColumns = (await conn.QueryAsync<string>("SELECT name FROM pragma_table_info('IncomeOverrides');"))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (overrideColumns.Count > 0 && !overrideColumns.Contains("UpdatedAt"))
+        {
+            await conn.ExecuteAsync("ALTER TABLE IncomeOverrides ADD COLUMN UpdatedAt TEXT NULL;");
+            await conn.ExecuteAsync("UPDATE IncomeOverrides SET UpdatedAt = datetime('now') WHERE UpdatedAt IS NULL;");
+        }
+
+        // 6. Check Transactions columns for CategorizationSource, UploadBatchId, CreatedAt, and UpdatedAt
         var txColumns = (await conn.QueryAsync<string>("SELECT name FROM pragma_table_info('Transactions');"))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
@@ -139,6 +171,13 @@ public sealed class DatabaseInitializer(
             await conn.ExecuteAsync("ALTER TABLE Transactions ADD COLUMN UploadBatchId TEXT NULL;");
         }
 
+        if (!txColumns.Contains("CreatedAt"))
+        {
+            await conn.ExecuteAsync("ALTER TABLE Transactions ADD COLUMN CreatedAt TEXT NULL;");
+            await conn.ExecuteAsync("UPDATE Transactions SET CreatedAt = COALESCE(TransactionDate, datetime('now')) WHERE CreatedAt IS NULL;");
+            txColumns.Add("CreatedAt");
+        }
+
         if (!txColumns.Contains("UpdatedAt"))
         {
             await conn.ExecuteAsync("ALTER TABLE Transactions ADD COLUMN UpdatedAt TEXT NULL;");
@@ -148,13 +187,86 @@ public sealed class DatabaseInitializer(
             await conn.ExecuteAsync(txBackfill);
         }
 
-        await conn.ExecuteAsync("CREATE INDEX IF NOT EXISTS IX_Transactions_UpdatedAt ON Transactions(UpdatedAt);");
+        // 7. Remove legacy UploadBatches table and foreign key from v1 databases so Accounts/Transactions are never blocked by FK Error 19
+        int hasUploadBatchesFk = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM pragma_foreign_key_list('Transactions') WHERE \"table\" = 'UploadBatches';");
+        int hasUploadBatchesTable = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'UploadBatches';");
+
+        if (hasUploadBatchesFk > 0 || hasUploadBatchesTable > 0)
+        {
+            await conn.ExecuteAsync("PRAGMA foreign_keys = OFF;");
+            try
+            {
+                await using var tx = await conn.BeginTransactionAsync();
+                if (hasUploadBatchesFk > 0)
+                {
+                    await conn.ExecuteAsync(
+                        """
+                        CREATE TABLE Transactions_v2 (
+                            TransactionId            INTEGER PRIMARY KEY AUTOINCREMENT,
+                            AccountId                INTEGER NOT NULL,
+                            TransactionDate          TEXT    NOT NULL,
+                            PostDate                 TEXT    NULL,
+                            RawDescription           TEXT    NOT NULL,
+                            CleanMerchantName        TEXT    NOT NULL,
+                            Amount                   NUMERIC NOT NULL,
+                            TransactionType          TEXT    NOT NULL,
+                            CategoryId               INTEGER NULL,
+                            Subcategory              TEXT    NULL,
+                            CategorizationSource     TEXT    NOT NULL DEFAULT 'Uncategorized',
+                            IsCategoryManuallyLocked INTEGER NOT NULL DEFAULT 0,
+                            ParentTransactionId      INTEGER NULL,
+                            DedupHash                TEXT    NOT NULL,
+                            UploadBatchId            TEXT    NULL,
+                            Notes                    TEXT    NULL,
+                            CreatedAt                TEXT    NOT NULL DEFAULT (datetime('now')),
+                            UpdatedAt                TEXT    NOT NULL DEFAULT (datetime('now')),
+                            FOREIGN KEY (AccountId)  REFERENCES Accounts(AccountId),
+                            FOREIGN KEY (CategoryId) REFERENCES Categories(CategoryId) ON DELETE SET NULL
+                        );
+                        INSERT INTO Transactions_v2 (
+                            TransactionId, AccountId, TransactionDate, PostDate, RawDescription, CleanMerchantName,
+                            Amount, TransactionType, CategoryId, Subcategory, CategorizationSource,
+                            IsCategoryManuallyLocked, ParentTransactionId, DedupHash, UploadBatchId, Notes, CreatedAt, UpdatedAt
+                        )
+                        SELECT
+                            TransactionId, AccountId, TransactionDate, PostDate, RawDescription, CleanMerchantName,
+                            Amount, TransactionType, CategoryId, Subcategory, CategorizationSource,
+                            IsCategoryManuallyLocked, ParentTransactionId, DedupHash, CAST(UploadBatchId AS TEXT), Notes,
+                            COALESCE(CreatedAt, TransactionDate, datetime('now')),
+                            COALESCE(UpdatedAt, TransactionDate, datetime('now'))
+                        FROM Transactions;
+                        DROP TABLE Transactions;
+                        ALTER TABLE Transactions_v2 RENAME TO Transactions;
+                        """,
+                        transaction: tx);
+                }
+
+                await conn.ExecuteAsync("DROP TABLE IF EXISTS UploadBatches;", transaction: tx);
+                await tx.CommitAsync();
+            }
+            finally
+            {
+                await conn.ExecuteAsync("PRAGMA foreign_keys = ON;");
+            }
+        }
+
+        await conn.ExecuteAsync(
+            """
+            CREATE INDEX IF NOT EXISTS IX_Transactions_Date ON Transactions(TransactionDate);
+            CREATE INDEX IF NOT EXISTS IX_Transactions_Category ON Transactions(CategoryId);
+            CREATE INDEX IF NOT EXISTS IX_Transactions_Type ON Transactions(TransactionType);
+            CREATE INDEX IF NOT EXISTS IX_Transactions_Merchant ON Transactions(CleanMerchantName);
+            CREATE INDEX IF NOT EXISTS IX_Transactions_DedupHash ON Transactions(DedupHash);
+            CREATE INDEX IF NOT EXISTS IX_Transactions_UpdatedAt ON Transactions(UpdatedAt);
+            """);
 
         // Normalize any legacy TransactionType values ('Payment' or 'Transfer') to canonical 'CreditCardPayoff'
         await conn.ExecuteAsync(
             "UPDATE Transactions SET TransactionType = 'CreditCardPayoff' WHERE TransactionType IN ('Payment', 'Transfer');");
 
-        // 5. Ensure Settings table exists and seed default backup policy keys if absent
+        // 8. Ensure Settings table exists and seed default backup policy keys if absent
         await conn.ExecuteAsync(
             """
             CREATE TABLE IF NOT EXISTS Settings (
