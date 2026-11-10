@@ -177,7 +177,7 @@ public sealed class IngestionStagingService(
                     new
                     {
                         candidate.DedupHash,
-                        session.AccountId,
+                        sessionRow.AccountId,
                         candidate.RawDescription,
                         candidate.TransactionDate,
                         candidate.Amount
