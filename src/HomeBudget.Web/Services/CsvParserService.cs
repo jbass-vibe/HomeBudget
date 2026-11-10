@@ -31,13 +31,48 @@ public sealed class CsvParserService
         string content = reader.ReadToEnd();
         if (string.IsNullOrWhiteSpace(content)) return [];
 
-        bool isWellsFargo = account.Institution.Equals("WellsFargo", StringComparison.OrdinalIgnoreCase)
-            || (!content.StartsWith("Transaction Date", StringComparison.OrdinalIgnoreCase)
-                && content.TrimStart().StartsWith('"'));
+        string inst = (account.Institution ?? "").Trim();
+        string firstLine = GetFirstNonEmptyLine(content);
 
-        return isWellsFargo
-            ? ParseWellsFargoCsv(content, account.AccountId, googlePayrollPattern)
-            : ParseChaseCsv(content, account.AccountId, googlePayrollPattern);
+        if (inst.Equals("WellsFargo", StringComparison.OrdinalIgnoreCase)
+            || (!firstLine.Contains("Date", StringComparison.OrdinalIgnoreCase)
+                && content.TrimStart().StartsWith('"')))
+        {
+            return ParseWellsFargoCsv(content, account.AccountId, googlePayrollPattern);
+        }
+
+        if (inst.Equals("Citibank", StringComparison.OrdinalIgnoreCase)
+            || inst.Equals("Citi", StringComparison.OrdinalIgnoreCase)
+            || (firstLine.Contains("Debit", StringComparison.OrdinalIgnoreCase)
+                && firstLine.Contains("Credit", StringComparison.OrdinalIgnoreCase)))
+        {
+            return ParseCitibankCsv(content, account.AccountId);
+        }
+
+        if (inst.Equals("Amex", StringComparison.OrdinalIgnoreCase)
+            || inst.Equals("AmericanExpress", StringComparison.OrdinalIgnoreCase)
+            || inst.Equals("American Express", StringComparison.OrdinalIgnoreCase)
+            || (firstLine.StartsWith("Date,Description", StringComparison.OrdinalIgnoreCase)
+                && !firstLine.Contains("Post Date", StringComparison.OrdinalIgnoreCase)))
+        {
+            return ParseAmexCsv(content, account.AccountId);
+        }
+
+        return ParseChaseCsv(content, account.AccountId, googlePayrollPattern);
+    }
+
+    private static string GetFirstNonEmptyLine(string content)
+    {
+        using var sr = new StringReader(content);
+        string? line;
+        while ((line = sr.ReadLine()) is not null)
+        {
+            if (!string.IsNullOrWhiteSpace(line))
+            {
+                return line.Trim();
+            }
+        }
+        return "";
     }
 
     private static List<ParsedCsvRow> ParseChaseCsv(string content, int accountId, string googlePayrollPattern)
@@ -48,6 +83,7 @@ public sealed class CsvParserService
             HasHeaderRecord = true,
             MissingFieldFound = null,
             HeaderValidated = null,
+            BadDataFound = null,
             TrimOptions = TrimOptions.Trim
         };
 
@@ -58,7 +94,7 @@ public sealed class CsvParserService
 
         while (csv.Read())
         {
-            string? txDateRaw = csv.GetField("Transaction Date") ?? csv.GetField(0);
+            string? txDateRaw = csv.GetField("Transaction Date") ?? csv.GetField("Date") ?? csv.GetField(0);
             string? postDateRaw = csv.GetField("Post Date") ?? csv.GetField(1);
             string? descRaw = csv.GetField("Description") ?? csv.GetField(2);
             string? typeRaw = csv.GetField("Type") ?? csv.GetField(4);
@@ -70,7 +106,7 @@ public sealed class CsvParserService
             if (!TryParseDate(txDateRaw, out string isoTxDate)) continue;
             TryParseDate(postDateRaw, out string isoPostDate);
 
-            if (!decimal.TryParse(amtRaw, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal csvAmt))
+            if (!TryParseAmount(amtRaw, out decimal csvAmt))
                 continue;
 
             string rawDesc = descRaw.Trim();
@@ -81,9 +117,7 @@ public sealed class CsvParserService
             decimal normalizedAmt;
 
             bool isPayment = (typeRaw?.Equals("Payment", StringComparison.OrdinalIgnoreCase) == true)
-                || rawDesc.Contains("PAYMENT THANK YOU", StringComparison.OrdinalIgnoreCase)
-                || rawDesc.Contains("AUTOMATIC PAYMENT", StringComparison.OrdinalIgnoreCase)
-                || rawDesc.Contains("ONLINE PAYMENT", StringComparison.OrdinalIgnoreCase);
+                || IsCreditCardPaymentDescription(rawDesc);
 
             if (isPayment)
             {
@@ -117,6 +151,201 @@ public sealed class CsvParserService
         return results;
     }
 
+    private static List<ParsedCsvRow> ParseAmexCsv(string content, int accountId)
+    {
+        var results = new List<ParsedCsvRow>();
+        var config = new CsvConfiguration(CultureInfo.InvariantCulture)
+        {
+            HasHeaderRecord = true,
+            MissingFieldFound = null,
+            HeaderValidated = null,
+            BadDataFound = null,
+            TrimOptions = TrimOptions.Trim
+        };
+
+        using var sr = new StringReader(content);
+        using var csv = new CsvReader(sr, config);
+
+        if (!csv.Read() || !csv.ReadHeader()) return results;
+
+        while (csv.Read())
+        {
+            string? txDateRaw = csv.GetField("Date") ?? csv.GetField("Transaction Date") ?? csv.GetField(0);
+            string? descRaw = csv.GetField("Description") ?? csv.GetField(1);
+            string? amtRaw = csv.GetField("Amount") ?? csv.GetField(2);
+
+            if (string.IsNullOrWhiteSpace(txDateRaw) || string.IsNullOrWhiteSpace(amtRaw) || string.IsNullOrWhiteSpace(descRaw))
+                continue;
+
+            if (!TryParseDate(txDateRaw, out string isoTxDate)) continue;
+            if (!TryParseAmount(amtRaw, out decimal csvAmt) || csvAmt == 0m)
+                continue;
+
+            string rawDesc = descRaw.Trim();
+            string cleanMerchant = CleanMerchant(rawDesc);
+
+            // In American Express Credit Card CSV:
+            // Positive amount = Purchase/Charge (Expense)
+            // Negative amount = Payment (CreditCardPayoff) or Merchant Credit/Return (Refund)
+            string txType;
+            decimal normalizedAmt;
+
+            if (IsCreditCardPaymentDescription(rawDesc))
+            {
+                txType = TransactionTypes.CreditCardPayoff;
+                normalizedAmt = Math.Abs(csvAmt);
+            }
+            else if (csvAmt > 0m)
+            {
+                txType = TransactionTypes.Expense;
+                normalizedAmt = Math.Abs(csvAmt);
+            }
+            else
+            {
+                txType = TransactionTypes.Refund;
+                normalizedAmt = -Math.Abs(csvAmt);
+            }
+
+            results.Add(new ParsedCsvRow
+            {
+                TransactionDate = isoTxDate,
+                PostDate = isoTxDate,
+                RawDescription = rawDesc,
+                CleanMerchantName = cleanMerchant,
+                Amount = Math.Round(normalizedAmt, 2),
+                TransactionType = txType,
+                BaseDedupHash = ComputeBaseHash(accountId, isoTxDate, rawDesc, normalizedAmt),
+                RequiresManualReview = false
+            });
+        }
+
+        return results;
+    }
+
+    private static List<ParsedCsvRow> ParseCitibankCsv(string content, int accountId)
+    {
+        var results = new List<ParsedCsvRow>();
+        var config = new CsvConfiguration(CultureInfo.InvariantCulture)
+        {
+            HasHeaderRecord = true,
+            MissingFieldFound = null,
+            HeaderValidated = null,
+            BadDataFound = null,
+            TrimOptions = TrimOptions.Trim
+        };
+
+        using var sr = new StringReader(content);
+        using var csv = new CsvReader(sr, config);
+
+        if (!csv.Read() || !csv.ReadHeader()) return results;
+
+        var headers = (csv.HeaderRecord ?? [])
+            .Select(h => h?.Trim() ?? "")
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        bool hasSplitDebitCredit = headers.Contains("Debit") || headers.Contains("Credit");
+
+        while (csv.Read())
+        {
+            string? statusRaw = csv.GetField("Status");
+            if (!string.IsNullOrWhiteSpace(statusRaw) &&
+                statusRaw.Equals("Pending", StringComparison.OrdinalIgnoreCase))
+            {
+                // Still allow staged review of rows, or parse normally
+            }
+
+            string? txDateRaw = csv.GetField("Date") ?? csv.GetField("Transaction Date") ?? csv.GetField(1) ?? csv.GetField(0);
+            string? postDateRaw = csv.GetField("Post Date");
+            string? descRaw = csv.GetField("Description") ?? csv.GetField(2) ?? csv.GetField(1);
+
+            if (string.IsNullOrWhiteSpace(txDateRaw) || string.IsNullOrWhiteSpace(descRaw))
+                continue;
+
+            if (!TryParseDate(txDateRaw, out string isoTxDate)) continue;
+            TryParseDate(postDateRaw, out string isoPostDate);
+
+            string rawDesc = descRaw.Trim();
+            string cleanMerchant = CleanMerchant(rawDesc);
+
+            string txType;
+            decimal normalizedAmt;
+
+            if (hasSplitDebitCredit)
+            {
+                string? debitRaw = csv.GetField("Debit");
+                string? creditRaw = csv.GetField("Credit");
+
+                bool hasDebit = TryParseAmount(debitRaw, out decimal debitAmt) && debitAmt != 0m;
+                bool hasCredit = TryParseAmount(creditRaw, out decimal creditAmt) && creditAmt != 0m;
+
+                if (!hasDebit && !hasCredit)
+                    continue;
+
+                if (IsCreditCardPaymentDescription(rawDesc))
+                {
+                    txType = TransactionTypes.CreditCardPayoff;
+                    normalizedAmt = Math.Abs(hasCredit ? creditAmt : debitAmt);
+                }
+                else if (hasDebit && !hasCredit)
+                {
+                    // In Citibank Status,Date,Description,Debit,Credit:
+                    // Positive Debit is a purchase (Expense); negative Debit (rare) is a credit/reversal
+                    if (debitAmt > 0m)
+                    {
+                        txType = TransactionTypes.Expense;
+                        normalizedAmt = Math.Abs(debitAmt);
+                    }
+                    else
+                    {
+                        txType = TransactionTypes.Refund;
+                        normalizedAmt = -Math.Abs(debitAmt);
+                    }
+                }
+                else
+                {
+                    // Non-payment entry in Credit column (reported as negative or positive credit by Citi) is a Refund
+                    txType = TransactionTypes.Refund;
+                    normalizedAmt = -Math.Abs(creditAmt);
+                }
+            }
+            else
+            {
+                string? amtRaw = csv.GetField("Amount") ?? csv.GetField(2);
+                if (!TryParseAmount(amtRaw, out decimal csvAmt) || csvAmt == 0m)
+                    continue;
+
+                if (IsCreditCardPaymentDescription(rawDesc))
+                {
+                    txType = TransactionTypes.CreditCardPayoff;
+                    normalizedAmt = Math.Abs(csvAmt);
+                }
+                else if (csvAmt > 0m)
+                {
+                    txType = TransactionTypes.Expense;
+                    normalizedAmt = Math.Abs(csvAmt);
+                }
+                else
+                {
+                    txType = TransactionTypes.Refund;
+                    normalizedAmt = -Math.Abs(csvAmt);
+                }
+            }
+
+            results.Add(new ParsedCsvRow
+            {
+                TransactionDate = isoTxDate,
+                PostDate = string.IsNullOrEmpty(isoPostDate) ? isoTxDate : isoPostDate,
+                RawDescription = rawDesc,
+                CleanMerchantName = cleanMerchant,
+                Amount = Math.Round(normalizedAmt, 2),
+                TransactionType = txType,
+                BaseDedupHash = ComputeBaseHash(accountId, isoTxDate, rawDesc, normalizedAmt),
+                RequiresManualReview = false
+            });
+        }
+
+        return results;
+    }
+
     private static List<ParsedCsvRow> ParseWellsFargoCsv(string content, int accountId, string googlePayrollPattern)
     {
         var results = new List<ParsedCsvRow>();
@@ -124,6 +353,7 @@ public sealed class CsvParserService
         {
             HasHeaderRecord = false,
             MissingFieldFound = null,
+            BadDataFound = null,
             TrimOptions = TrimOptions.Trim
         };
 
@@ -140,7 +370,7 @@ public sealed class CsvParserService
                 continue;
 
             if (!TryParseDate(dateRaw, out string isoDate)) continue;
-            if (!decimal.TryParse(amtRaw, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal csvAmt))
+            if (!TryParseAmount(amtRaw, out decimal csvAmt))
                 continue;
 
             string rawDesc = descRaw.Trim();
@@ -152,7 +382,13 @@ public sealed class CsvParserService
 
             bool isCcPayoff = rawDesc.Contains("CHASE CREDIT CRD", StringComparison.OrdinalIgnoreCase)
                 || rawDesc.Contains("CREDIT CARD", StringComparison.OrdinalIgnoreCase)
-                || (rawDesc.Contains("EPAY", StringComparison.OrdinalIgnoreCase) && rawDesc.Contains("CHASE", StringComparison.OrdinalIgnoreCase));
+                || (rawDesc.Contains("EPAY", StringComparison.OrdinalIgnoreCase) && rawDesc.Contains("CHASE", StringComparison.OrdinalIgnoreCase))
+                || rawDesc.Contains("AMEX EPAY", StringComparison.OrdinalIgnoreCase)
+                || rawDesc.Contains("AMERICAN EXPRESS", StringComparison.OrdinalIgnoreCase)
+                || rawDesc.Contains("CITI CARD", StringComparison.OrdinalIgnoreCase)
+                || rawDesc.Contains("CITICARDS", StringComparison.OrdinalIgnoreCase)
+                || rawDesc.Contains("CITI AUTOPAY", StringComparison.OrdinalIgnoreCase)
+                || rawDesc.Contains("CITIBANK CRDT", StringComparison.OrdinalIgnoreCase);
 
             bool isVerifiedPayroll = csvAmt > 0m && (
                 (!string.IsNullOrWhiteSpace(googlePayrollPattern) && rawDesc.Contains(googlePayrollPattern.Trim(), StringComparison.OrdinalIgnoreCase))
@@ -199,12 +435,34 @@ public sealed class CsvParserService
         return results;
     }
 
+    private static bool IsCreditCardPaymentDescription(string rawDesc)
+    {
+        return rawDesc.Contains("PAYMENT THANK YOU", StringComparison.OrdinalIgnoreCase)
+            || rawDesc.Contains("PAYMENT - THANK YOU", StringComparison.OrdinalIgnoreCase)
+            || rawDesc.Contains("THANK YOU FOR YOUR PAYMENT", StringComparison.OrdinalIgnoreCase)
+            || rawDesc.Contains("AUTOMATIC PAYMENT", StringComparison.OrdinalIgnoreCase)
+            || rawDesc.Contains("AUTOPAY PAYMENT", StringComparison.OrdinalIgnoreCase)
+            || rawDesc.Contains("CITI AUTOPAY", StringComparison.OrdinalIgnoreCase)
+            || rawDesc.Contains("ONLINE PAYMENT", StringComparison.OrdinalIgnoreCase)
+            || rawDesc.Contains("MOBILE PAYMENT", StringComparison.OrdinalIgnoreCase)
+            || rawDesc.Contains("ELECTRONIC PAYMENT", StringComparison.OrdinalIgnoreCase)
+            || rawDesc.Contains("PAYMENT RECEIVED", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryParseAmount(string? input, out decimal amount)
+    {
+        amount = 0m;
+        if (string.IsNullOrWhiteSpace(input)) return false;
+        string cleaned = input.Trim().Replace("$", "");
+        return decimal.TryParse(cleaned, NumberStyles.Any, CultureInfo.InvariantCulture, out amount);
+    }
+
     private static bool TryParseDate(string? input, out string isoDate)
     {
         isoDate = "";
         if (string.IsNullOrWhiteSpace(input)) return false;
 
-        string[] formats = ["MM/dd/yyyy", "M/d/yyyy", "yyyy-MM-dd", "MM-dd-yyyy"];
+        string[] formats = ["MM/dd/yyyy", "M/d/yyyy", "yyyy-MM-dd", "MM-dd-yyyy", "MM/dd/yy", "M/d/yy"];
         if (DateOnly.TryParseExact(input.Trim(), formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt)
             || DateOnly.TryParse(input.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None, out dt))
         {

@@ -250,7 +250,9 @@ public sealed class DatabaseInitializer(
             """
             INSERT INTO Accounts (AccountId, AccountName, Institution, AccountType, IsActive) VALUES
             (1, 'Wells Fargo Household Checking', 'WellsFargo', 'Checking', 1),
-            (2, 'Chase Household Credit Card', 'Chase', 'CreditCard', 1);
+            (2, 'Chase Household Credit Card', 'Chase', 'CreditCard', 1),
+            (3, 'American Express Credit Card', 'Amex', 'CreditCard', 1),
+            (4, 'Citibank Credit Card', 'Citibank', 'CreditCard', 1);
             """,
             transaction: tx);
 
@@ -345,6 +347,20 @@ public sealed class DatabaseInitializer(
             {
                 await conn.ExecuteAsync("PRAGMA foreign_keys = ON;");
             }
+        }
+
+        if (acctColumns.Count > 0)
+        {
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO Accounts (AccountName, Institution, AccountType, IsActive, CreatedAt)
+                SELECT 'American Express Credit Card', 'Amex', 'CreditCard', 1, datetime('now')
+                WHERE NOT EXISTS (SELECT 1 FROM Accounts WHERE Institution IN ('Amex', 'AmericanExpress', 'American Express'));
+
+                INSERT INTO Accounts (AccountName, Institution, AccountType, IsActive, CreatedAt)
+                SELECT 'Citibank Credit Card', 'Citibank', 'CreditCard', 1, datetime('now')
+                WHERE NOT EXISTS (SELECT 1 FROM Accounts WHERE Institution IN ('Citibank', 'Citi'));
+                """);
         }
 
         // 3. Check Categories for CreatedAt and UpdatedAt

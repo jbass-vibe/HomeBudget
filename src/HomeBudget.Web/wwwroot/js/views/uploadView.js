@@ -39,8 +39,8 @@ export async function renderUploadView(container) {
   container.innerHTML = `
     <div class="page-header">
       <div>
-        <h1 class="page-title">Upload Chase &amp; Wells Fargo CSVs</h1>
-        <p class="page-subtitle">Two-stage de-duplication, same-day collision review, and auto-categorization</p>
+        <h1 class="page-title">Upload Bank &amp; Credit Card CSVs</h1>
+        <p class="page-subtitle">Chase, American Express, Citibank &amp; Wells Fargo CSV ingestion with two-stage de-duplication and auto-categorization</p>
       </div>
       <button class="btn btn-outline btn-sm" id="addAccountBtn">+ Add Account / Card</button>
     </div>
@@ -59,7 +59,7 @@ export async function renderUploadView(container) {
 
       <div class="dropzone" id="csvDropzone">
         <div style="font-size:28px;margin-bottom:8px;">&#128196;</div>
-        <div style="font-weight:700;font-size:15px;">Drag &amp; drop Chase or Wells Fargo CSV files here</div>
+        <div style="font-weight:700;font-size:15px;">Drag &amp; drop Chase, American Express, Citibank, or Wells Fargo CSV files here</div>
         <div style="font-size:12px;color:#64748B;margin-top:4px;">Supports mid-month activity exports and full monthly statements</div>
         <input type="file" id="csvFileInput" accept=".csv" multiple style="display:none;" />
         <button class="btn btn-primary btn-sm" style="margin-top:14px;" id="browseFilesBtn">Select CSV Files</button>
@@ -103,13 +103,15 @@ export async function renderUploadView(container) {
       <div style="display:flex;flex-direction:column;gap:12px;margin:16px 0;">
         <div>
           <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Account Display Name</label>
-          <input type="text" id="newAcctName" class="input-control" style="width:100%;" placeholder="e.g., Chase Sapphire Preferred" />
+          <input type="text" id="newAcctName" class="input-control" style="width:100%;" placeholder="e.g., Amex Gold Card, Citi Double Cash, Chase Sapphire" />
         </div>
         <div>
           <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Institution CSV Format</label>
           <select id="newAcctInst" class="select-control" style="width:100%;">
             <option value="Chase">Chase (7-Column Credit Card CSV)</option>
-            <option value="WellsFargo">Wells Fargo (5-Column Headerless CSV)</option>
+            <option value="Amex">American Express (Date, Description, Amount Credit Card CSV)</option>
+            <option value="Citibank">Citibank (Status, Date, Description, Debit, Credit CSV)</option>
+            <option value="WellsFargo">Wells Fargo (5-Column Headerless Checking CSV)</option>
           </select>
         </div>
         <div>
@@ -125,6 +127,13 @@ export async function renderUploadView(container) {
         <button class="btn btn-primary" id="saveAcctBtn">Create Account</button>
       </div>
     `, (modalEl) => {
+      const instSel = modalEl.querySelector('#newAcctInst');
+      const typeSel = modalEl.querySelector('#newAcctType');
+      if (instSel && typeSel) {
+        instSel.onchange = () => {
+          typeSel.value = instSel.value === 'WellsFargo' ? 'Checking' : 'CreditCard';
+        };
+      }
       modalEl.querySelector('#cancelAcctBtn').onclick = closeModal;
       modalEl.querySelector('#saveAcctBtn').onclick = async () => {
         const accountName = modalEl.querySelector('#newAcctName').value.trim();

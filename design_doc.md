@@ -1,18 +1,18 @@
-# Local Home Budgeting & Cashflow System — Design Document (v2.6)
+# Local Home Budgeting & Cashflow System — Design Document (v2.7)
 
-**Document Version:** 2.6  
+**Document Version:** 2.7  
 **Target Platform:** Windows 11 IIS + ASP.NET Core (.NET 10 Minimal APIs) + SQLite (WAL Mode)  
 **Network Scope:** Strictly LAN-Only (`LocalSubnet` via Windows Defender Firewall, Port 8080)  
 **Primary Personas:**
 - **User (Spouse / Mobile-First on iPhone):** Reviews monthly budgets, explores the Cashflow Sankey visualization, manages categories (add/edit/delete), and rapidly categorizes or recategorizes expenses directly from the Visualization and Budgets views with automated forward/backward rule propagation prompts and flexible list sorting.
-- **Administrator (Desktop on Windows 11 PC):** Performs multi-file CSV statement ingestion (Chase & Wells Fargo), manages full category topology, rules, and local SQLite backup/restore lifecycle & policies, clears transaction history or resets all live database information to a clean state while preserving backup databases, and uses the filtered Transaction Inspector to edit, annotate (`Notes`), split, or delete income and expense entries (with tombstone hash protection).
+- **Administrator (Desktop on Windows 11 PC):** Performs multi-file CSV statement ingestion (Chase, American Express, Citibank & Wells Fargo), manages full category topology, rules, and local SQLite backup/restore lifecycle & policies, clears transaction history or resets all live database information to a clean state while preserving backup databases, and uses the filtered Transaction Inspector to edit, annotate (`Notes`), split, or delete income and expense entries (with tombstone hash protection).
 
 > [!NOTE]
 > **Household LAN Trust Model:** This system runs exclusively on a private household LAN behind a Windows Defender Firewall `LocalSubnet` rule. The **User** and **Administrator** personas represent ergonomic device/view workflows (mobile daily budgeting vs. desktop statement administration) rather than authenticated security boundaries; destructive operations are protected by explicit confirmation modals and automatic pre-operation SQLite snapshots rather than login/password gates.
 
 ---
 
-## 1. Summary of Requirements & Architecture Evolution (v2.0 $\rightarrow$ v2.6)
+## 1. Summary of Requirements & Architecture Evolution (v2.0 $\rightarrow$ v2.7)
 
 ### 1.0 Version Changelog
 | Version | Summary of Architectural & Functional Changes |
@@ -23,6 +23,7 @@
 | **v2.4** | Verified in-app database restore (from local `Backups/` or external `.db` upload with `PRAGMA integrity_check`) and Clear Transaction History (`POST /api/transactions/clear-history`). |
 | **v2.5** | Simplified top-level Tabular Cashflow Breakdown (removing top-level per-account columns while retaining dashboard account spend pills and drill-downs) and Reset All Information (`POST /api/admin/reset-all`). |
 | **v2.6** | Unified canonical schema/seed contract (`DefaultTaxonomySeeded` guard preventing seed resurrection on restart), pre-schema migration ordering for v1 database upgrades (removing legacy `UploadBatches` FK and `Accounts` `CHECK` constraints), preserved backup retention policy across resets, fail-fast safety backup verification, account-scoped tombstones (`DeletedTransactionHashes.AccountId`), exclusive lifecycle mutex across Reset/Restore/Clear/Backup, and inline triage merchant group expansion + `#backPropSortSelect`. |
+| **v2.7** | Added full CSV statement upload support for **American Express (`Amex`)** and **Citibank (`Citibank`)** credit cards (including institution routing, CSV header auto-detection, sign/split-column normalization, checking-account payoff detection, and idempotently seeded default accounts). |
 
 ### 1.1 Core Product Capabilities
 1. **Full Category Lifecycle & Dual-Persona Access (Add, Edit, Delete):**
@@ -205,9 +206,11 @@ CREATE INDEX IF NOT EXISTS IX_Transactions_UpdatedAt ON Transactions(UpdatedAt);
 
 ### 3.2 Canonical Seed Data & `DefaultTaxonomySeeded` Guard
 Both `deploy/schema.sql` and `DatabaseInitializer` share a single canonical seed specification:
-1. **Default Household Accounts (seeded when `Accounts` is empty):**
+1. **Default Household Accounts (seeded idempotently):**
    - `AccountId = 1`: `'Wells Fargo Household Checking'` (`Institution = 'WellsFargo'`, `AccountType = 'Checking'`)
    - `AccountId = 2`: `'Chase Household Credit Card'` (`Institution = 'Chase'`, `AccountType = 'CreditCard'`)
+   - `AccountId = 3`: `'American Express Credit Card'` (`Institution = 'Amex'`, `AccountType = 'CreditCard'`)
+   - `AccountId = 4`: `'Citibank Credit Card'` (`Institution = 'Citibank'`, `AccountType = 'CreditCard'`)
 2. **Default Settings (`INSERT OR IGNORE INTO Settings`):**
    - `PersistentMonthlyIncome = '10000.00'`, `GooglePayrollMatchPattern = 'GOOGLE'`, `CurrentMonthIncomeMode = 'Auto'`, `GeminiApiKey = ''`
    - `BackupAutoMode = 'Coalesced'`, `BackupDebounceSeconds = '30'`, `BackupMinIntervalMinutes = '10'`, `MaxRetainedBackups = '15'`
@@ -345,13 +348,23 @@ In the **Monthly Budgets** header, **`Sort Categories:` (`#budgetsSortSelect`)**
 ### 4.3 CSV Ingestion, Bank Classification & Persistent Staging
 
 #### A. Bank-Specific CSV Classification Rules (`CsvParserService`)
-1. **Chase Credit Card (7-Column Headered CSV):**
-   - **Credit Card Payoff (`'CreditCardPayoff'`):** `Type` column equals `"Payment"` OR `Description` contains `"PAYMENT THANK YOU"`, `"AUTOMATIC PAYMENT"`, or `"ONLINE PAYMENT"`. Stored with positive `Math.Abs(csvAmt)`.
+1. **Chase Credit Card (7-Column Headered CSV — `Transaction Date,Post Date,Description,Category,Type,Amount,Memo`):**
+   - **Credit Card Payoff (`'CreditCardPayoff'`):** `Type` column equals `"Payment"` OR `Description` matches payment patterns (`"PAYMENT THANK YOU"`, `"AUTOMATIC PAYMENT"`, `"ONLINE PAYMENT"`, `"AUTOPAY"`). Stored with positive `Math.Abs(csvAmt)`.
    - **Expense (`'Expense'`):** `csvAmt < 0` (and not a payment). Stored with positive `Math.Abs(csvAmt)`.
    - **Refund (`'Refund'`):** `csvAmt > 0` (and not a payment). Stored with negative `-Math.Abs(csvAmt)`.
 
-2. **Wells Fargo Checking (5-Column Headerless CSV):**
-   - **Credit Card Payoff (`'CreditCardPayoff'`):** `Description` matches known credit card payment patterns (`"CHASE CREDIT CRD"`, `"CREDIT CARD"`, or `"EPAY"` + `"CHASE"`). Stored with positive `Math.Abs(csvAmt)`.
+2. **American Express Credit Card (3- or 5+-Column Headered CSV — `Date,Description,Amount` or `Date,Description,Card Member,Account #,Amount`):**
+   - **Credit Card Payoff (`'CreditCardPayoff'`):** `Description` matches payment patterns (`"ONLINE PAYMENT"`, `"AUTOPAY PAYMENT"`, `"MOBILE PAYMENT"`, `"PAYMENT - THANK YOU"`, `"PAYMENT RECEIVED"`). Stored with positive `Math.Abs(csvAmt)`.
+   - **Expense (`'Expense'`):** `csvAmt > 0` (Amex exports purchases as positive numbers). Stored with positive `Math.Abs(csvAmt)`.
+   - **Refund (`'Refund'`):** `csvAmt < 0` (and not a payment). Stored with negative `-Math.Abs(csvAmt)`.
+
+3. **Citibank Credit Card (5-Column Split `Status,Date,Description,Debit,Credit` or Single `Amount` Headered CSV):**
+   - **Credit Card Payoff (`'CreditCardPayoff'`):** `Description` matches payment patterns (`"ONLINE PAYMENT"`, `"AUTOPAY"`, `"CITI AUTOPAY"`, `"PAYMENT THANK YOU"`). Stored with positive `Math.Abs(amt)`.
+   - **Expense (`'Expense'`):** Populated positive `Debit` column (or positive `Amount` when no `Credit` is present and not a payment). Stored with positive `Math.Abs(debitAmt)`.
+   - **Refund (`'Refund'`):** Populated `Credit` column (or negative `Debit`/`Amount`, and not a payment). Stored with negative `-Math.Abs(creditAmt)`.
+
+4. **Wells Fargo Checking (5-Column Headerless CSV):**
+   - **Credit Card Payoff (`'CreditCardPayoff'`):** `Description` matches credit card payment patterns for Chase, American Express, Citibank, or generic card autopays (`"CHASE CREDIT CRD"`, `"AMEX EPAY"`, `"AMERICAN EXPRESS"`, `"CITI CARD"`, `"CITICARDS"`, `"CITI AUTOPAY"`, `"CITIBANK CRDT"`, `"CREDIT CARD"`). Stored with positive `Math.Abs(csvAmt)`.
    - **Verified Payroll / Income (`'IncomeDeposit'`):** `csvAmt > 0` AND `Description` matches the configured `GooglePayrollMatchPattern` (or explicit `"DIRECT DEP"` / `"PAYROLL"` keywords). Stored with positive `Math.Abs(csvAmt)`.
    - **Other Positive Checking Credits (`'Refund'` + Manual Review Flag):** `csvAmt > 0` that do **not** match payroll or credit card payoff patterns. Defaulted to `'Refund'` (`-Math.Abs(csvAmt)`) with `RequiresManualReview = true` in the staging table so the Administrator explicitly confirms the classification before committing.
    - **Expense (`'Expense'`):** `csvAmt < 0` (and not a credit card payoff). Stored with positive `Math.Abs(csvAmt)`.

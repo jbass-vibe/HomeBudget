@@ -189,6 +189,22 @@ assert.ok(
   'deploy/schema.sql DeletedTransactionHashes table must include AccountId INTEGER NULL'
 );
 
-console.log('✔ Frontend & schema v2.2–v2.6 verification assertions passed.');
+// 8. Verify v2.7 American Express & Citibank credit card CSV upload support across UI and schema
+assert.ok(
+  uploadSource.includes('<option value="Amex">'),
+  'uploadView.js must include American Express (Amex) option in #newAcctInst'
+);
+assert.ok(
+  uploadSource.includes('<option value="Citibank">'),
+  'uploadView.js must include Citibank option in #newAcctInst'
+);
+assert.ok(
+  schemaSql.includes("'American Express Credit Card'") && schemaSql.includes("'Amex'"),
+  'deploy/schema.sql must seed American Express Credit Card account'
+);
+assert.ok(
+  schemaSql.includes("'Citibank Credit Card'") && schemaSql.includes("'Citibank'"),
+  'deploy/schema.sql must seed Citibank Credit Card account'
+);
 
-
+console.log('✔ Frontend & schema v2.2–v2.7 verification assertions passed.');

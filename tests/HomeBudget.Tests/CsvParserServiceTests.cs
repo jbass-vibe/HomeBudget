@@ -100,4 +100,85 @@ public sealed class CsvParserServiceTests
         Assert.Equal(baseHash, CsvParserService.ExtractBaseHash(splitHash));
         Assert.Equal(baseHash, CsvParserService.ExtractBaseHash(baseHash));
     }
+
+    [Fact]
+    public void ParseAmexCsv_ClassifiesPositivePurchasesNegativeRefundsAndPaymentsCorrectly()
+    {
+        string csvContent =
+            """
+            Date,Description,Card Member,Account #,Amount
+            11/03/2026,WHOLEFDS MKT #1024,JANE DOE,-71004,132.45
+            11/08/2026,ONLINE PAYMENT - THANK YOU,JANE DOE,-71004,-850.00
+            11/14/2026,APPLE.COM/BILL CREDIT,JANE DOE,-71004,-19.99
+            """;
+
+        var account = new Account
+        {
+            AccountId = 3,
+            AccountName = "American Express Credit Card",
+            Institution = "Amex",
+            AccountType = "CreditCard"
+        };
+
+        using var ms = new MemoryStream(Encoding.UTF8.GetBytes(csvContent));
+        var rows = _parser.ParseCsvStream(ms, account, "GOOGLE");
+
+        Assert.Equal(3, rows.Count);
+
+        // 1. Positive Amex purchase -> Expense (+132.45)
+        Assert.Equal("2026-11-03", rows[0].TransactionDate);
+        Assert.Equal(TransactionTypes.Expense, rows[0].TransactionType);
+        Assert.Equal(132.45m, rows[0].Amount);
+
+        // 2. Negative Amex payment -> CreditCardPayoff (+850.00)
+        Assert.Equal("2026-11-08", rows[1].TransactionDate);
+        Assert.Equal(TransactionTypes.CreditCardPayoff, rows[1].TransactionType);
+        Assert.Equal(850.00m, rows[1].Amount);
+
+        // 3. Negative Amex merchant credit -> Refund (-19.99)
+        Assert.Equal("2026-11-14", rows[2].TransactionDate);
+        Assert.Equal(TransactionTypes.Refund, rows[2].TransactionType);
+        Assert.Equal(-19.99m, rows[2].Amount);
+    }
+
+    [Fact]
+    public void ParseCitibankCsv_ClassifiesSplitDebitCreditAndPaymentsCorrectly()
+    {
+        string csvContent =
+            """
+            Status,Date,Description,Debit,Credit
+            Cleared,11/04/2026,COSTCO GAS #0423,58.20,
+            Cleared,11/11/2026,ONLINE PAYMENT, THANK YOU,,640.00
+            Cleared,11/15/2026,TARGET.COM RETURN,,31.50
+            """;
+
+        var account = new Account
+        {
+            AccountId = 4,
+            AccountName = "Citibank Credit Card",
+            Institution = "Citibank",
+            AccountType = "CreditCard"
+        };
+
+        using var ms = new MemoryStream(Encoding.UTF8.GetBytes(csvContent));
+        var rows = _parser.ParseCsvStream(ms, account, "GOOGLE");
+
+        Assert.Equal(3, rows.Count);
+
+        // 1. Populated Debit -> Expense (+58.20)
+        Assert.Equal("2026-11-04", rows[0].TransactionDate);
+        Assert.Equal(TransactionTypes.Expense, rows[0].TransactionType);
+        Assert.Equal(58.20m, rows[0].Amount);
+
+        // 2. Payment in Credit column -> CreditCardPayoff (+640.00)
+        Assert.Equal("2026-11-11", rows[1].TransactionDate);
+        Assert.Equal(TransactionTypes.CreditCardPayoff, rows[1].TransactionType);
+        Assert.Equal(640.00m, rows[1].Amount);
+
+        // 3. Merchant return in Credit column -> Refund (-31.50)
+        Assert.Equal("2026-11-15", rows[2].TransactionDate);
+        Assert.Equal(TransactionTypes.Refund, rows[2].TransactionType);
+        Assert.Equal(-31.50m, rows[2].Amount);
+    }
 }
+

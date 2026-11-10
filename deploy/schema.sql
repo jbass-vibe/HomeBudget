@@ -95,14 +95,23 @@ CREATE INDEX IF NOT EXISTS IX_Transactions_Merchant ON Transactions(CleanMerchan
 CREATE INDEX IF NOT EXISTS IX_Transactions_DedupHash ON Transactions(DedupHash);
 CREATE INDEX IF NOT EXISTS IX_Transactions_UpdatedAt ON Transactions(UpdatedAt);
 
--- Default Seed Accounts (Only inserted if Accounts table is empty)
+-- Default Seed Accounts
 INSERT INTO Accounts (AccountName, Institution, AccountType, IsActive)
 SELECT 'Wells Fargo Household Checking', 'WellsFargo', 'Checking', 1
-WHERE NOT EXISTS (SELECT 1 FROM Accounts);
+WHERE NOT EXISTS (SELECT 1 FROM Accounts WHERE Institution = 'WellsFargo');
 
 INSERT INTO Accounts (AccountName, Institution, AccountType, IsActive)
 SELECT 'Chase Household Credit Card', 'Chase', 'CreditCard', 1
-WHERE (SELECT COUNT(*) FROM Accounts) = 1;
+WHERE NOT EXISTS (SELECT 1 FROM Accounts WHERE Institution = 'Chase');
+
+INSERT INTO Accounts (AccountName, Institution, AccountType, IsActive)
+SELECT 'American Express Credit Card', 'Amex', 'CreditCard', 1
+WHERE NOT EXISTS (SELECT 1 FROM Accounts WHERE Institution IN ('Amex', 'AmericanExpress', 'American Express'));
+
+INSERT INTO Accounts (AccountName, Institution, AccountType, IsActive)
+SELECT 'Citibank Credit Card', 'Citibank', 'CreditCard', 1
+WHERE NOT EXISTS (SELECT 1 FROM Accounts WHERE Institution IN ('Citibank', 'Citi'));
+
 
 -- Default Settings
 INSERT OR IGNORE INTO Settings (Key, Value) VALUES
