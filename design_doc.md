@@ -1,18 +1,18 @@
-# Local Home Budgeting & Cashflow System — Design Document (v2.8)
+# Local Home Budgeting & Cashflow System — Design Document (v2.9)
 
-**Document Version:** 2.8  
+**Document Version:** 2.9  
 **Target Platform:** Windows 11 IIS + ASP.NET Core (.NET 10 Minimal APIs) + SQLite (WAL Mode)  
-**Network Scope:** Strictly LAN-Only (`LocalSubnet` via Windows Defender Firewall, Port 8080)  
-**Primary Personas:**
-- **User (Spouse / Mobile-First on iPhone):** Reviews monthly budgets, explores the Cashflow Sankey visualization, manages categories (add/edit/delete), and rapidly categorizes or recategorizes expenses directly from the Visualization and Budgets views with automated forward/backward rule propagation prompts and flexible list sorting.
-- **Administrator (Desktop on Windows 11 PC):** Performs multi-file CSV statement ingestion (Chase, American Express, Citibank & Wells Fargo), renames and manages source accounts/cards, manages full category topology, rules, and local SQLite backup/restore lifecycle & policies, clears transaction history or resets all live database information to a clean state while preserving backup databases, and uses the filtered Transaction Inspector to edit, annotate (`Notes`), split, or delete income and expense entries (with tombstone hash protection).
+**Network Scope:** Strictly LAN-Only (`LocalSubnet` via Windows Defender Firewall, Port 8080 or Port 8443 HTTPS)  
+**Primary Personas & Authenticated Roles:**
+- **User / Wife (`user`, Mobile-First on iPhone):** Reviews monthly budgets, explores the Cashflow Sankey visualization, manages categories (add/edit/delete), recategorizes expenses with forward rule propagation, and changes her account password. Protected with a 90-day persistent mobile session.
+- **Administrator / Husband (`admin`, Desktop on Windows 11 PC):** Has full system control: multi-file CSV statement ingestion (Chase, Amex, Citi & Wells Fargo), raw transaction editing/splitting/deleting, account management and renaming, full category/rule topology, local SQLite backup/restore lifecycle & policies, clear history / reset all operations, and user password management.
 
 > [!NOTE]
-> **Household LAN Trust Model:** This system runs exclusively on a private household LAN behind a Windows Defender Firewall `LocalSubnet` rule. The **User** and **Administrator** personas represent ergonomic device/view workflows (mobile daily budgeting vs. desktop statement administration) rather than authenticated security boundaries; destructive operations are protected by explicit confirmation modals and automatic pre-operation SQLite snapshots rather than login/password gates.
+> **Authentication & Role-Based Access Control (RBAC):** Transitioning from the v2.0–v2.8 open LAN trust model, v2.9 introduces formal authenticated security boundaries with cookie-based authentication, PBKDF2 password hashing, and role authorization policies (`Admin` vs `User`).
 
 ---
 
-## 1. Summary of Requirements & Architecture Evolution (v2.0 $\rightarrow$ v2.8)
+## 1. Summary of Requirements & Architecture Evolution (v2.0 $\rightarrow$ v2.9)
 
 ### 1.0 Version Changelog
 | Version | Summary of Architectural & Functional Changes |
@@ -25,6 +25,7 @@
 | **v2.6** | Unified canonical schema/seed contract (`DefaultTaxonomySeeded` guard preventing seed resurrection on restart), pre-schema migration ordering for v1 database upgrades (removing legacy `UploadBatches` FK and `Accounts` `CHECK` constraints), preserved backup retention policy across resets, fail-fast safety backup verification, account-scoped tombstones (`DeletedTransactionHashes.AccountId`), exclusive lifecycle mutex across Reset/Restore/Clear/Backup, and inline triage merchant group expansion + `#backPropSortSelect`. |
 | **v2.7** | Added full CSV statement upload support for **American Express (`Amex`)** and **Citibank (`Citibank`)** credit cards (including institution routing, CSV header auto-detection, sign/split-column normalization, checking-account payoff detection, and idempotently seeded default accounts). |
 | **v2.8** | Added source account and credit card renaming capability (`PUT /api/accounts/{id}`) with synchronized updates across CSV upload view and Admin panel, preserving foreign-key transaction join integrity and automated backup snapshots (`account_rename`). |
+| **v2.9** | Role-Based User Authentication (RBAC) & Password Management Design: Dual-persona authenticated logins (`admin` for Administrator, `user` for Spouse/Wife), cookie-based authentication with 90-day persistent mobile sessions on iOS Safari, one-time first-run setup wizard, self-service and admin password reset, wife forward rule propagation, and LAN HTTPS/TLS migration architecture. |
 
 ### 1.1 Core Product Capabilities
 1. **Full Category Lifecycle & Dual-Persona Access (Add, Edit, Delete):**
@@ -89,17 +90,18 @@
 
 | Layer | Technology / Specification |
 | :--- | :--- |
-| **Host OS & Web Server** | Windows 11 Pro/Home with IIS (`AspNetCoreModuleV2`, In-Process Hosting on Port `8080`) |
+| **Host OS & Web Server** | Windows 11 Pro/Home with IIS (`AspNetCoreModuleV2`, In-Process Hosting on Port `8080` HTTP / Port `8443` HTTPS) |
 | **Backend Framework** | ASP.NET Core Minimal APIs targeting **.NET 10.0 (`net10.0`)** |
+| **Authentication & RBAC** | `CookieAuthenticationDefaults.AuthenticationScheme` with 90-day persistent mobile session, PBKDF2 HMAC-SHA512 (`PasswordHasher<TUser>`), and `Admin` / `User` authorization policies |
 | **Database Engine** | **SQLite 3.53+** (`Microsoft.Data.Sqlite` `10.0.0` + `SQLitePCLRaw.lib.e_sqlite3` `3.53.3`) |
 | **Concurrency & Durability** | `PRAGMA journal_mode=WAL;`, `PRAGMA synchronous=NORMAL;`, `PRAGMA foreign_keys=ON;`, `PRAGMA busy_timeout=5000;` + `BackupService` lifecycle `SemaphoreSlim` mutex |
 | **Data Access Layer** | **Dapper** (`2.1.35`) with custom `SqliteDecimalHandler` and `SqliteBoolHandler` for strict `.NET 10` type safety |
 | **Frontend Architecture** | Zero-build Vanilla ES6 Modules (`app.js`, view modules, custom responsive SVG `sankeyChart.js`), centralized list-sorting helpers & `escapeHtml()` sanitization, Mobile-First CSS |
-| **Network Isolation** | Bound to `*:8080`; Windows Firewall rule restricts inbound TCP `8080` to `LocalSubnet` on `Private` profile |
+| **Network & Transport** | Bound to `*:8080` (HTTP) and optionally `*:8443` (HTTPS with local/mkcert certificate); Windows Firewall rule restricts inbound TCP to `LocalSubnet` on `Private` profile |
 
 ---
 
-## 3. Database Schema & Canonical Seed Data (DDL v2.6)
+## 3. Database Schema & Canonical Seed Data (DDL v2.9)
 
 Default Database file location: `C:\ProgramData\HomeBudget\budget.db` (configurable via `HomeBudget:DatabasePath`)  
 Default Automated Backup directory: `<DatabaseDirectory>\Backups\` (e.g., `C:\ProgramData\HomeBudget\Backups\`, configurable via `HomeBudget:BackupDirectoryPath`)
@@ -197,12 +199,25 @@ CREATE TABLE IF NOT EXISTS IncomeOverrides (
     UpdatedAt       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS Users (
+    UserId          INTEGER PRIMARY KEY AUTOINCREMENT,
+    Username        TEXT    NOT NULL UNIQUE COLLATE NOCASE, -- 'admin', 'user'
+    PasswordHash    TEXT    NOT NULL,
+    DisplayName     TEXT    NOT NULL,                       -- e.g., 'Husband', 'Wife'
+    Role            TEXT    NOT NULL CHECK (Role IN ('Admin', 'User')),
+    IsActive        INTEGER NOT NULL DEFAULT 1,
+    LastLoginAt     TEXT    NULL,
+    CreatedAt       TEXT    NOT NULL DEFAULT (datetime('now')),
+    UpdatedAt       TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS IX_Transactions_Date ON Transactions(TransactionDate);
 CREATE INDEX IF NOT EXISTS IX_Transactions_Category ON Transactions(CategoryId);
 CREATE INDEX IF NOT EXISTS IX_Transactions_Type ON Transactions(TransactionType);
 CREATE INDEX IF NOT EXISTS IX_Transactions_Merchant ON Transactions(CleanMerchantName);
 CREATE INDEX IF NOT EXISTS IX_Transactions_DedupHash ON Transactions(DedupHash);
 CREATE INDEX IF NOT EXISTS IX_Transactions_UpdatedAt ON Transactions(UpdatedAt);
+CREATE INDEX IF NOT EXISTS IX_Users_Username ON Users(Username);
 ```
 
 ### 3.2 Canonical Seed Data & `DefaultTaxonomySeeded` Guard
@@ -439,17 +454,83 @@ The **Local SQLite Backup, Restore & Database Management** card in the Admin Pan
    - Presents a dedicated confirmation modal with:
      - **`[x] Back up database before resetting ("pre_reset_all" snapshot)`** *(Checked by default)*.
      - **`[x] Re-seed default starter Categories (12) & Auto-Categorization Rules (15)`** *(Checked by default; unchecking starts with 0 categories and 0 rules)*.
-     - **Explicit Confirmation Checkbox (`#resetAllConfirmCheck`):** Requires the administrator to check *"I understand this will reset all live database information (backup databases will NOT be deleted)"* before the reset button is enabled.
+      - **Explicit Confirmation Checkbox (`#resetAllConfirmCheck`):** Requires the administrator to check *"I understand this will reset all live database information (backup databases will NOT be deleted)"* before the reset button is enabled.
 
 ---
 
-## 5. Updated API Contract Summary (v2.8)
+### 4.5 Role-Based User Authentication, Password Lifecycle & LAN HTTPS Hardening (v2.9)
+
+#### A. Dual-Persona Role-Based Access Control (RBAC) Specification
+The system transitions from an open household trust model to an authenticated dual-role security architecture:
+
+| Capability / Surface | Administrator (`admin` — Husband) | User (`user` — Wife) | Security Enforcement |
+| :--- | :---: | :---: | :--- |
+| **Cashflow & Sankey Visualization** | Full Access | Full Access | Shared analytics; interactive Sankey nodes & table |
+| **Monthly Budgets View** | Full Access | Full Access | Wife can inspect progress and adjust category budget targets |
+| **Category Lifecycle (Add/Edit/Delete/Merge)** | Full Access | Full Access | Both personas can manage category taxonomy |
+| **Expense Recategorization & Forward Rules** | Full Access | Full Access | Wife can recategorize expenses and check *"Apply moving forward"* to create/update auto-categorization rules |
+| **Rule Back-Propagation Dry-Run & Commit** | Full Access | Blocked | Admin only (`POST /api/rules/back-propagate`) |
+| **CSV Statement Ingestion (Upload & Stage)** | Full Access | Blocked | Navigation tab and dropzone hidden for `user`; API gated |
+| **Transaction Inspector** | Full Edit / Split / Delete | Read-Only | Wife can filter/view transactions; edit, split, and delete controls hidden |
+| **Source Account Management (Add/Rename)** | Full Access | Blocked | Admin only (`POST/PUT /api/accounts`) |
+| **Income Settings & Monthly Overrides** | Full Access | Read-Only View | Admin only (`PUT /api/settings`) |
+| **Database Lifecycle (Reset All, Clear History)** | Full Access | Blocked | Admin only; destructive modals hidden |
+| **SQLite Backup Management & Restore** | Full Access | Blocked | Admin only (`/api/backups/*`) |
+| **User & Password Administration** | Full Access | Self-Service Only | Admin can reset user passwords; wife can change her own password |
+
+#### B. Authentication & Session Security (`CookieAuthenticationDefaults`)
+1. **Cookie-Based Authentication:**
+   - Employs ASP.NET Core native cookie authentication (`options.Cookie.Name = "HomeBudget.Auth"`).
+   - Cookies are configured with `HttpOnly = true`, `SameSite = SameSiteMode.Lax`, and `SecurePolicy = CookieSecurePolicy.SameAsRequest` (enabling seamless operation over both HTTP LAN port 8080 and HTTPS port 8443).
+2. **Persistent Mobile Sessions for iOS Safari:**
+   - On login, selecting **"Remember this device"** sets `IsPersistent = true` with a **90-day expiration window** (`ExpireTimeSpan = TimeSpan.FromDays(90)`) and sliding expiration.
+   - When the wife opens HomeBudget from her iPhone home-screen bookmark or Safari, her authenticated session is preserved without requiring daily password re-entry.
+3. **Cryptographic Password Storage:**
+   - Passwords are never stored in plaintext. Passwords are salted and hashed using ASP.NET Core's standard `PasswordHasher<TUser>` (PBKDF2 with HMAC-SHA512, 100,000 iterations, 128-bit salt).
+
+#### C. Password Creation & Ongoing Lifecycle Management
+1. **First-Run Onboarding Wizard (`POST /api/auth/setup`):**
+   - On startup, if `SELECT COUNT(*) FROM Users == 0`, `GET /api/auth/status` reports `isSetupRequired = true`.
+   - The frontend displays a dedicated, non-dismissible **Initial Setup Screen** prompting the administrator to create:
+     - **Admin Account (`admin`):** Display Name (e.g., `Husband`) and Admin Password.
+     - **User Account (`user`):** Display Name (e.g., `Wife`) and Initial User Password.
+   - Calling `POST /api/auth/setup` creates both accounts and hashes their passwords. Once completed, the setup endpoint is permanently disabled; subsequent requests return `400 Bad Request ("Setup already completed")`.
+2. **Self-Service Password Change (`PUT /api/auth/change-password`):**
+   - Any authenticated user (`admin` or `user`) can open their account menu in the header and update their password.
+   - Requires providing `CurrentPassword`, `NewPassword`, and `ConfirmPassword`.
+3. **Admin Password Reset for User (`PUT /api/users/{id}/reset-password`):**
+   - Located in the Admin Panel (`topologyView.js`). If the wife forgets her password on her phone, the administrator can set a new password with one click without knowing her old password.
+4. **Emergency Console / CLI Reset (Host Failsafe):**
+   - In the event the administrator is locked out of the `admin` account, the backend supports a startup CLI parameter (e.g., `dotnet run --reset-admin-password <newpass>`) or a temporary override in `appsettings.json` that resets the admin password on service startup.
+
+#### D. LAN HTTPS / TLS Transition Architecture
+While HomeBudget operates on a private household LAN, adding authentication introduces password entry on mobile devices:
+1. **Why HTTPS is Recommended for iPhone / iOS Safari:**
+   - iOS Safari flags password input fields on unencrypted `http://` pages with a **"Not Secure"** warning badge in the address bar.
+   - HTTPS ensures login credentials and persistent session cookies cannot be observed over Wi-Fi.
+2. **Transition Options for Windows 11 IIS:**
+   - **Phase 1 (Immediate / Zero-Friction):** Set `CookieSecurePolicy.SameAsRequest`. Authentication operates seamlessly over existing HTTP `http://<LAN-IP>:8080`.
+   - **Phase 2 (Recommended LAN HTTPS via `mkcert`):** Generate a local trusted certificate for the PC's hostname (e.g., `homebudget.local`), bind IIS to HTTPS Port `8443`, and install the root CA profile once on the iPhone (Settings > General > VPN & Device Management > Install Profile, then Settings > General > About > Certificate Trust Settings > Enable Full Trust). This provides a native, warning-free green lock on iOS Safari.
+
+---
+
+## 5. Updated API Contract Summary (v2.9)
 
 | Method & Route | Persona | Description | Backup Behavior (`Coalesced` Default) |
 | :--- | :--- | :--- | :--- |
+| **Authentication & Users (`/api/auth/*`, `/api/users/*`)** | | | |
+| `GET /api/auth/status` | Anonymous | Returns whether first-run setup is required (`isSetupRequired: bool`). | None |
+| `POST /api/auth/setup` | Anonymous | One-time setup to create initial `admin` and `user` accounts (only when 0 users exist). | **Major** (`initial_setup`) |
+| `POST /api/auth/login` | Anonymous | Authenticates credentials and issues `HttpOnly` persistent session cookie. | None |
+| `POST /api/auth/logout` | Both | Signs out current session and revokes authentication cookie. | None |
+| `GET /api/auth/me` | Both | Returns current authenticated user (`userId`, `username`, `displayName`, `role`). | None |
+| `PUT /api/auth/change-password` | Both | Self-service password change for the currently authenticated user. | None |
+| `GET /api/users` | Admin | Returns list of configured users (`userId`, `username`, `displayName`, `role`, `lastLoginAt`). | None |
+| `PUT /api/users/{id}/reset-password` | Admin | Administrator reset of another user's password without requiring old password. | None |
+| **Household Accounts & Categories** | | | |
 | `GET /api/accounts` | Both | List active bank and credit card accounts. | None |
 | `POST /api/accounts` | Admin | Create a new account (`AccountName`, `Institution`, `AccountType`). | Coalesced (`account_create`) |
-| `PUT /api/accounts/{id}` | Admin / Both | Rename or edit source account display name, institution format, and account type. | Coalesced (`account_rename`) |
+| `PUT /api/accounts/{id}` | Admin | Rename or edit source account display name, institution format, and account type. | Coalesced (`account_rename`) |
 | `GET /api/categories` | Both | List active categories with optional `?sortBy=alpha_asc\|recent\|custom_order\|budget_desc`. | None |
 | `POST /api/categories` | Both | Create a new category. | Coalesced (`category_create`) |
 | `PUT /api/categories/{id}` | Both | Edit category properties and update `UpdatedAt`. | Coalesced (`category_update`) |
