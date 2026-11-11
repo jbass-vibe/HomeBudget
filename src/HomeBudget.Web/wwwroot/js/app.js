@@ -570,6 +570,86 @@ export function openCategoryManagerModal(categoryToEdit = null, onSuccess = null
 }
 
 /**
+ * Reusable Modal for Adding, Renaming, or Editing a Source Account / Card
+ */
+export function openAccountModal(accountToEdit = null, onSuccess = null) {
+  const isEdit = Boolean(accountToEdit);
+  const currentName = accountToEdit?.accountName || '';
+  const currentInst = accountToEdit?.institution || 'Chase';
+  const currentType = accountToEdit?.accountType || 'CreditCard';
+
+  openModal(`
+    <h3 style="margin-top:0;">${isEdit ? `Rename / Edit Account: ${escapeHtml(currentName)}` : 'Add Credit Card or Bank Account'}</h3>
+    <p style="font-size:12px;color:#64748B;margin-top:0;">Account changes update display names across visualizations, inspector, and budgets automatically.</p>
+
+    <div style="display:flex;flex-direction:column;gap:12px;margin:16px 0;">
+      <div>
+        <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Account Display Name</label>
+        <input type="text" id="acctModalName" class="input-control" style="width:100%;" value="${escapeHtml(currentName)}" placeholder="e.g., Amex Gold Card, Citi Double Cash, Chase Sapphire" />
+      </div>
+      <div>
+        <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Institution CSV Format</label>
+        <select id="acctModalInst" class="select-control" style="width:100%;">
+          <option value="Chase" ${currentInst === 'Chase' ? 'selected' : ''}>Chase (7-Column Credit Card CSV)</option>
+          <option value="Amex" ${currentInst === 'Amex' || currentInst === 'AmericanExpress' ? 'selected' : ''}>American Express (Date, Description, Amount Credit Card CSV)</option>
+          <option value="Citibank" ${currentInst === 'Citibank' || currentInst === 'Citi' ? 'selected' : ''}>Citibank (Status, Date, Description, Debit, Credit CSV)</option>
+          <option value="WellsFargo" ${currentInst === 'WellsFargo' ? 'selected' : ''}>Wells Fargo (5-Column Headerless Checking CSV)</option>
+        </select>
+      </div>
+      <div>
+        <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Account Type</label>
+        <select id="acctModalType" class="select-control" style="width:100%;">
+          <option value="CreditCard" ${currentType === 'CreditCard' ? 'selected' : ''}>Credit Card</option>
+          <option value="Checking" ${currentType === 'Checking' ? 'selected' : ''}>Checking Account</option>
+          <option value="Savings" ${currentType === 'Savings' ? 'selected' : ''}>Savings Account</option>
+        </select>
+      </div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:10px;">
+      <button class="btn btn-outline" id="acctModalCancelBtn">Cancel</button>
+      <button class="btn btn-primary" id="acctModalSaveBtn">${isEdit ? 'Save Changes' : 'Create Account'}</button>
+    </div>
+  `, (modalEl) => {
+    const instSel = modalEl.querySelector('#acctModalInst');
+    const typeSel = modalEl.querySelector('#acctModalType');
+    if (instSel && typeSel && !isEdit) {
+      instSel.onchange = () => {
+        typeSel.value = instSel.value === 'WellsFargo' ? 'Checking' : 'CreditCard';
+      };
+    }
+
+    modalEl.querySelector('#acctModalCancelBtn').onclick = closeModal;
+    modalEl.querySelector('#acctModalSaveBtn').onclick = async () => {
+      const accountName = modalEl.querySelector('#acctModalName').value.trim();
+      const institution = modalEl.querySelector('#acctModalInst').value;
+      const accountType = modalEl.querySelector('#acctModalType').value;
+      if (!accountName) {
+        alert('Account name is required.');
+        return;
+      }
+
+      if (isEdit) {
+        const res = await apiFetch(`/api/accounts/${accountToEdit.accountId}`, {
+          method: 'PUT',
+          body: JSON.stringify({ accountName, institution, accountType })
+        });
+        showToast(`Renamed account to "${accountName}" (${formatBackupStatus(res.backupFileCreated)})`);
+      } else {
+        const res = await apiFetch('/api/accounts', {
+          method: 'POST',
+          body: JSON.stringify({ accountName, institution, accountType })
+        });
+        showToast(`Created account "${accountName}" (${formatBackupStatus(res.backupFileCreated)})`);
+      }
+
+      await refreshReferenceData();
+      closeModal();
+      if (onSuccess) await onSuccess();
+    };
+  });
+}
+
+/**
  * Clear Transaction History Modal (v2.4)
  * Offers pre-clear database backup option and tombstone/staging cleanup options
  * while preserving Categories, Rules, Accounts, Monthly Budgets, and Settings.

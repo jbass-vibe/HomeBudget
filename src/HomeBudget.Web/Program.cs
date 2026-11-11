@@ -59,8 +59,62 @@ app.MapPost("/api/accounts", async (Account req, SqliteConnectionFactory db, Bac
             AccountType = string.IsNullOrWhiteSpace(req.AccountType) ? "CreditCard" : req.AccountType.Trim()
         });
     req.AccountId = id;
-    await backupService.CreateSnapshotImmediateAsync("account_create", ct);
-    return Results.Ok(req);
+    string? backupFile = await backupService.RequestBackupAsync("account_create", isMajorOperation: false, ct);
+    return Results.Ok(new
+    {
+        req.AccountId,
+        req.AccountName,
+        req.Institution,
+        req.AccountType,
+        req.IsActive,
+        backupFileCreated = backupFile
+    });
+});
+
+app.MapPut("/api/accounts/{id:int}", async (int id, Account req, SqliteConnectionFactory db, BackupService backupService, CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(req.AccountName))
+    {
+        return Results.BadRequest(new { error = "AccountName is required." });
+    }
+
+    await using var conn = await db.CreateOpenConnectionAsync(ct);
+    var existing = await conn.QuerySingleOrDefaultAsync<Account>(
+        "SELECT * FROM Accounts WHERE AccountId = @Id;", new { Id = id });
+    if (existing == null)
+    {
+        return Results.NotFound(new { error = $"Account with ID {id} not found." });
+    }
+
+    string newName = req.AccountName.Trim();
+    string institution = string.IsNullOrWhiteSpace(req.Institution) ? existing.Institution : req.Institution.Trim();
+    string accountType = string.IsNullOrWhiteSpace(req.AccountType) ? existing.AccountType : req.AccountType.Trim();
+
+    await conn.ExecuteAsync(
+        """
+        UPDATE Accounts 
+        SET AccountName = @AccountName, 
+            Institution = @Institution, 
+            AccountType = @AccountType
+        WHERE AccountId = @AccountId;
+        """,
+        new
+        {
+            AccountId = id,
+            AccountName = newName,
+            Institution = institution,
+            AccountType = accountType
+        });
+
+    string? backupFile = await backupService.RequestBackupAsync("account_rename", isMajorOperation: false, ct);
+    return Results.Ok(new
+    {
+        accountId = id,
+        accountName = newName,
+        institution,
+        accountType,
+        backupFileCreated = backupFile
+    });
 });
 
 app.MapGet("/api/categories", async (string? sortBy, SqliteConnectionFactory db) =>

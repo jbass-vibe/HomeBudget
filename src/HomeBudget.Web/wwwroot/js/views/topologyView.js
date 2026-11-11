@@ -13,7 +13,8 @@ import {
   openCategoryManagerModal,
   openClearTransactionHistoryModal,
   openResetAllDatabaseModal,
-  openRestoreDatabaseModal
+  openRestoreDatabaseModal,
+  openAccountModal
 } from '../app.js';
 
 export function sortRules(rules, catNameById = {}, sortMode = 'priority_asc') {
@@ -224,9 +225,47 @@ export async function renderTopologyView(container) {
       </div>
     </div>
 
-    <!-- 3. Tiered Income Configuration -->
+    <!-- 3. Source Accounts & Credit Cards Management -->
     <div class="card-panel">
-      <h2 style="margin:0 0 12px 0;font-size:17px;font-weight:800;">3. Household Income Configuration (Google Direct Deposit + Persistent Fallback)</h2>
+      <div class="toolbar-row">
+        <div>
+          <h2 style="margin:0;font-size:17px;font-weight:800;">3. Source Accounts &amp; Credit Cards</h2>
+          <p style="margin:2px 0 0 0;font-size:12px;color:#64748B;">Rename source accounts or configure institution CSV statement formats</p>
+        </div>
+        <button class="btn btn-primary btn-sm" id="addAccountTopologyBtn">+ Add Account / Card</button>
+      </div>
+
+      <div class="table-responsive">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th style="width:60px;">ID</th>
+              <th>Account Display Name</th>
+              <th>Institution CSV Format</th>
+              <th>Account Type</th>
+              <th style="text-align:right;">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${state.accounts.map(a => `
+              <tr data-account-id="${a.accountId}">
+                <td style="color:#64748B;font-weight:700;">#${a.accountId}</td>
+                <td style="font-weight:700;">${escapeHtml(a.accountName)}</td>
+                <td><span class="badge" style="background:#F1F5F9;color:#334155;border:1px solid #CBD5E1;">${escapeHtml(a.institution)}</span></td>
+                <td><span class="badge" style="background:${a.accountType === 'Checking' ? '#ECFDF5' : '#EFF6FF'};color:${a.accountType === 'Checking' ? '#065F46' : '#1E40AF'};border:1px solid ${a.accountType === 'Checking' ? '#A7F3D0' : '#BFDBFE'};">${escapeHtml(a.accountType)}</span></td>
+                <td style="text-align:right;">
+                  <button class="btn btn-outline btn-sm rename-account-row-btn" data-account-id="${a.accountId}">&#9998; Rename / Edit</button>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 4. Tiered Income Configuration -->
+    <div class="card-panel">
+      <h2 style="margin:0 0 12px 0;font-size:17px;font-weight:800;">4. Household Income Configuration (Google Direct Deposit + Persistent Fallback)</h2>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;align-items:end;">
         <div>
           <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Google Payroll Direct Deposit Keyword</label>
@@ -249,11 +288,11 @@ export async function renderTopologyView(container) {
       </div>
     </div>
 
-    <!-- 4. Local SQLite Backup, Restore & Database Management -->
+    <!-- 5. Local SQLite Backup, Restore & Database Management -->
     <div class="card-panel">
       <div class="toolbar-row" style="margin-bottom:14px;">
         <div>
-          <h2 style="margin:0;font-size:17px;font-weight:800;">4. Local SQLite Backup, Restore &amp; Database Management</h2>
+          <h2 style="margin:0;font-size:17px;font-weight:800;">5. Local SQLite Backup, Restore &amp; Database Management</h2>
           <p style="margin:2px 0 0 0;font-size:12px;color:#64748B;">
             Path: <code>${escapeHtml(backupInfo.backupDirectoryPath)}</code> &bull; Smart Coalesced Policy prevents excessive backup churn during rapid edits
           </p>
@@ -678,6 +717,21 @@ export async function renderTopologyView(container) {
     renderBackPropPreview();
   };
 
+  // 3. Source Accounts & Credit Cards Handlers
+  container.querySelectorAll('.rename-account-row-btn').forEach(btn => {
+    btn.onclick = () => {
+      const acctId = btn.getAttribute('data-account-id');
+      const acct = state.accounts.find(a => String(a.accountId) === String(acctId));
+      if (acct) {
+        openAccountModal(acct, () => renderTopologyView(container));
+      }
+    };
+  });
+  const addAcctTopBtn = container.querySelector('#addAccountTopologyBtn');
+  if (addAcctTopBtn) {
+    addAcctTopBtn.onclick = () => openAccountModal(null, () => renderTopologyView(container));
+  }
+
   // Save Income Settings
   container.querySelector('#saveSettingsBtn').onclick = async () => {
     const res = await apiFetch('/api/settings', {
@@ -693,7 +747,7 @@ export async function renderTopologyView(container) {
   };
 
   // ============================================================================
-  // 4. BACKUP MANAGEMENT HANDLERS
+  // 5. BACKUP MANAGEMENT HANDLERS
   // ============================================================================
 
   const backupSortSelect = container.querySelector('#backupSortSelect');

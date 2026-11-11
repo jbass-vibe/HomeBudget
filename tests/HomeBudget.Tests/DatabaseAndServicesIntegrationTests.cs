@@ -298,6 +298,36 @@ public sealed class DatabaseAndServicesIntegrationTests : IDisposable
         Assert.Single(_backupService.ListBackups());
     }
 
+    [Fact]
+    public async Task RenameAccount_UpdatesAccountNameAndPreservesHistoricalTransactionIntegrity()
+    {
+        await using var conn = await _connectionFactory.CreateOpenConnectionAsync();
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO Accounts (AccountId, AccountName, Institution, AccountType) 
+            VALUES (99, 'Original Card Name', 'Chase', 'CreditCard');
+
+            INSERT INTO Transactions (AccountId, TransactionDate, RawDescription, CleanMerchantName, Amount, TransactionType, DedupHash)
+            VALUES (99, '2026-11-01', 'AMAZON.COM', 'AMAZON', 54.32, 'Expense', 'HASH99');
+            """);
+
+        await conn.ExecuteAsync(
+            """
+            UPDATE Accounts 
+            SET AccountName = @AccountName, Institution = @Institution, AccountType = @AccountType 
+            WHERE AccountId = @AccountId;
+            """,
+            new { AccountId = 99, AccountName = "Renamed Sapphire Card", Institution = "Chase", AccountType = "CreditCard" });
+
+        var acct = await conn.QuerySingleAsync<Account>("SELECT * FROM Accounts WHERE AccountId = 99;");
+        Assert.Equal("Renamed Sapphire Card", acct.AccountName);
+
+        // Verify transaction queries joining Accounts table automatically reflect the renamed account
+        var txWithAcct = await conn.QuerySingleAsync<TransactionEntity>(
+            "SELECT t.*, a.AccountName FROM Transactions t JOIN Accounts a ON t.AccountId = a.AccountId WHERE t.AccountId = 99;");
+        Assert.Equal("Renamed Sapphire Card", txWithAcct.AccountName);
+    }
+
     public void Dispose()
     {
         try

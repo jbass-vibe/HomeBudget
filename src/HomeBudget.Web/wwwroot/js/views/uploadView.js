@@ -11,7 +11,8 @@ import {
   showToast,
   openModal,
   closeModal,
-  refreshReferenceData
+  refreshReferenceData,
+  openAccountModal
 } from '../app.js';
 
 let currentStagingSession = null;
@@ -42,18 +43,24 @@ export async function renderUploadView(container) {
         <h1 class="page-title">Upload Bank &amp; Credit Card CSVs</h1>
         <p class="page-subtitle">Chase, American Express, Citibank &amp; Wells Fargo CSV ingestion with two-stage de-duplication and auto-categorization</p>
       </div>
-      <button class="btn btn-outline btn-sm" id="addAccountBtn">+ Add Account / Card</button>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-outline btn-sm" id="renameAccountBtn" title="Rename selected account or change details">&#9998; Rename Account</button>
+        <button class="btn btn-primary btn-sm" id="addAccountBtn">+ Add Account / Card</button>
+      </div>
     </div>
 
     <div class="card-panel">
       <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;margin-bottom:18px;">
-        <div style="flex:1;min-width:240px;">
+        <div style="flex:1;min-width:280px;">
           <label style="font-size:12px;font-weight:700;display:block;margin-bottom:6px;">1. Select Source Account / Credit Card</label>
-          <select id="uploadAccountSelect" class="select-control" style="width:100%;">
-            ${state.accounts.map(a => `
-              <option value="${a.accountId}">${escapeHtml(a.accountName)} (${escapeHtml(a.institution)} - ${escapeHtml(a.accountType)})</option>
-            `).join('')}
-          </select>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <select id="uploadAccountSelect" class="select-control" style="flex:1;">
+              ${state.accounts.map(a => `
+                <option value="${a.accountId}">${escapeHtml(a.accountName)} (${escapeHtml(a.institution)} - ${escapeHtml(a.accountType)})</option>
+              `).join('')}
+            </select>
+            <button class="btn btn-outline btn-sm" id="inlineRenameAccountBtn" title="Rename selected account or change details">&#9998; Rename</button>
+          </div>
         </div>
       </div>
 
@@ -97,60 +104,23 @@ export async function renderUploadView(container) {
     }
   };
 
-  container.querySelector('#addAccountBtn').onclick = () => {
-    openModal(`
-      <h3 style="margin-top:0;">Add Credit Card or Bank Account</h3>
-      <div style="display:flex;flex-direction:column;gap:12px;margin:16px 0;">
-        <div>
-          <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Account Display Name</label>
-          <input type="text" id="newAcctName" class="input-control" style="width:100%;" placeholder="e.g., Amex Gold Card, Citi Double Cash, Chase Sapphire" />
-        </div>
-        <div>
-          <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Institution CSV Format</label>
-          <select id="newAcctInst" class="select-control" style="width:100%;">
-            <option value="Chase">Chase (7-Column Credit Card CSV)</option>
-            <option value="Amex">American Express (Date, Description, Amount Credit Card CSV)</option>
-            <option value="Citibank">Citibank (Status, Date, Description, Debit, Credit CSV)</option>
-            <option value="WellsFargo">Wells Fargo (5-Column Headerless Checking CSV)</option>
-          </select>
-        </div>
-        <div>
-          <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Account Type</label>
-          <select id="newAcctType" class="select-control" style="width:100%;">
-            <option value="CreditCard">Credit Card</option>
-            <option value="Checking">Checking Account</option>
-          </select>
-        </div>
-      </div>
-      <div style="display:flex;justify-content:flex-end;gap:10px;">
-        <button class="btn btn-outline" id="cancelAcctBtn">Cancel</button>
-        <button class="btn btn-primary" id="saveAcctBtn">Create Account</button>
-      </div>
-    `, (modalEl) => {
-      const instSel = modalEl.querySelector('#newAcctInst');
-      const typeSel = modalEl.querySelector('#newAcctType');
-      if (instSel && typeSel) {
-        instSel.onchange = () => {
-          typeSel.value = instSel.value === 'WellsFargo' ? 'Checking' : 'CreditCard';
-        };
-      }
-      modalEl.querySelector('#cancelAcctBtn').onclick = closeModal;
-      modalEl.querySelector('#saveAcctBtn').onclick = async () => {
-        const accountName = modalEl.querySelector('#newAcctName').value.trim();
-        const institution = modalEl.querySelector('#newAcctInst').value;
-        const accountType = modalEl.querySelector('#newAcctType').value;
-        if (!accountName) return;
+  const triggerRenameAccount = () => {
+    const accountId = container.querySelector('#uploadAccountSelect')?.value;
+    const acct = state.accounts.find(a => String(a.accountId) === String(accountId));
+    if (!acct) {
+      showToast('Please select an account to rename.');
+      return;
+    }
+    openAccountModal(acct, () => renderUploadView(container));
+  };
 
-        await apiFetch('/api/accounts', {
-          method: 'POST',
-          body: JSON.stringify({ accountName, institution, accountType })
-        });
-        await refreshReferenceData();
-        closeModal();
-        showToast(`Created account ${accountName}`);
-        renderUploadView(container);
-      };
-    });
+  const renameBtn = container.querySelector('#renameAccountBtn');
+  if (renameBtn) renameBtn.onclick = triggerRenameAccount;
+  const inlineRenameBtn = container.querySelector('#inlineRenameAccountBtn');
+  if (inlineRenameBtn) inlineRenameBtn.onclick = triggerRenameAccount;
+
+  container.querySelector('#addAccountBtn').onclick = () => {
+    openAccountModal(null, () => renderUploadView(container));
   };
 }
 

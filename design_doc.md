@@ -1,18 +1,18 @@
-# Local Home Budgeting & Cashflow System — Design Document (v2.7)
+# Local Home Budgeting & Cashflow System — Design Document (v2.8)
 
-**Document Version:** 2.7  
+**Document Version:** 2.8  
 **Target Platform:** Windows 11 IIS + ASP.NET Core (.NET 10 Minimal APIs) + SQLite (WAL Mode)  
 **Network Scope:** Strictly LAN-Only (`LocalSubnet` via Windows Defender Firewall, Port 8080)  
 **Primary Personas:**
 - **User (Spouse / Mobile-First on iPhone):** Reviews monthly budgets, explores the Cashflow Sankey visualization, manages categories (add/edit/delete), and rapidly categorizes or recategorizes expenses directly from the Visualization and Budgets views with automated forward/backward rule propagation prompts and flexible list sorting.
-- **Administrator (Desktop on Windows 11 PC):** Performs multi-file CSV statement ingestion (Chase, American Express, Citibank & Wells Fargo), manages full category topology, rules, and local SQLite backup/restore lifecycle & policies, clears transaction history or resets all live database information to a clean state while preserving backup databases, and uses the filtered Transaction Inspector to edit, annotate (`Notes`), split, or delete income and expense entries (with tombstone hash protection).
+- **Administrator (Desktop on Windows 11 PC):** Performs multi-file CSV statement ingestion (Chase, American Express, Citibank & Wells Fargo), renames and manages source accounts/cards, manages full category topology, rules, and local SQLite backup/restore lifecycle & policies, clears transaction history or resets all live database information to a clean state while preserving backup databases, and uses the filtered Transaction Inspector to edit, annotate (`Notes`), split, or delete income and expense entries (with tombstone hash protection).
 
 > [!NOTE]
 > **Household LAN Trust Model:** This system runs exclusively on a private household LAN behind a Windows Defender Firewall `LocalSubnet` rule. The **User** and **Administrator** personas represent ergonomic device/view workflows (mobile daily budgeting vs. desktop statement administration) rather than authenticated security boundaries; destructive operations are protected by explicit confirmation modals and automatic pre-operation SQLite snapshots rather than login/password gates.
 
 ---
 
-## 1. Summary of Requirements & Architecture Evolution (v2.0 $\rightarrow$ v2.7)
+## 1. Summary of Requirements & Architecture Evolution (v2.0 $\rightarrow$ v2.8)
 
 ### 1.0 Version Changelog
 | Version | Summary of Architectural & Functional Changes |
@@ -24,6 +24,7 @@
 | **v2.5** | Simplified top-level Tabular Cashflow Breakdown (removing top-level per-account columns while retaining dashboard account spend pills and drill-downs) and Reset All Information (`POST /api/admin/reset-all`). |
 | **v2.6** | Unified canonical schema/seed contract (`DefaultTaxonomySeeded` guard preventing seed resurrection on restart), pre-schema migration ordering for v1 database upgrades (removing legacy `UploadBatches` FK and `Accounts` `CHECK` constraints), preserved backup retention policy across resets, fail-fast safety backup verification, account-scoped tombstones (`DeletedTransactionHashes.AccountId`), exclusive lifecycle mutex across Reset/Restore/Clear/Backup, and inline triage merchant group expansion + `#backPropSortSelect`. |
 | **v2.7** | Added full CSV statement upload support for **American Express (`Amex`)** and **Citibank (`Citibank`)** credit cards (including institution routing, CSV header auto-detection, sign/split-column normalization, checking-account payoff detection, and idempotently seeded default accounts). |
+| **v2.8** | Added source account and credit card renaming capability (`PUT /api/accounts/{id}`) with synchronized updates across CSV upload view and Admin panel, preserving foreign-key transaction join integrity and automated backup snapshots (`account_rename`). |
 
 ### 1.1 Core Product Capabilities
 1. **Full Category Lifecycle & Dual-Persona Access (Add, Edit, Delete):**
@@ -442,12 +443,13 @@ The **Local SQLite Backup, Restore & Database Management** card in the Admin Pan
 
 ---
 
-## 5. Updated API Contract Summary (v2.6)
+## 5. Updated API Contract Summary (v2.8)
 
 | Method & Route | Persona | Description | Backup Behavior (`Coalesced` Default) |
 | :--- | :--- | :--- | :--- |
 | `GET /api/accounts` | Both | List active bank and credit card accounts. | None |
 | `POST /api/accounts` | Admin | Create a new account (`AccountName`, `Institution`, `AccountType`). | Coalesced (`account_create`) |
+| `PUT /api/accounts/{id}` | Admin / Both | Rename or edit source account display name, institution format, and account type. | Coalesced (`account_rename`) |
 | `GET /api/categories` | Both | List active categories with optional `?sortBy=alpha_asc\|recent\|custom_order\|budget_desc`. | None |
 | `POST /api/categories` | Both | Create a new category. | Coalesced (`category_create`) |
 | `PUT /api/categories/{id}` | Both | Edit category properties and update `UpdatedAt`. | Coalesced (`category_update`) |

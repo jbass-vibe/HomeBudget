@@ -191,12 +191,8 @@ assert.ok(
 
 // 8. Verify v2.7 American Express & Citibank credit card CSV upload support across UI and schema
 assert.ok(
-  uploadSource.includes('<option value="Amex">'),
-  'uploadView.js must include American Express (Amex) option in #newAcctInst'
-);
-assert.ok(
-  uploadSource.includes('<option value="Citibank">'),
-  'uploadView.js must include Citibank option in #newAcctInst'
+  uploadSource.includes('American Express') && uploadSource.includes('Citibank'),
+  'uploadView.js must include American Express and Citibank support text'
 );
 assert.ok(
   schemaSql.includes("'American Express Credit Card'") && schemaSql.includes("'Amex'"),
@@ -207,4 +203,31 @@ assert.ok(
   'deploy/schema.sql must seed Citibank Credit Card account'
 );
 
-console.log('✔ Frontend & schema v2.2–v2.7 verification assertions passed.');
+// 9. Verify v2.8 Source Account / Credit Card Renaming controls across app.js, uploadView.js, and topologyView.js
+assert.ok(
+  appSource.includes('export function openAccountModal('),
+  'app.js must export openAccountModal for adding and renaming accounts'
+);
+assert.ok(
+  appSource.includes('/api/accounts/${accountToEdit.accountId}'),
+  'app.js openAccountModal must call PUT /api/accounts/{id} when editing'
+);
+assert.ok(
+  uploadSource.includes('id="renameAccountBtn"'),
+  'uploadView.js header must contain #renameAccountBtn button'
+);
+assert.ok(
+  uploadSource.includes('id="inlineRenameAccountBtn"'),
+  'uploadView.js account select group must contain #inlineRenameAccountBtn button'
+);
+assert.ok(
+  topologySource.includes('3. Source Accounts &amp; Credit Cards'),
+  'topologyView.js must render Section 3: Source Accounts & Credit Cards'
+);
+assert.ok(
+  topologySource.includes('rename-account-row-btn'),
+  'topologyView.js must render .rename-account-row-btn for each account'
+);
+
+console.log('✔ Frontend & schema v2.2–v2.8 verification assertions passed.');
+
