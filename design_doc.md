@@ -4,8 +4,8 @@
 **Target Platform:** Windows 11 IIS + ASP.NET Core (.NET 10 Minimal APIs) + SQLite (WAL Mode)  
 **Network Scope:** Strictly LAN-Only (`LocalSubnet` via Windows Defender Firewall, Port 8080 or Port 8443 HTTPS)  
 **Primary Personas & Authenticated Roles:**
-- **User / Wife (`user`, Mobile-First on iPhone):** Reviews monthly budgets, explores the Cashflow Sankey visualization, manages categories (add/edit/delete), recategorizes expenses with forward rule propagation, and changes her account password. Protected with a 90-day persistent mobile session.
-- **Administrator / Husband (`admin`, Desktop on Windows 11 PC):** Has full system control: multi-file CSV statement ingestion (Chase, Amex, Citi & Wells Fargo), raw transaction editing/splitting/deleting, account management and renaming, full category/rule topology, local SQLite backup/restore lifecycle & policies, clear history / reset all operations, and user password management.
+- **User / Wife (`user`, Mobile-First on iPhone):** Reviews monthly budgets, explores the Cashflow Sankey visualization, manages categories (add/edit/delete), recategorizes expenses with both forward rule creation (`applyMovingForward`) and past expense propagation (`applyToPast`), views and adds auto-categorization rules in the Categories view, accesses the Transaction Inspector in read-only mode (filter, search, and view transactions without edit/split/delete actions), and manages her own account password. Protected with a 90-day persistent mobile session.
+- **Administrator / Husband (`admin`, Desktop on Windows 11 PC):** Has full system control: multi-file CSV statement ingestion (Chase, Amex, Citi & Wells Fargo), raw transaction editing/splitting/deleting, account management and renaming, full category/rule topology with bulk back-propagation dry-run and commit, local SQLite backup/restore lifecycle & policies, clear history / reset all operations, user lockout management, and user password administration.
 
 > [!NOTE]
 > **Authentication & Role-Based Access Control (RBAC):** Transitioning from the v2.0–v2.8 open LAN trust model, v2.9 introduces formal authenticated security boundaries with cookie-based authentication, PBKDF2 password hashing, and role authorization policies (`Admin` vs `User`).
@@ -200,15 +200,18 @@ CREATE TABLE IF NOT EXISTS IncomeOverrides (
 );
 
 CREATE TABLE IF NOT EXISTS Users (
-    UserId          INTEGER PRIMARY KEY AUTOINCREMENT,
-    Username        TEXT    NOT NULL UNIQUE COLLATE NOCASE, -- 'admin', 'user'
-    PasswordHash    TEXT    NOT NULL,
-    DisplayName     TEXT    NOT NULL,                       -- e.g., 'Husband', 'Wife'
-    Role            TEXT    NOT NULL CHECK (Role IN ('Admin', 'User')),
-    IsActive        INTEGER NOT NULL DEFAULT 1,
-    LastLoginAt     TEXT    NULL,
-    CreatedAt       TEXT    NOT NULL DEFAULT (datetime('now')),
-    UpdatedAt       TEXT    NOT NULL DEFAULT (datetime('now'))
+    UserId               INTEGER PRIMARY KEY AUTOINCREMENT,
+    Username             TEXT    NOT NULL UNIQUE COLLATE NOCASE, -- 'admin', 'user'
+    PasswordHash         TEXT    NOT NULL,
+    DisplayName          TEXT    NOT NULL,                       -- e.g., 'Husband', 'Wife'
+    Role                 TEXT    NOT NULL CHECK (Role IN ('Admin', 'User')),
+    SecurityStamp        TEXT    NOT NULL DEFAULT '',            -- Session invalidation stamp on password change
+    FailedLoginAttempts  INTEGER NOT NULL DEFAULT 0,             -- Tracks consecutive failed logins
+    LockoutEndUtc        TEXT    NULL,                           -- ISO-8601 lockout expiration (15 min after 5 fails)
+    IsActive             INTEGER NOT NULL DEFAULT 1,
+    LastLoginAt          TEXT    NULL,
+    CreatedAt            TEXT    NOT NULL DEFAULT (datetime('now')),
+    UpdatedAt            TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS IX_Transactions_Date ON Transactions(TransactionDate);
@@ -435,6 +438,7 @@ The **Local SQLite Backup, Restore & Database Management** card in the Admin Pan
      - **Upload & Restore External `.db` Snapshot:** Upload a `.db` file previously downloaded to the user's computer or Google Drive (`POST /api/backups/restore-upload`), which saves the file into `Backups/`, verifies its SQLite integrity, and restores it.
    - Both restore workflows include a pre-checked option to **create an automatic `pre_restore` safety backup** of the current live database first.
    - The backend verifies the target snapshot file is non-empty and passes `PRAGMA integrity_check;`, creates the optional `pre_restore` snapshot (aborting if requested and snapshot creation fails), uses `SqliteConnection.BackupDatabase` to atomically copy the snapshot into the live `budget.db`, and runs `DatabaseInitializer.ApplyIdempotentSchemaMigrationsAsync` so even older snapshots upgrade cleanly to the current schema.
+   - **User Credential Preservation Guarantee Across Restore:** Before restoring an older snapshot (which may lack a `Users` table or contain stale credentials), `BackupService` caches the current live `Users` records in-memory, applies migrations to the restored database, and restores the current active `Users` table so authenticated logins and password credentials are preserved and users are never locked out.
 5. **Clear Transaction History with Pre-Clear Backup (`POST /api/transactions/clear-history`):**
    - Available from both the **Admin Panel (Section 4)** and the **Transaction Inspector** header via the **`🗑 Clear Transaction History...`** button (`openClearTransactionHistoryModal`).
    - Designed for rapid iteration on category topology, rules, and CSV parsing without losing configured `Categories`, `CategorizationRules`, `Accounts`, `MonthlyBudget` targets, or `Settings` / `IncomeOverrides`.
@@ -446,15 +450,16 @@ The **Local SQLite Backup, Restore & Database Management** card in the Admin Pan
 6. **Reset All Information — Start from Clean History (`POST /api/admin/reset-all`):**
    - Available in the **Admin Panel (Section 4)** and the **Transaction Inspector** header via the **`⚠️ Reset All Information...`** button (`openResetAllDatabaseModal`).
    - Executes under `BackupService.ExecuteExclusiveLifecycleActionAsync` (canceling any pending debounce timer and holding the backup/lifecycle mutex) and uses `DatabaseInitializer.RecreateCleanSchemaAsync` to drop all user tables (including any legacy `UploadBatches` table) under `PRAGMA foreign_keys = OFF` and recreate a clean v2.6 schema.
-   - **Strict Backup & Policy Preservation Guarantee:**
+   - **Strict Backup, Policy & User Preservation Guarantee:**
      - Resetting all live database information **never deletes or modifies any backup `.db` files** in `Backups/`.
      - Preserves the user's configured backup policy settings (`BackupAutoMode`, `BackupDebounceSeconds`, `BackupMinIntervalMinutes`, `MaxRetainedBackups`) across the reset so subsequent snapshots never prune existing backup files back down to `15`.
+     - **Strictly preserves the `Users` table and active user logins** so resetting transaction/budget data does not destroy user accounts or bounce sessions back to onboarding.
      - If `CreateBackupFirst = true` and the `"pre_reset_all"` safety snapshot fails, the reset aborts immediately without modifying the database.
      - Records `('DefaultTaxonomySeeded', '1')` in `Settings` regardless of whether `ReseedDefaultCategoriesAndRules` is checked or unchecked, ensuring a clean zero-category reset stays empty across future application restarts.
    - Presents a dedicated confirmation modal with:
      - **`[x] Back up database before resetting ("pre_reset_all" snapshot)`** *(Checked by default)*.
      - **`[x] Re-seed default starter Categories (12) & Auto-Categorization Rules (15)`** *(Checked by default; unchecking starts with 0 categories and 0 rules)*.
-      - **Explicit Confirmation Checkbox (`#resetAllConfirmCheck`):** Requires the administrator to check *"I understand this will reset all live database information (backup databases will NOT be deleted)"* before the reset button is enabled.
+     - **Explicit Confirmation Checkbox (`#resetAllConfirmCheck`):** Requires the administrator to check *"I understand this will reset all live database information (backup databases and user accounts will NOT be deleted)"* before the reset button is enabled.
 
 ---
 
@@ -468,40 +473,68 @@ The system transitions from an open household trust model to an authenticated du
 | **Cashflow & Sankey Visualization** | Full Access | Full Access | Shared analytics; interactive Sankey nodes & table |
 | **Monthly Budgets View** | Full Access | Full Access | Wife can inspect progress and adjust category budget targets |
 | **Category Lifecycle (Add/Edit/Delete/Merge)** | Full Access | Full Access | Both personas can manage category taxonomy |
-| **Expense Recategorization & Forward Rules** | Full Access | Full Access | Wife can recategorize expenses and check *"Apply moving forward"* to create/update auto-categorization rules |
-| **Rule Back-Propagation Dry-Run & Commit** | Full Access | Blocked | Admin only (`POST /api/rules/back-propagate`) |
-| **CSV Statement Ingestion (Upload & Stage)** | Full Access | Blocked | Navigation tab and dropzone hidden for `user`; API gated |
-| **Transaction Inspector** | Full Edit / Split / Delete | Read-Only | Wife can filter/view transactions; edit, split, and delete controls hidden |
+| **Expense Recategorization (`applyMovingForward` & `applyToPast`)** | Full Access | Full Access | Wife can recategorize expenses and check *"Apply moving forward"* (creates rules) **and** *"Recategorize similar in the past"* from the modal |
+| **Rule Back-Propagation Dry-Run & Bulk Commit** | Full Access | Blocked | Admin only (`POST /api/rules/back-propagate`) |
+| **Categories, Rules & Admin Page (`topologyView.js`)** | Full Access (All 5 Sections) | Sections 1 & 2 Only | Wife sees Section 1 Categories (full edit) and Section 2 Rules (view/add/delete). Sections 3 (Accounts), 4 (Income), and 5 (Backups/Users) are hidden |
+| **CSV Statement Ingestion (Upload & Stage)** | Full Access | Blocked | Navigation tab and dropzone hidden for `user`; API gated (`POST /api/uploads/*`) |
+| **Transaction Inspector (`inspectorView.js`)** | Full Edit / Split / Delete | Read-Only View | Inspector tab is visible to Wife; filter/search/view enabled; `Edit`, `Split`, `Delete`, `Bulk Delete`, `Clear History`, and `Reset All` buttons are hidden |
 | **Source Account Management (Add/Rename)** | Full Access | Blocked | Admin only (`POST/PUT /api/accounts`) |
-| **Income Settings & Monthly Overrides** | Full Access | Read-Only View | Admin only (`PUT /api/settings`) |
+| **Income Settings & Monthly Overrides** | Full Access | Blocked | Admin only (`PUT /api/settings`); hidden on User Categories page |
 | **Database Lifecycle (Reset All, Clear History)** | Full Access | Blocked | Admin only; destructive modals hidden |
 | **SQLite Backup Management & Restore** | Full Access | Blocked | Admin only (`/api/backups/*`) |
-| **User & Password Administration** | Full Access | Self-Service Only | Admin can reset user passwords; wife can change her own password |
+| **User & Password Administration** | Full Access | Self-Service Only | Admin can view users and reset user passwords; wife can change her own password |
 
-#### B. Authentication & Session Security (`CookieAuthenticationDefaults`)
+#### B. Authentication, Cookie Persistence & Session Security
 1. **Cookie-Based Authentication:**
    - Employs ASP.NET Core native cookie authentication (`options.Cookie.Name = "HomeBudget.Auth"`).
    - Cookies are configured with `HttpOnly = true`, `SameSite = SameSiteMode.Lax`, and `SecurePolicy = CookieSecurePolicy.SameAsRequest` (enabling seamless operation over both HTTP LAN port 8080 and HTTPS port 8443).
-2. **Persistent Mobile Sessions for iOS Safari:**
+2. **Persistent Mobile Sessions for iOS Safari (90 Days):**
    - On login, selecting **"Remember this device"** sets `IsPersistent = true` with a **90-day expiration window** (`ExpireTimeSpan = TimeSpan.FromDays(90)`) and sliding expiration.
    - When the wife opens HomeBudget from her iPhone home-screen bookmark or Safari, her authenticated session is preserved without requiring daily password re-entry.
-3. **Cryptographic Password Storage:**
-   - Passwords are never stored in plaintext. Passwords are salted and hashed using ASP.NET Core's standard `PasswordHasher<TUser>` (PBKDF2 with HMAC-SHA512, 100,000 iterations, 128-bit salt).
+3. **Persisted Data Protection Keys Across IIS Application Pool Recycles:**
+   - By default, ASP.NET Core stores Data Protection encryption keys in-memory or ephemeral user profile stores, which invalidates authentication cookies whenever IIS worker processes recycle (e.g. idle timeout, nightly recycle).
+   - HomeBudget explicitly configures Data Protection key persistence to disk:
+     ```csharp
+     builder.Services.AddDataProtection()
+         .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(programDataDir, "keys")))
+         .SetApplicationName("HomeBudget");
+     ```
+   - This guarantees that 90-day mobile cookies remain valid across IIS application pool restarts and host reboots.
+4. **Immediate Session Invalidation via `SecurityStamp`:**
+   - `Users.SecurityStamp` (UUID string) is embedded into the authentication cookie ticket claims.
+   - On active requests, `CookieAuthenticationEvents.ValidatePrincipal` validates that the ticket's `SecurityStamp` matches the database.
+   - When a user changes their password or an Admin resets another user's password, `SecurityStamp = Guid.NewGuid().ToString("N")` is regenerated, immediately revoking active sessions across all devices for that user.
+5. **Brute-Force Protection & Account Lockout Policy:**
+   - Consecutive failed login attempts are tracked per account via `Users.FailedLoginAttempts` and `Users.LockoutEndUtc`.
+   - **Lockout Policy:** 5 consecutive failed attempts trigger a **15-minute account lockout** (`LockoutEndUtc = datetime('now', '+15 minutes')`). Subsequent login attempts during lockout are rejected immediately with a user-friendly error message indicating the remaining lockout minutes.
+   - A successful login resets `FailedLoginAttempts = 0` and clears `LockoutEndUtc`.
+   - The Administrator can also unlock an account or reset its password directly from the Admin Panel.
+6. **Cross-Site Request Forgery (CSRF) Defense:**
+   - Cookies enforce `SameSite = SameSiteMode.Lax`.
+   - In addition, all state-changing API calls (`POST`, `PUT`, `DELETE`) are guarded by a custom header check (`X-HomeBudget-Request: 1`) automatically dispatched by `app.js` (`apiFetch`). Browsers never attach custom headers to cross-origin form submissions, providing bulletproof CSRF defense without complex anti-forgery token syncing.
+7. **Password Complexity Policy:**
+   - Minimum password length of **8 characters** enforced for both `admin` and `user` accounts on setup, self-service change, and admin reset.
 
 #### C. Password Creation & Ongoing Lifecycle Management
 1. **First-Run Onboarding Wizard (`POST /api/auth/setup`):**
    - On startup, if `SELECT COUNT(*) FROM Users == 0`, `GET /api/auth/status` reports `isSetupRequired = true`.
    - The frontend displays a dedicated, non-dismissible **Initial Setup Screen** prompting the administrator to create:
-     - **Admin Account (`admin`):** Display Name (e.g., `Husband`) and Admin Password.
-     - **User Account (`user`):** Display Name (e.g., `Wife`) and Initial User Password.
-   - Calling `POST /api/auth/setup` creates both accounts and hashes their passwords. Once completed, the setup endpoint is permanently disabled; subsequent requests return `400 Bad Request ("Setup already completed")`.
+     - **Admin Account (`admin`):** Display Name (e.g., `Husband`) and Admin Password (min 8 chars).
+     - **User Account (`user`):** Display Name (e.g., `Wife`) and Initial User Password (min 8 chars).
+   - Calling `POST /api/auth/setup` creates both accounts and hashes their passwords using PBKDF2 HMAC-SHA512 (`PasswordHasher<TUser>`). Once completed, the setup endpoint is permanently disabled; subsequent requests return `400 Bad Request ("Setup already completed")`.
 2. **Self-Service Password Change (`PUT /api/auth/change-password`):**
    - Any authenticated user (`admin` or `user`) can open their account menu in the header and update their password.
-   - Requires providing `CurrentPassword`, `NewPassword`, and `ConfirmPassword`.
+   - Requires providing `CurrentPassword`, `NewPassword` (min 8 chars), and `ConfirmPassword`. On success, regenerates `SecurityStamp` and re-issues the current session cookie.
 3. **Admin Password Reset for User (`PUT /api/users/{id}/reset-password`):**
    - Located in the Admin Panel (`topologyView.js`). If the wife forgets her password on her phone, the administrator can set a new password with one click without knowing her old password.
-4. **Emergency Console / CLI Reset (Host Failsafe):**
-   - In the event the administrator is locked out of the `admin` account, the backend supports a startup CLI parameter (e.g., `dotnet run --reset-admin-password <newpass>`) or a temporary override in `appsettings.json` that resets the admin password on service startup.
+   - Resets `FailedLoginAttempts = 0`, clears `LockoutEndUtc`, and regenerates `SecurityStamp` to force re-login on her devices.
+4. **Emergency Admin Password Reset Mechanism (IIS Failsafe):**
+   - Since `dotnet run` is not available on an IIS deployment, the host backend inspects `appsettings.json` on startup for the configuration key:
+     `"HomeBudget:AdminPasswordResetOverride": "<temporary-new-password>"`
+   - If present and non-empty on startup:
+     1. The service resets the `admin` password to this value, sets a fresh `SecurityStamp`, resets `FailedLoginAttempts = 0`, and clears any lockout.
+     2. Logs a prominent warning in the Windows Event Log / application logs.
+     3. The administrator logs in with the override password and deletes the override string from `appsettings.json`.
 
 #### D. LAN HTTPS / TLS Transition Architecture
 While HomeBudget operates on a private household LAN, adding authentication introduces password entry on mobile devices:
@@ -510,7 +543,12 @@ While HomeBudget operates on a private household LAN, adding authentication intr
    - HTTPS ensures login credentials and persistent session cookies cannot be observed over Wi-Fi.
 2. **Transition Options for Windows 11 IIS:**
    - **Phase 1 (Immediate / Zero-Friction):** Set `CookieSecurePolicy.SameAsRequest`. Authentication operates seamlessly over existing HTTP `http://<LAN-IP>:8080`.
-   - **Phase 2 (Recommended LAN HTTPS via `mkcert`):** Generate a local trusted certificate for the PC's hostname (e.g., `homebudget.local`), bind IIS to HTTPS Port `8443`, and install the root CA profile once on the iPhone (Settings > General > VPN & Device Management > Install Profile, then Settings > General > About > Certificate Trust Settings > Enable Full Trust). This provides a native, warning-free green lock on iOS Safari.
+   - **Phase 2 (Optional LAN HTTPS via `mkcert` & Port 8443):**
+     - Step 1: Install `mkcert` on the Windows 11 host PC (`choco install mkcert` or download binary).
+     - Step 2: Run `mkcert -install` and generate cert: `mkcert -pkcs12 -p12-file homebudget.pfx homebudget.local <PC-LAN-IP> localhost`.
+     - Step 3: Import `homebudget.pfx` into Windows Certificate Store (Local Computer -> Personal) and bind HTTPS Port `8443` in IIS Manager.
+     - Step 4: Install `rootCA.pem` on the iPhone (AirDrop or email `rootCA.pem`, tap **Install Profile** under Settings > General > VPN & Device Management, then enable full trust under Settings > General > About > Certificate Trust Settings).
+     - Result: Native, warning-free green lock on iOS Safari with persistent authenticated sessions.
 
 ---
 
