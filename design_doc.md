@@ -1,14 +1,14 @@
 # Local Home Budgeting & Cashflow System — Design Document (v2.9)
 
-**Document Version:** 2.9  
+**Document Version:** 2.9 (Security-Hardened Revision)  
 **Target Platform:** Windows 11 IIS + ASP.NET Core (.NET 10 Minimal APIs) + SQLite (WAL Mode)  
-**Network Scope:** Strictly LAN-Only (`LocalSubnet` via Windows Defender Firewall, Port 8080 or Port 8443 HTTPS)  
-**Primary Personas & Authenticated Roles:**
-- **User / Wife (`user`, Mobile-First on iPhone):** Reviews monthly budgets, explores the Cashflow Sankey visualization, manages categories (add/edit/delete), recategorizes expenses with both forward rule creation (`applyMovingForward`) and past expense propagation (`applyToPast`), views and adds auto-categorization rules in the Categories view, accesses the Transaction Inspector in read-only mode (filter, search, and view transactions without edit/split/delete actions), and manages her own account password. Protected with a 90-day persistent mobile session.
-- **Administrator / Husband (`admin`, Desktop on Windows 11 PC):** Has full system control: multi-file CSV statement ingestion (Chase, Amex, Citi & Wells Fargo), raw transaction editing/splitting/deleting, account management and renaming, full category/rule topology with bulk back-propagation dry-run and commit, local SQLite backup/restore lifecycle & policies, clear history / reset all operations, user lockout management, and user password administration.
+**Network Scope:** Strictly LAN-Only (`LocalSubnet` via Windows Defender Firewall, **Mandatory HTTPS Port 8443**)  
+**Primary Security Roles & Fixed Household Accounts:**
+- **`User` Role (`user`, Mobile-First on iPhone or Desktop):** Configurable `DisplayName` (cosmetic only; unused for authorization). Reviews monthly budgets, explores the Cashflow Sankey visualization, manages categories (add/edit/delete/merge), recategorizes expenses with both forward rule creation (`applyMovingForward`) and past expense propagation (`applyToPast`), views and adds/edits/deletes individual auto-categorization rules, accesses the Transaction Inspector in read-only mode (filter, search, view, and recategorize without edit/split/delete actions), and manages own passphrase. Supports configurable 90-day persistent ("Remember this device") or browser-session cookies over mandatory HTTPS.
+- **`Admin` Role (`admin`, Desktop/Host Administration):** Configurable `DisplayName`. Full system control: multi-file CSV statement ingestion (Chase, Amex, Citi & Wells Fargo), raw transaction editing/splitting/deleting, source account management and renaming, full category/rule topology with bulk back-propagation dry-run and commit, income settings & overrides, local SQLite backup/restore lifecycle (with recent-password step-up confirmation), clear history / reset all (with step-up confirmation), fixed-account user administration (password reset, unlock, enable/disable), and redacted security audit log inspection.
 
 > [!NOTE]
-> **Authentication & Role-Based Access Control (RBAC):** Transitioning from the v2.0–v2.8 open LAN trust model, v2.9 introduces formal authenticated security boundaries with cookie-based authentication, PBKDF2 password hashing, and role authorization policies (`Admin` vs `User`).
+> **Authentication, Transport Security & Role-Based Access Control (RBAC):** Transitioning from the v2.0–v2.8 open LAN trust model, v2.9 mandates LAN HTTPS (`:8443`), deny-by-default server-side authorization (`FallbackPolicy` with `AdminOnly` vs `Authenticated`), cookie authentication backed by DPAPI-encrypted/ACL-restricted Data Protection keys, protected one-time first-run bootstrap setup, partitioned login rate limiting + atomic lockout, CSRF/Origin/same-origin CORS enforcement, one-time break-glass admin recovery, and structured security audit logging.
 
 ---
 
@@ -25,7 +25,7 @@
 | **v2.6** | Unified canonical schema/seed contract (`DefaultTaxonomySeeded` guard preventing seed resurrection on restart), pre-schema migration ordering for v1 database upgrades (removing legacy `UploadBatches` FK and `Accounts` `CHECK` constraints), preserved backup retention policy across resets, fail-fast safety backup verification, account-scoped tombstones (`DeletedTransactionHashes.AccountId`), exclusive lifecycle mutex across Reset/Restore/Clear/Backup, and inline triage merchant group expansion + `#backPropSortSelect`. |
 | **v2.7** | Added full CSV statement upload support for **American Express (`Amex`)** and **Citibank (`Citibank`)** credit cards (including institution routing, CSV header auto-detection, sign/split-column normalization, checking-account payoff detection, and idempotently seeded default accounts). |
 | **v2.8** | Added source account and credit card renaming capability (`PUT /api/accounts/{id}`) with synchronized updates across CSV upload view and Admin panel, preserving foreign-key transaction join integrity and automated backup snapshots (`account_rename`). |
-| **v2.9** | Role-Based User Authentication (RBAC) & Password Management Design: Dual-persona authenticated logins (`admin` for Administrator, `user` for Spouse/Wife), cookie-based authentication with 90-day persistent mobile sessions on iOS Safari, one-time first-run setup wizard, self-service and admin password reset, wife forward rule propagation, and LAN HTTPS/TLS migration architecture. |
+| **v2.9** | Security-Hardened Role-Based User Authentication (RBAC) & Mandatory LAN HTTPS: Neutral fixed two-account architecture (`admin`/`Admin`, `user`/`User`), mandatory TLS/HTTPS (`:8443`, `CookieSecurePolicy.Always`, HSTS), host-token-protected atomic setup, 12–128 char passphrase policy + `IdentityV3` rehash-on-login, partitioned rate limiting + atomic lockout + generic errors, `RememberMe` persistent (90d/180d max) vs session cookies, deny-by-default `FallbackPolicy`, Origin/CSRF/same-origin CORS + security headers + `no-store`, DPAPI/ACL-protected Data Protection keys, one-time break-glass recovery, `SecurityAuditLogs`, step-up confirmation on Reset/Restore, and authoritative all-users identity preservation across restore/reset. |
 
 ### 1.1 Core Product Capabilities
 1. **Full Category Lifecycle & Dual-Persona Access (Add, Edit, Delete):**
@@ -90,14 +90,15 @@
 
 | Layer | Technology / Specification |
 | :--- | :--- |
-| **Host OS & Web Server** | Windows 11 Pro/Home with IIS (`AspNetCoreModuleV2`, In-Process Hosting on Port `8080` HTTP / Port `8443` HTTPS) |
+| **Host OS & Web Server** | Windows 11 Pro/Home with IIS (`AspNetCoreModuleV2`, In-Process Hosting on **mandatory HTTPS Port `8443`**; HTTP `:8080` disabled or redirecting/refusing auth traffic) |
 | **Backend Framework** | ASP.NET Core Minimal APIs targeting **.NET 10.0 (`net10.0`)** |
-| **Authentication & RBAC** | `CookieAuthenticationDefaults.AuthenticationScheme` with 90-day persistent mobile session, PBKDF2 HMAC-SHA512 (`PasswordHasher<TUser>`), and `Admin` / `User` authorization policies |
+| **Authentication & RBAC** | `CookieAuthenticationDefaults.AuthenticationScheme` (`HomeBudget.Auth`, `CookieSecurePolicy.Always`, `RememberMe` 90d persistent / 180d max vs 12h/24h session), ASP.NET Core `PasswordHasher<User>` (`IdentityV3` + auto-rehash), DPAPI-protected persisted Data Protection keys, deny-by-default `FallbackPolicy` (`AdminOnly` / `Authenticated`) |
+| **Web Security & Audit** | Partitioned `AddRateLimiter` (IP + username), atomic SQLite lockout counters, `CsrfAndOriginMiddleware` (`Origin`/`Referer` + `X-HomeBudget-Request: 1` + same-origin CORS), CSP / `no-store` security headers, `SecurityAuditService` (`SecurityAuditLogs`) |
 | **Database Engine** | **SQLite 3.53+** (`Microsoft.Data.Sqlite` `10.0.0` + `SQLitePCLRaw.lib.e_sqlite3` `3.53.3`) |
 | **Concurrency & Durability** | `PRAGMA journal_mode=WAL;`, `PRAGMA synchronous=NORMAL;`, `PRAGMA foreign_keys=ON;`, `PRAGMA busy_timeout=5000;` + `BackupService` lifecycle `SemaphoreSlim` mutex |
 | **Data Access Layer** | **Dapper** (`2.1.35`) with custom `SqliteDecimalHandler` and `SqliteBoolHandler` for strict `.NET 10` type safety |
-| **Frontend Architecture** | Zero-build Vanilla ES6 Modules (`app.js`, view modules, custom responsive SVG `sankeyChart.js`), centralized list-sorting helpers & `escapeHtml()` sanitization, Mobile-First CSS |
-| **Network & Transport** | Bound to `*:8080` (HTTP) and optionally `*:8443` (HTTPS with local/mkcert certificate); Windows Firewall rule restricts inbound TCP to `LocalSubnet` on `Private` profile |
+| **Frontend Architecture** | Zero-build Vanilla ES6 Modules (`app.js`, view modules, custom responsive SVG `sankeyChart.js`), centralized list-sorting helpers & `escapeHtml()` sanitization, cross-tab session sync, Mobile-First CSS |
+| **Network & Transport** | Bound to `*:8443` (mandatory HTTPS with `mkcert` local CA certificate); Windows Firewall restricts inbound TCP to `LocalSubnet` on `Private` profile (defense-in-depth network boundary only) |
 
 ---
 
@@ -201,17 +202,29 @@ CREATE TABLE IF NOT EXISTS IncomeOverrides (
 
 CREATE TABLE IF NOT EXISTS Users (
     UserId               INTEGER PRIMARY KEY AUTOINCREMENT,
-    Username             TEXT    NOT NULL UNIQUE COLLATE NOCASE, -- 'admin', 'user'
-    PasswordHash         TEXT    NOT NULL,
-    DisplayName          TEXT    NOT NULL,                       -- e.g., 'Husband', 'Wife'
+    Username             TEXT    NOT NULL UNIQUE COLLATE NOCASE, -- Immutable fixed logins: 'admin', 'user'
+    PasswordHash         TEXT    NOT NULL,                       -- ASP.NET Core PasswordHasher IdentityV3 hash
+    DisplayName          TEXT    NOT NULL,                       -- Configurable UI label (never used for authorization)
     Role                 TEXT    NOT NULL CHECK (Role IN ('Admin', 'User')),
-    SecurityStamp        TEXT    NOT NULL DEFAULT '',            -- Session invalidation stamp on password change
-    FailedLoginAttempts  INTEGER NOT NULL DEFAULT 0,             -- Tracks consecutive failed logins
+    SecurityStamp        TEXT    NOT NULL DEFAULT '',            -- Rotated on password change, reset, deactivation, or recovery
+    FailedLoginAttempts  INTEGER NOT NULL DEFAULT 0,             -- Atomically incremented failure counter
     LockoutEndUtc        TEXT    NULL,                           -- ISO-8601 lockout expiration (15 min after 5 fails)
-    IsActive             INTEGER NOT NULL DEFAULT 1,
+    IsActive             INTEGER NOT NULL DEFAULT 1,             -- 0 = Disabled (immediately revokes sessions via ValidatePrincipal)
     LastLoginAt          TEXT    NULL,
     CreatedAt            TEXT    NOT NULL DEFAULT (datetime('now')),
     UpdatedAt            TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS SecurityAuditLogs (
+    AuditLogId      INTEGER PRIMARY KEY AUTOINCREMENT,
+    TimestampUtc    TEXT    NOT NULL DEFAULT (datetime('now')),
+    EventType       TEXT    NOT NULL, -- LOGIN_SUCCESS, LOGIN_FAILURE, ACCOUNT_LOCKED, SETUP_COMPLETED, etc.
+    Outcome         TEXT    NOT NULL, -- 'Success', 'Failure', 'Denied'
+    ActorUserId     INTEGER NULL,
+    ActorUsername   TEXT    NULL,
+    TargetUsername  TEXT    NULL,
+    SourceIp        TEXT    NULL,
+    Details         TEXT    NULL      -- Strictly redacted summary (never contains passwords, hashes, cookies, or tokens)
 );
 
 CREATE INDEX IF NOT EXISTS IX_Transactions_Date ON Transactions(TransactionDate);
@@ -221,9 +234,10 @@ CREATE INDEX IF NOT EXISTS IX_Transactions_Merchant ON Transactions(CleanMerchan
 CREATE INDEX IF NOT EXISTS IX_Transactions_DedupHash ON Transactions(DedupHash);
 CREATE INDEX IF NOT EXISTS IX_Transactions_UpdatedAt ON Transactions(UpdatedAt);
 CREATE INDEX IF NOT EXISTS IX_Users_Username ON Users(Username);
+CREATE INDEX IF NOT EXISTS IX_SecurityAuditLogs_Timestamp ON SecurityAuditLogs(TimestampUtc);
 ```
 
-### 3.2 Canonical Seed Data & `DefaultTaxonomySeeded` Guard
+### 3.2 Canonical Seed Data, `DefaultTaxonomySeeded` & `AuthInitialized` Guards
 Both `deploy/schema.sql` and `DatabaseInitializer` share a single canonical seed specification:
 1. **Default Household Accounts (seeded idempotently):**
    - `AccountId = 1`: `'Wells Fargo Household Checking'` (`Institution = 'WellsFargo'`, `AccountType = 'Checking'`)
@@ -233,21 +247,22 @@ Both `deploy/schema.sql` and `DatabaseInitializer` share a single canonical seed
 2. **Default Settings (`INSERT OR IGNORE INTO Settings`):**
    - `PersistentMonthlyIncome = '10000.00'`, `GooglePayrollMatchPattern = 'GOOGLE'`, `CurrentMonthIncomeMode = 'Auto'`, `GeminiApiKey = ''`
    - `BackupAutoMode = 'Coalesced'`, `BackupDebounceSeconds = '30'`, `BackupMinIntervalMinutes = '10'`, `MaxRetainedBackups = '15'`
+   - `AuthInitialized = '0'` *(Flipped atomically to `'1'` during first-run setup; never cleared on reset or user-row edits so anonymous setup cannot re-open).*
 3. **One-Time Starter Categories (12) & Auto-Categorization Rules (15) Gated by `DefaultTaxonomySeeded`:**
    - Starter categories (`Housing & Utilities`, `Groceries`, `Costco`, `Amazon`, `Target`, `Walmart`, `Dining & Coffee`, `Transportation & Gas`, `Subscriptions`, `Healthcare`, `Shopping & Household`, `Entertainment & Misc`) and 15 starter merchant rules (`COSTCO`, `AMZN`, `AMAZON`, `TARGET`, `WAL-MART`, `WALMART`, `WHOLEFDS`, `TRADER JOE`, `SAFEWAY`, `MORTGAGE`, `PG&E`, `CHEVRON`, `SHELL`, `NETFLIX`, `COFFEE`) are seeded **only** when `Settings` does not yet contain `Key = 'DefaultTaxonomySeeded'`.
    - Immediately after initial seeding (or after `ResetAllDatabaseAsync` even when `ReseedDefaultCategoriesAndRules = false`), `('DefaultTaxonomySeeded', '1')` is recorded in `Settings` so subsequent server restarts never resurrect deleted default categories or rules.
 
 ### 3.3 Idempotent Schema Upgrade & Startup Ordering Strategy (`DatabaseInitializer`)
 On startup, `DatabaseInitializer.InitializeAsync()` inspects whether legacy tables already exist:
-1. **Pre-Schema Migration on Existing Databases:** If `Transactions` or `Accounts` already exists in `sqlite_master`, `ApplyIdempotentSchemaMigrationsAsync()` executes **before** running `schema.sql` so that migrated columns (`UpdatedAt`, `CreatedAt`, `CategorizationSource`, `UploadBatchId`, `DeletedTransactionHashes.AccountId`) are added prior to creating `IX_Transactions_UpdatedAt` or other indexes.
+1. **Pre-Schema Migration on Existing Databases (Transactional):** If `Transactions` or `Accounts` already exists in `sqlite_master`, `ApplyIdempotentSchemaMigrationsAsync()` executes **before** running `schema.sql` inside an explicit transaction with automatic rollback on failure so that migrated columns (`UpdatedAt`, `CreatedAt`, `CategorizationSource`, `UploadBatchId`, `DeletedTransactionHashes.AccountId`) and security tables (`Users`, `SecurityAuditLogs`) exist before creating `IX_Transactions_UpdatedAt` or other indexes.
 2. **Column Backfills & Table Normalization (`ApplyIdempotentSchemaMigrationsAsync`):**
-   - Ensures `StagingSessions` and `Settings` exist and prunes expired staging sessions older than 24 hours.
+   - Ensures `StagingSessions`, `Settings`, `Users`, and `SecurityAuditLogs` exist, creating missing identity columns idempotently (`SecurityStamp`, `FailedLoginAttempts`, `LockoutEndUtc`, `IsActive`, `LastLoginAt`), and prunes expired staging sessions older than 24 hours.
    - Adds missing `CreatedAt` and/or `UpdatedAt` columns to `Accounts`, `Categories`, `CategorizationRules`, `IncomeOverrides`, and `Transactions`, backfilling from existing timestamps or `TransactionDate`.
    - Adds missing `AccountId INTEGER NULL` to `DeletedTransactionHashes` and backfills `AccountId` from `DedupHash` or matching transactions where possible.
    - Adds missing `CategorizationSource` and `UploadBatchId` to `Transactions`, backfilling `CategorizationSource` (`'Manual'`, `'Rule'`, or `'Uncategorized'`).
    - Rebuilds `Accounts` under `PRAGMA foreign_keys = OFF` if a legacy v1 `CHECK (Institution IN ('Chase', 'WellsFargo'))` constraint is detected, allowing arbitrary institutions/account types.
    - Rebuilds `Transactions` under `PRAGMA foreign_keys = OFF` if a legacy v1 `UploadBatches` foreign key is present and drops the obsolete `UploadBatches` table.
-   - Normalizes legacy `TransactionType` values (`'Payment'`, `'Transfer'`) to `'CreditCardPayoff'` and marks `DefaultTaxonomySeeded = '1'` on existing populated databases.
+   - Normalizes legacy `TransactionType` values (`'Payment'`, `'Transfer'`) to `'CreditCardPayoff'` and marks `DefaultTaxonomySeeded = '1'` on existing populated databases; if `Users` already contains rows on an upgraded DB, ensures `AuthInitialized = '1'`.
 
 ---
 
@@ -436,9 +451,11 @@ The **Local SQLite Backup, Restore & Database Management** card in the Admin Pan
    - **Per-Row or Top-Level Restore Modal:** Clicking **`↺ Restore Database...`** in the header toolbar or **`↺ Restore DB...`** on any snapshot row opens the Database Restore Modal, supporting two modes:
      - **Restore from Local Snapshot:** Select any snapshot from `Backups/` (pre-selected when launched from a row).
      - **Upload & Restore External `.db` Snapshot:** Upload a `.db` file previously downloaded to the user's computer or Google Drive (`POST /api/backups/restore-upload`), which saves the file into `Backups/`, verifies its SQLite integrity, and restores it.
-   - Both restore workflows include a pre-checked option to **create an automatic `pre_restore` safety backup** of the current live database first.
-   - The backend verifies the target snapshot file is non-empty and passes `PRAGMA integrity_check;`, creates the optional `pre_restore` snapshot (aborting if requested and snapshot creation fails), uses `SqliteConnection.BackupDatabase` to atomically copy the snapshot into the live `budget.db`, and runs `DatabaseInitializer.ApplyIdempotentSchemaMigrationsAsync` so even older snapshots upgrade cleanly to the current schema.
-   - **User Credential Preservation Guarantee Across Restore:** Before restoring an older snapshot (which may lack a `Users` table or contain stale credentials), `BackupService` caches the current live `Users` records in-memory, applies migrations to the restored database, and restores the current active `Users` table so authenticated logins and password credentials are preserved and users are never locked out.
+   - Both restore workflows enforce recent-password **Step-Up Confirmation** (`ConfirmPassword`) and include a pre-checked option to **create an automatic `pre_restore` safety backup** of the current live database first.
+   - **Authoritative Identity Preservation & Transactional Recovery:** Financial-data restores **never** roll back authentication credentials, security stamps, lockouts, roles, or account activation states from an older snapshot:
+     1. Acquires `BackupService.ExecuteExclusiveLifecycleActionAsync` mutex (canceling pending debounced backups and blocking concurrent lifecycle operations).
+     2. Captures the complete live identity & audit snapshot in memory: **ALL** `Users` rows (both `IsActive = 1` and `IsActive = 0`, including `PasswordHash`, `SecurityStamp`, `FailedLoginAttempts`, `LockoutEndUtc`, `Role`, `LastLoginAt`), `Settings.AuthInitialized`, and `SecurityAuditLogs`.
+     3. Verifies target snapshot `PRAGMA integrity_check;`, creates the `pre_restore` safety snapshot if enabled (aborting on failure), stages a temporary copy, applies `DatabaseInitializer.ApplyIdempotentSchemaMigrationsAsync`, and atomically upserts/replaces the authoritative live `Users`, `AuthInitialized`, and `SecurityAuditLogs` inside a single SQLite `BEGIN IMMEDIATE` transaction before swapping into `budget.db` (if any migration or identity-reapply step fails, the live database remains untouched or rolls back cleanly from the pre-restore safety copy).
 5. **Clear Transaction History with Pre-Clear Backup (`POST /api/transactions/clear-history`):**
    - Available from both the **Admin Panel (Section 4)** and the **Transaction Inspector** header via the **`🗑 Clear Transaction History...`** button (`openClearTransactionHistoryModal`).
    - Designed for rapid iteration on category topology, rules, and CSV parsing without losing configured `Categories`, `CategorizationRules`, `Accounts`, `MonthlyBudget` targets, or `Settings` / `IncomeOverrides`.
@@ -449,163 +466,235 @@ The **Local SQLite Backup, Restore & Database Management** card in the Admin Pan
      - **`[x] Clear uncommitted CSV upload staging sessions (StagingSessions)`** *(Checked by default, scoped to `AccountId` when selected)*.
 6. **Reset All Information — Start from Clean History (`POST /api/admin/reset-all`):**
    - Available in the **Admin Panel (Section 4)** and the **Transaction Inspector** header via the **`⚠️ Reset All Information...`** button (`openResetAllDatabaseModal`).
-   - Executes under `BackupService.ExecuteExclusiveLifecycleActionAsync` (canceling any pending debounce timer and holding the backup/lifecycle mutex) and uses `DatabaseInitializer.RecreateCleanSchemaAsync` to drop all user tables (including any legacy `UploadBatches` table) under `PRAGMA foreign_keys = OFF` and recreate a clean v2.6 schema.
-   - **Strict Backup, Policy & User Preservation Guarantee:**
-     - Resetting all live database information **never deletes or modifies any backup `.db` files** in `Backups/`.
+   - Executes under `BackupService.ExecuteExclusiveLifecycleActionAsync` (canceling any pending debounce timer and holding the backup/lifecycle mutex) and uses `DatabaseInitializer.RecreateCleanSchemaAsync` to drop financial tables under `PRAGMA foreign_keys = OFF` and recreate clean tables.
+   - **Strict Backup, Policy & Authoritative Identity Preservation Guarantee:**
+     - Resetting all live financial information **never deletes or modifies any backup `.db` files** in `Backups/` or Data Protection keys in `keys/`.
      - Preserves the user's configured backup policy settings (`BackupAutoMode`, `BackupDebounceSeconds`, `BackupMinIntervalMinutes`, `MaxRetainedBackups`) across the reset so subsequent snapshots never prune existing backup files back down to `15`.
-     - **Strictly preserves the `Users` table and active user logins** so resetting transaction/budget data does not destroy user accounts or bounce sessions back to onboarding.
+     - **Strictly preserves ALL `Users` rows (active and inactive), `Settings.AuthInitialized`, and `SecurityAuditLogs`** atomically inside a transaction so resetting financial/budget data never destroys user credentials, reactivates disabled users, resets lockouts, or re-opens anonymous setup.
      - If `CreateBackupFirst = true` and the `"pre_reset_all"` safety snapshot fails, the reset aborts immediately without modifying the database.
      - Records `('DefaultTaxonomySeeded', '1')` in `Settings` regardless of whether `ReseedDefaultCategoriesAndRules` is checked or unchecked, ensuring a clean zero-category reset stays empty across future application restarts.
    - Presents a dedicated confirmation modal with:
      - **`[x] Back up database before resetting ("pre_reset_all" snapshot)`** *(Checked by default)*.
      - **`[x] Re-seed default starter Categories (12) & Auto-Categorization Rules (15)`** *(Checked by default; unchecking starts with 0 categories and 0 rules)*.
-     - **Explicit Confirmation Checkbox (`#resetAllConfirmCheck`):** Requires the administrator to check *"I understand this will reset all live database information (backup databases and user accounts will NOT be deleted)"* before the reset button is enabled.
+     - **Explicit Confirmation Checkbox (`#resetAllConfirmCheck`):** Requires the administrator to check *"I understand this will reset all live database information (backup databases and user accounts will NOT be deleted)"* and enter **Current Admin Password** (step-up confirmation) before the reset button is enabled.
 
 ---
 
-### 4.5 Role-Based User Authentication, Password Lifecycle & LAN HTTPS Hardening (v2.9)
+### 4.5 Role-Based User Authentication, Security Architecture & Mandatory LAN HTTPS (v2.9)
 
-#### A. Dual-Persona Role-Based Access Control (RBAC) Specification
-The system transitions from an open household trust model to an authenticated dual-role security architecture:
+#### A. Neutral Role-Based Access Control (RBAC) & Fixed Household Accounts
+The system transitions from an open household trust model to an authenticated dual-role security architecture built on neutral security roles (`Admin` and `User`):
+- **Neutral Security Semantics:** `Admin` and `User` are security roles, not relationship or gender labels. Each user record also stores a configurable `DisplayName` (e.g., `"Alex"` or `"Partner"`, or `"Husband"` / `"Wife"` if chosen during setup) that is purely cosmetic in the UI and **never** referenced for authorization decisions.
+- **Fixed Two-Account Scope & Account Lifecycle Rules:**
+  - HomeBudget intentionally limits accounts to two fixed logins (`admin` with immutable `Role = 'Admin'`, and `user` with immutable `Role = 'User'`). Self-registration and arbitrary user creation/deletion endpoints are not exposed.
+  - `Username` and `Role` are immutable after setup; `DisplayName` may be updated without affecting permissions.
+  - **Deactivation / Re-Activation (`IsActive`):** The `Admin` may disable or re-enable the `User` account (`PUT /api/users/{id}/active`). Disabling an account immediately rotates its `SecurityStamp`, causing active sessions on all devices to be rejected (`401 Unauthorized`) on their next request. The system **strictly forbids disabling the last active `Admin`** account (`400 Bad Request`). Deactivated user records remain in `Users` so `SecurityAuditLogs` history remains intact.
+- **Server-Side Enforcement Contract:** Navigation tabs, read-only tables, and modal buttons are hidden/adapted in the frontend strictly for usability. Every API authorization rule is enforced server-side via ASP.NET Core authorization policies (`"AdminOnly"`, `"Authenticated"`, and deny-by-default `FallbackPolicy`).
 
-| Capability / Surface | Administrator (`admin` — Husband) | User (`user` — Wife) | Security Enforcement |
+| Capability / Surface | `Admin` (`admin`) | `User` (`user`) | Server Security Enforcement |
 | :--- | :---: | :---: | :--- |
-| **Cashflow & Sankey Visualization** | Full Access | Full Access | Shared analytics; interactive Sankey nodes & table |
-| **Monthly Budgets View** | Full Access | Full Access | Wife can inspect progress and adjust category budget targets |
-| **Category Lifecycle (Add/Edit/Delete/Merge)** | Full Access | Full Access | Both personas can manage category taxonomy |
-| **Expense Recategorization (`applyMovingForward` & `applyToPast`)** | Full Access | Full Access | Wife can recategorize expenses and check *"Apply moving forward"* (creates rules) **and** *"Recategorize similar in the past"* from the modal |
-| **Rule Back-Propagation Dry-Run & Bulk Commit** | Full Access | Blocked | Admin only (`POST /api/rules/back-propagate`) |
-| **Categories, Rules & Admin Page (`topologyView.js`)** | Full Access (All 5 Sections) | Sections 1 & 2 Only | Wife sees Section 1 Categories (full edit) and Section 2 Rules (view/add/delete). Sections 3 (Accounts), 4 (Income), and 5 (Backups/Users) are hidden |
-| **CSV Statement Ingestion (Upload & Stage)** | Full Access | Blocked | Navigation tab and dropzone hidden for `user`; API gated (`POST /api/uploads/*`) |
-| **Transaction Inspector (`inspectorView.js`)** | Full Edit / Split / Delete | Read-Only View | Inspector tab is visible to Wife; filter/search/view enabled; `Edit`, `Split`, `Delete`, `Bulk Delete`, `Clear History`, and `Reset All` buttons are hidden |
-| **Source Account Management (Add/Rename)** | Full Access | Blocked | Admin only (`POST/PUT /api/accounts`) |
-| **Income Settings & Monthly Overrides** | Full Access | Blocked | Admin only (`PUT /api/settings`); hidden on User Categories page |
-| **Database Lifecycle (Reset All, Clear History)** | Full Access | Blocked | Admin only; destructive modals hidden |
-| **SQLite Backup Management & Restore** | Full Access | Blocked | Admin only (`/api/backups/*`) |
-| **User & Password Administration** | Full Access | Self-Service Only | Admin can view users and reset user passwords; wife can change her own password |
+| **Cashflow & Sankey Visualization** | Full Access | Full Access | `Authenticated` (`GET /api/cashflow`) |
+| **Monthly Budgets View** | Full Access | Full Access | `Authenticated` (`GET /api/budgets/*`, `PUT /api/categories/{id}/budget`) |
+| **Category Lifecycle (Add/Edit/Delete/Merge)** | Full Access | Full Access | `Authenticated` (`/api/categories/*`) |
+| **Expense Recategorization (`applyMovingForward` & `applyToPast`)** | Full Access | Full Access | `Authenticated` (`POST /api/transactions/{id}/categorize` permits rule creation + past match updates) |
+| **Rule CRUD (View/Add/Edit/Delete Individual Rules)** | Full Access | Full Access | `Authenticated` (`GET /api/topology`, `POST/PUT/DELETE /api/rules/*`) |
+| **Rule Back-Propagation Dry-Run & Bulk Commit** | Full Access | **Blocked (`403`)** | **`AdminOnly`** (`POST /api/rules/back-propagate`) |
+| **Categories, Rules & Admin Page (`topologyView.js`)** | All 5 Sections + Audit | Sections 1 & 2 Only | UI hides Sections 3–5 for `User` and skips Admin fetches; server enforces **`AdminOnly`** on underlying endpoints |
+| **CSV Statement Ingestion (Upload & Stage)** | Full Access | **Blocked (`403`)** | **`AdminOnly`** (`POST /api/uploads/stage`, `POST /api/uploads/commit`) |
+| **Transaction Inspector (`inspectorView.js`)** | Full Edit / Split / Delete | Read-Only View | `GET /api/transactions` is `Authenticated`; `PUT/POST split/DELETE/bulk-delete/clear-history` are **`AdminOnly`** |
+| **Source Account Management (Add/Edit/Rename)** | Full Access | **Blocked (`403`)** | **`AdminOnly`** (`POST /api/accounts`, `PUT /api/accounts/{id}`) |
+| **Income Settings & Monthly Overrides** | Full Access | **Blocked (`403`)** | **`AdminOnly`** (`GET/PUT /api/settings`, `PUT/DELETE /api/settings/income-overrides`) *(Cashflow/Budgets compute effective income directly)* |
+| **Database Lifecycle (Clear History, Reset All)** | Full Access | **Blocked (`403`)** | **`AdminOnly`** + recent-password step-up confirmation required on `Reset All` |
+| **SQLite Backup Management & Restore** | Full Access | **Blocked (`403`)** | **`AdminOnly`** (`/api/backups/*`) + recent-password step-up confirmation required on `Restore` |
+| **User Administration & Security Audit Logs** | Full Access | Self-Service Password Only | `Authenticated` (`PUT /api/auth/change-password`); **`AdminOnly`** (`GET /api/users`, password reset, unlock, active status, `GET /api/audit-logs`) |
 
-#### B. Authentication, Cookie Persistence & Session Security
-1. **Cookie-Based Authentication:**
-   - Employs ASP.NET Core native cookie authentication (`options.Cookie.Name = "HomeBudget.Auth"`).
-   - Cookies are configured with `HttpOnly = true`, `SameSite = SameSiteMode.Lax`, and `SecurePolicy = CookieSecurePolicy.SameAsRequest` (enabling seamless operation over both HTTP LAN port 8080 and HTTPS port 8443).
-2. **Persistent Mobile Sessions for iOS Safari (90 Days):**
-   - On login, selecting **"Remember this device"** sets `IsPersistent = true` with a **90-day expiration window** (`ExpireTimeSpan = TimeSpan.FromDays(90)`) and sliding expiration.
-   - When the wife opens HomeBudget from her iPhone home-screen bookmark or Safari, her authenticated session is preserved without requiring daily password re-entry.
-3. **Persisted Data Protection Keys Across IIS Application Pool Recycles:**
-   - By default, ASP.NET Core stores Data Protection encryption keys in-memory or ephemeral user profile stores, which invalidates authentication cookies whenever IIS worker processes recycle (e.g. idle timeout, nightly recycle).
-   - HomeBudget explicitly configures Data Protection key persistence to disk:
-     ```csharp
-     builder.Services.AddDataProtection()
-         .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(programDataDir, "keys")))
-         .SetApplicationName("HomeBudget");
+#### B. Mandatory Transport Security (LAN HTTPS / TLS Prerequisite)
+LAN-only network isolation does not prevent credential or session-cookie interception on shared home Wi-Fi networks:
+1. **HTTPS Is Required Before Enabling Authentication:**
+   - All login, first-run setup, and authenticated API traffic MUST traverse TLS/HTTPS (IIS HTTPS binding on Port `8443` using a locally trusted `mkcert` certificate).
+   - Authentication cookies enforce `CookieSecurePolicy.Always` unconditionally in deployed production mode so browsers never transmit `HomeBudget.Auth` over plaintext HTTP.
+   - Plain HTTP requests on Port `8080` either redirect to `https://<host>:8443` (or the HTTP listener is disabled after TLS validation); non-HTTPS `/api/auth/*` and `/api/*` requests are rejected fail-closed (`400 Bad Request` / `403 Forbidden`) when `RequireHttps` is enabled (all non-loopback/production IIS traffic).
+   - HTTPS responses emit `Strict-Transport-Security: max-age=31536000; includeSubDomains`.
+2. **Certificate Issuance, Client Trust & Renewal Lifecycle:**
+   - **Issuance:** Generated on the Windows 11 host using `mkcert` (`homebudget.local`, host LAN IP, `localhost`, `127.0.0.1`) exported to `.pfx` and imported into `LocalMachine\My` (IIS Port `8443`). Windows Firewall restricts inbound TCP `8443` to `LocalSubnet` on the `Private` profile.
+   - **Mobile Client Trust:** One-time import and full-trust enablement of `mkcert`'s `rootCA.pem` on household iOS/iPadOS/macOS/Windows client devices (`Settings > General > About > Certificate Trust Settings`).
+   - **Expiration & Renewal:** `mkcert` leaf certificates remain valid for ~825 days (~27 months). Renewal (or re-issuance after a host LAN IP change) only requires running the PowerShell `mkcert` renewal command and updating the IIS Port `8443` certificate binding—existing `budget.db`, `Users`, and Data Protection keys remain untouched.
+
+#### C. Protected First-Run Setup Bootstrap & Atomic Completion
+1. **Host-Authorized Bootstrap Secret (`setup-token.txt`):**
+   - If the application starts with `Users` empty and `Settings.AuthInitialized != '1'`, `AuthService` generates a cryptographically random 32-byte URL-safe one-time **Setup Bootstrap Token** (`RandomNumberGenerator.GetBytes(32)`) and writes it atomically to `<DatabaseDirectory>\setup-token.txt` (restricted via NTFS ACLs to `BUILTIN\Administrators` and the IIS AppPool identity).
+   - `GET /api/auth/status` returns `{ isSetupRequired, isAuthenticated, user }` without ever leaking the bootstrap token over HTTP/HTTPS. An unauthenticated LAN device cannot claim setup without physically obtaining the token from the host PC.
+2. **Serialized Atomic Setup Transaction (`POST /api/auth/setup`):**
+   - Enforces IP rate limiting, CSRF/Origin validation, constant-time token verification (`CryptographicOperations.FixedTimeEquals`), an in-process `SemaphoreSlim` setup lock, and a single SQLite `BEGIN IMMEDIATE` transaction that:
+     1. Re-verifies `SELECT COUNT(*) FROM Users == 0` and `AuthInitialized != '1'` (returning `409 Conflict` if already completed or racing).
+     2. Validates both `admin` and `user` passphrases via `PasswordPolicyValidator`.
+     3. Inserts both `admin` (`Role = 'Admin'`) and `user` (`Role = 'User'`) atomically with fresh `SecurityStamp` UUIDs.
+     4. Records `Settings('AuthInitialized', '1')` and `SETUP_COMPLETED` in `SecurityAuditLogs`.
+   - Upon transaction commit, `setup-token.txt` is immediately deleted. If setup is interrupted before completion, `setup-token.txt` remains valid until a setup transaction commits cleanly.
+   - Because `Settings.AuthInitialized = '1'` persists permanently across clean resets and accidental row changes, first-run setup can **never** be re-triggered remotely over the LAN.
+
+#### D. Password Policy & Versioned Framework Hashing
+- **Passphrase-Friendly Length Limits:** Minimum **12 characters**, maximum **128 UTF-8 characters** across setup, self-service change, admin reset, and emergency recovery. No arbitrary uppercase/digit/symbol composition rules that discourage strong passphrases.
+- **Exact Character Handling:** Passwords are **never** silently truncated or `.Trim()`med—leading and trailing spaces and full Unicode characters are preserved. Frontend inputs explicitly allow paste and browser/iOS password-manager autofill (`autocomplete="current-password"` / `"new-password"`).
+- **Trivial/Weak Password Screening:** Rejects passwords matching the account's `Username` or `DisplayName`, single repeated-character strings, or entries in an embedded privacy-preserving offline blocklist of common breached passphrases/sequences (e.g., `"password1234"`, `"123456789012"`, `"qwertyuiop12"`).
+- **Versioned Hash Format & Transparent Upgrades:** Uses ASP.NET Core's `PasswordHasher<User>` (`PasswordHasherCompatibilityMode.IdentityV3` — PBKDF2-HMAC-SHA512 versioned format) rather than a custom hand-rolled hash format. During login, if `VerifyHashedPassword` returns `PasswordVerificationResult.SuccessRehashNeeded`, `AuthService` transparently rehashes and persists the upgraded hash in SQLite inside the login transaction.
+
+#### E. Login Rate Limiting, Atomic Lockout & Generic Error Contract
+1. **Partitioned Request Rate Limiting (`AddRateLimiter`):**
+   - `POST /api/auth/login` and `POST /api/auth/setup` enforce sliding/fixed-window rate limits partitioned by **client IP** (e.g., max 10 requests/minute and 30 requests/15 minutes per IP) AND **target username** (preventing credential stuffing while ensuring a noisy client IP hits `429 Too Many Requests` with `Retry-After` before locking out another household member).
+2. **Atomic Lockout Counter Updates:**
+   - Failed password verification executes an atomic SQLite `UPDATE` statement so concurrent requests never lose counter increments:
+     ```sql
+     UPDATE Users
+     SET FailedLoginAttempts = FailedLoginAttempts + 1,
+         LockoutEndUtc = CASE
+             WHEN FailedLoginAttempts + 1 >= 5 THEN datetime('now', '+15 minutes')
+             ELSE LockoutEndUtc
+         END,
+         UpdatedAt = datetime('now')
+     WHERE UserId = @UserId;
      ```
-   - This guarantees that 90-day mobile cookies remain valid across IIS application pool restarts and host reboots.
-4. **Immediate Session Invalidation via `SecurityStamp`:**
-   - `Users.SecurityStamp` (UUID string) is embedded into the authentication cookie ticket claims.
-   - On active requests, `CookieAuthenticationEvents.ValidatePrincipal` validates that the ticket's `SecurityStamp` matches the database.
-   - When a user changes their password or an Admin resets another user's password, `SecurityStamp = Guid.NewGuid().ToString("N")` is regenerated, immediately revoking active sessions across all devices for that user.
-5. **Brute-Force Protection & Account Lockout Policy:**
-   - Consecutive failed login attempts are tracked per account via `Users.FailedLoginAttempts` and `Users.LockoutEndUtc`.
-   - **Lockout Policy:** 5 consecutive failed attempts trigger a **15-minute account lockout** (`LockoutEndUtc = datetime('now', '+15 minutes')`). Subsequent login attempts during lockout are rejected immediately with a user-friendly error message indicating the remaining lockout minutes.
-   - A successful login resets `FailedLoginAttempts = 0` and clears `LockoutEndUtc`.
-   - The Administrator can also unlock an account or reset its password directly from the Admin Panel.
-6. **Cross-Site Request Forgery (CSRF) Defense:**
-   - Cookies enforce `SameSite = SameSiteMode.Lax`.
-   - In addition, all state-changing API calls (`POST`, `PUT`, `DELETE`) are guarded by a custom header check (`X-HomeBudget-Request: 1`) automatically dispatched by `app.js` (`apiFetch`). Browsers never attach custom headers to cross-origin form submissions, providing bulletproof CSRF defense without complex anti-forgery token syncing.
-7. **Password Complexity Policy:**
-   - Minimum password length of **8 characters** enforced for both `admin` and `user` accounts on setup, self-service change, and admin reset.
+   - After 5 consecutive failures, the account enters a 15-minute lockout (`LockoutEndUtc`). Successful authentication (once lockout expires or is cleared by Admin) resets `FailedLoginAttempts = 0` and `LockoutEndUtc = NULL`.
+3. **Generic Public Errors (Anti-Enumeration) & Admin Unlock:**
+   - Unknown usernames perform a dummy PBKDF2 verification to normalize response timing and return `401 Unauthorized` `{ error: "Invalid username or password." }`—identical to wrong-password responses.
+   - Inactive accounts and locked-out accounts do not confirm username existence to unauthenticated callers; locked-out attempts return a generic cooldown error (`429 Too Many Requests` / generic message `"Sign-in temporarily throttled or credentials invalid. Please wait before retrying or contact the Administrator."`). Exact lockout status, remaining minutes, and an **Unlock Account** button (`POST /api/users/{id}/unlock`) are exposed exclusively inside the authenticated `Admin` panel.
 
-#### C. Password Creation & Ongoing Lifecycle Management
-1. **First-Run Onboarding Wizard (`POST /api/auth/setup`):**
-   - On startup, if `SELECT COUNT(*) FROM Users == 0`, `GET /api/auth/status` reports `isSetupRequired = true`.
-   - The frontend displays a dedicated, non-dismissible **Initial Setup Screen** prompting the administrator to create:
-     - **Admin Account (`admin`):** Display Name (e.g., `Husband`) and Admin Password (min 8 chars).
-     - **User Account (`user`):** Display Name (e.g., `Wife`) and Initial User Password (min 8 chars).
-   - Calling `POST /api/auth/setup` creates both accounts and hashes their passwords using PBKDF2 HMAC-SHA512 (`PasswordHasher<TUser>`). Once completed, the setup endpoint is permanently disabled; subsequent requests return `400 Bad Request ("Setup already completed")`.
-2. **Self-Service Password Change (`PUT /api/auth/change-password`):**
-   - Any authenticated user (`admin` or `user`) can open their account menu in the header and update their password.
-   - Requires providing `CurrentPassword`, `NewPassword` (min 8 chars), and `ConfirmPassword`. On success, regenerates `SecurityStamp` and re-issues the current session cookie.
-3. **Admin Password Reset for User (`PUT /api/users/{id}/reset-password`):**
-   - Located in the Admin Panel (`topologyView.js`). If the wife forgets her password on her phone, the administrator can set a new password with one click without knowing her old password.
-   - Resets `FailedLoginAttempts = 0`, clears `LockoutEndUtc`, and regenerates `SecurityStamp` to force re-login on her devices.
-4. **Emergency Admin Password Reset Mechanism (IIS Failsafe):**
-   - Since `dotnet run` is not available on an IIS deployment, the host backend inspects `appsettings.json` on startup for the configuration key:
-     `"HomeBudget:AdminPasswordResetOverride": "<temporary-new-password>"`
-   - If present and non-empty on startup:
-     1. The service resets the `admin` password to this value, sets a fresh `SecurityStamp`, resets `FailedLoginAttempts = 0`, and clears any lockout.
-     2. Logs a prominent warning in the Windows Event Log / application logs.
-     3. The administrator logs in with the override password and deletes the override string from `appsettings.json`.
+#### F. Session Cookie Policy, `RememberMe`, Revocation & Step-Up Re-Authentication
+1. **Explicit Cookie Attributes:**
+   - `Name = "HomeBudget.Auth"`, `HttpOnly = true`, `SecurePolicy = CookieSecurePolicy.Always`, `SameSite = SameSiteMode.Lax`, `Path = "/"`.
+   - Unauthenticated or unauthorized API calls return JSON `401` / `403` via `OnRedirectToLogin` / `OnRedirectToAccessDenied` (never HTML redirects).
+2. **`RememberMe` Persistent vs. Session Cookie Semantics:**
+   - **`RememberMe = true` ("Remember this device (90 days)"):** Sets `IsPersistent = true` with `ExpiresUtc = DateTimeOffset.UtcNow.AddDays(90)` and `SlidingExpiration = true`, **capped by an explicit absolute maximum session lifetime of 180 days** via a signed `AuthIssuedAt` claim validated inside `OnValidatePrincipal` (preventing infinite sliding renewal on stale devices).
+   - **`RememberMe = false`:** Sets `IsPersistent = false` (non-persistent browser session cookie cleared when the browser closes) with a 12-hour idle window and 24-hour absolute maximum lifetime.
+3. **Immediate Server-Side Revocation (`SecurityStamp`):**
+   - `Users.SecurityStamp` and `AuthIssuedAt` are embedded in cookie claims and verified against SQLite inside `CookieAuthenticationEvents.ValidatePrincipal`.
+   - **Self-Service Password Change (`PUT /api/auth/change-password`):** Rotates `SecurityStamp` (revoking all other devices) and immediately re-issues a fresh cookie for the current device/session.
+   - **Admin Password Reset, Deactivation, & Emergency Recovery:** Rotates `SecurityStamp` to immediately terminate active sessions across all devices for that account.
+   - **Logout (`POST /api/auth/logout`):** Signs out the current browser session cookie (`HttpContext.SignOutAsync`), broadcasts a cross-tab `localStorage` signal (`homebudget:auth-sync`) so sibling open tabs return to login cleanly, and supports `?allDevices=true` to rotate `SecurityStamp` across all devices if requested.
+4. **Sensitive Response Caching & High-Impact Step-Up Re-Authentication:**
+   - All `/api/*` responses include `Cache-Control: no-store, no-cache, must-revalidate` and `Pragma: no-cache` so browsers and Safari's back/forward cache do not persist financial data after sign-out.
+   - Destructive operations (`POST /api/admin/reset-all`, `POST /api/backups/restore/{fileName}`, `POST /api/backups/restore-upload`) require the Administrator's current password (`ConfirmPassword`) inside the confirmation modal, re-verified by `AuthService` right before executing under the lifecycle mutex.
 
-#### D. LAN HTTPS / TLS Transition Architecture
-While HomeBudget operates on a private household LAN, adding authentication introduces password entry on mobile devices:
-1. **Why HTTPS is Recommended for iPhone / iOS Safari:**
-   - iOS Safari flags password input fields on unencrypted `http://` pages with a **"Not Secure"** warning badge in the address bar.
-   - HTTPS ensures login credentials and persistent session cookies cannot be observed over Wi-Fi.
-2. **Transition Options for Windows 11 IIS:**
-   - **Phase 1 (Immediate / Zero-Friction):** Set `CookieSecurePolicy.SameAsRequest`. Authentication operates seamlessly over existing HTTP `http://<LAN-IP>:8080`.
-   - **Phase 2 (Optional LAN HTTPS via `mkcert` & Port 8443):**
-     - Step 1: Install `mkcert` on the Windows 11 host PC (`choco install mkcert` or download binary).
-     - Step 2: Run `mkcert -install` and generate cert: `mkcert -pkcs12 -p12-file homebudget.pfx homebudget.local <PC-LAN-IP> localhost`.
-     - Step 3: Import `homebudget.pfx` into Windows Certificate Store (Local Computer -> Personal) and bind HTTPS Port `8443` in IIS Manager.
-     - Step 4: Install `rootCA.pem` on the iPhone (AirDrop or email `rootCA.pem`, tap **Install Profile** under Settings > General > VPN & Device Management, then enable full trust under Settings > General > About > Certificate Trust Settings).
-     - Result: Native, warning-free green lock on iOS Safari with persistent authenticated sessions.
+#### G. CSRF, Strict CORS & Browser-Origin Strategy
+HomeBudget combines layered browser-boundary controls rather than relying on any single check:
+1. **Strict Same-Origin CORS Policy:** No `AllowAnyOrigin()` and no cross-origin `AllowCredentials()`. Only exact same-origin requests are served.
+2. **`Origin` / `Referer` Header Validation (`CsrfAndOriginMiddleware`):** All state-changing HTTP methods (`POST`, `PUT`, `DELETE`, `PATCH`) must originate from the same `Scheme://Host[:Port]` whenever `Origin` (or fallback `Referer`) is supplied; mismatched or cross-origin requests fail closed with `403 Forbidden` and emit a `CSRF_REJECTED` audit event.
+3. **Custom Header Requirement (`X-HomeBudget-Request: 1`):** Enforced across **every** state-changing `/api/*` endpoint—explicitly including `POST /api/auth/login`, `POST /api/auth/setup`, `POST /api/auth/logout`, and multipart upload endpoints (`POST /api/uploads/stage`, `POST /api/backups/restore-upload`, which bypass Minimal API default form antiforgery with `.DisableAntiforgery()` and instead rely on `CsrfAndOriginMiddleware` before reading request streams).
+4. **Cookie `SameSite = SameSiteMode.Lax`:** Prevents browsers from attaching `HomeBudget.Auth` to third-party form submissions or background XHR/fetch requests.
+5. **Security Boundary Note:** CSRF, `SameSite`, CORS, and `Origin` checks do **not** defend against Cross-Site Scripting (XSS); XSS mitigation relies on strict output encoding (`escapeHtml()`) and the Content Security Policy (CSP) header.
+
+#### H. Data Protection Key Ring Security & Lifecycle
+Authentication tickets are encrypted with ASP.NET Core Data Protection keys stored at `<DatabaseDirectory>\keys\` (`C:\ProgramData\HomeBudget\keys\`), treated as a separate security asset from `budget.db` financial backups:
+- **Outside Web Root:** Resides under `C:\ProgramData\HomeBudget\keys\`, never inside IIS `wwwroot`.
+- **At-Rest Encryption (Windows DPAPI):** Configured with `.PersistKeysToFileSystem(new DirectoryInfo(keysDir)).SetApplicationName("HomeBudget")`, plus `.ProtectKeysWithDpapi(protectToLocalMachine: true)` when `OperatingSystem.IsWindows()` so key XML files are encrypted on disk by Windows DPAPI.
+- **Restrictive NTFS ACLs:** Provisioning script disables inheritance and grants permissions exclusively to `IIS AppPool\HomeBudget` and `BUILTIN\Administrators`.
+- **Rotation, Retention & Loss Recovery:** Keys auto-rotate on ASP.NET Core's 90-day lifetime while retaining prior validation keys until existing 90-day cookies expire. Keys are **never** included in downloadable `.db` snapshots. If the `keys/` directory is accidentally lost or corrupted, the host logs a diagnostic warning and cleanly rejects old cookies (`401 Unauthorized`)—requiring household users to re-authenticate without crashing the application.
+
+#### I. Break-Glass Emergency Admin Recovery (One-Time Host-Local Mechanism)
+HomeBudget explicitly avoids storing any emergency password in `appsettings.json`, git repositories, or persistent configuration files:
+1. **One-Time Recovery Token File (`admin-recovery.token`):** If the Administrator loses access or locks out `admin`, they log directly onto the Windows 11 host PC and write a one-time fresh temporary password (>= 12 chars, validated by `PasswordPolicyValidator`) to `<DatabaseDirectory>\admin-recovery.token` (NTFS-restricted to `Administrators` and IIS AppPool identity) or run the host-local PowerShell break-glass script which restarts/triggers recovery once.
+2. **Single-Use Atomic Consumption:** On startup (or recovery trigger), `AuthService` inspects `<DatabaseDirectory>\admin-recovery.token`:
+   - Reads the temporary password, validates policy compliance, hashes it for `admin`, rotates `SecurityStamp`, resets `FailedLoginAttempts = 0` & `LockoutEndUtc = NULL`, ensures `IsActive = 1`, and writes an `EMERGENCY_RECOVERY` entry to `SecurityAuditLogs` (**without** logging the secret or token value).
+   - **Immediately deletes `admin-recovery.token`** (and records a one-time recovery timestamp/digest check so an accidental duplicate file/restart cannot endlessly replay the same secret).
+   - Prompts/requires the Administrator to immediately set a permanent passphrase via `PUT /api/auth/change-password` upon login and verify `admin-recovery.token` no longer exists.
+
+#### J. Security Audit Logging (`SecurityAuditService` & `SecurityAuditLogs`)
+A dedicated `SecurityAuditService` records security-relevant events in `SecurityAuditLogs` and structured host logs:
+- **Recorded Events:** `LOGIN_SUCCESS`, `LOGIN_FAILURE`, `ACCOUNT_LOCKED`, `ACCOUNT_UNLOCKED`, `SETUP_COMPLETED`, `PASSWORD_CHANGED`, `ADMIN_PASSWORD_RESET`, `USER_STATUS_CHANGED`, `EMERGENCY_RECOVERY`, `SESSION_REVOKED`, `AUTHZ_DENIED` (unexpected 403s on sensitive admin endpoints), `CSRF_REJECTED`, and `STEPUP_FAILED`.
+- **Fields & Redaction Rule:** Captures `TimestampUtc`, `EventType`, `Outcome`, `ActorUserId`, `ActorUsername`, `TargetUsername`, `SourceIp`, and a brief sanitized `Details` summary. **Never** logs plaintext passwords, password hashes, cookie values, Data Protection keys, setup tokens, recovery secrets, or full request bodies.
+- **Retention & Admin Inspection:** `SecurityAuditLogs` are retained across financial resets/restores (pruned automatically beyond 365 days or 10,000 entries to bound disk growth) and surfaced read-only in the Admin Panel via `GET /api/audit-logs`.
+
+#### K. Browser Security Headers & Static File Exposure
+All responses pass through a security-headers middleware enforcing:
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: DENY`
+- `Referrer-Policy: no-referrer`
+- `Permissions-Policy: camera=(), microphone=(), geolocation=()`
+- `Content-Security-Policy`: `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'` *(permits existing inline `style="..."` templates and SVG attributes while blocking all inline scripts and external script/connect origins)*
+- `Cache-Control: no-store, no-cache, must-revalidate` & `Pragma: no-cache` on all `/api/*` routes.
+- All persistent runtime artifacts (`budget.db`, `Backups/`, `keys/`, `setup-token.txt`, `admin-recovery.token`) reside strictly in `C:\ProgramData\HomeBudget\`, outside the IIS `wwwroot` static directory.
+
+#### L. Security Acceptance Checklist (Release Gate)
+Authentication is only considered complete when every item below passes automated and manual verification:
+1. No private `/api/*` endpoint is reachable anonymously (`FallbackPolicy` deny-by-default verified).
+2. No `AdminOnly` endpoint can be invoked by a `User` even via crafted `curl`/HTTP requests (`403 Forbidden`).
+3. No login, setup, or authenticated API request succeeds or issues cookies over plaintext HTTP (`CookieSecurePolicy.Always`).
+4. First-run setup rejects missing/invalid bootstrap tokens, handles concurrent calls atomically, and never re-opens after setup or `Reset All`.
+5. CSRF/Origin checks reject missing `X-HomeBudget-Request` headers, invalid `Origin`/`Referer`, and cross-origin requests (`403 Forbidden`) across login, setup, logout, uploads, and mutations.
+6. Login rate limiting (`429`) and atomic 5-failure / 15-minute lockout behave accurately without leaking username existence.
+7. `RememberMe` true (90d persistent, 180d max) vs false (browser session cookie, 12h/24h max) behaves as specified on desktop and iPhone Safari.
+8. Password changes, Admin resets, and `IsActive = 0` deactivation immediately revoke prior sessions via `SecurityStamp`; disabling the last active `Admin` is blocked.
+9. Data Protection keys carry restrictive NTFS ACLs + DPAPI encryption outside `wwwroot` and survive IIS worker recycles and host reboots.
+10. Financial database restores and `Reset All` preserve **all** current `Users` (active and inactive), `Settings.AuthInitialized`, and `SecurityAuditLogs` atomically under the lifecycle mutex.
+11. Break-glass emergency recovery works offline on the host, consumes its token immediately, cannot replay, and records a redacted audit entry.
+12. All security events appear in `SecurityAuditLogs` with zero leaked passwords, hashes, cookies, or tokens.
 
 ---
 
-## 5. Updated API Contract Summary (v2.9)
+## 5. Complete API Contract & Authorization Matrix (v2.9)
 
-| Method & Route | Persona | Description | Backup Behavior (`Coalesced` Default) |
-| :--- | :--- | :--- | :--- |
-| **Authentication & Users (`/api/auth/*`, `/api/users/*`)** | | | |
-| `GET /api/auth/status` | Anonymous | Returns whether first-run setup is required (`isSetupRequired: bool`). | None |
-| `POST /api/auth/setup` | Anonymous | One-time setup to create initial `admin` and `user` accounts (only when 0 users exist). | **Major** (`initial_setup`) |
-| `POST /api/auth/login` | Anonymous | Authenticates credentials and issues `HttpOnly` persistent session cookie. | None |
-| `POST /api/auth/logout` | Both | Signs out current session and revokes authentication cookie. | None |
-| `GET /api/auth/me` | Both | Returns current authenticated user (`userId`, `username`, `displayName`, `role`). | None |
-| `PUT /api/auth/change-password` | Both | Self-service password change for the currently authenticated user. | None |
-| `GET /api/users` | Admin | Returns list of configured users (`userId`, `username`, `displayName`, `role`, `lastLoginAt`). | None |
-| `PUT /api/users/{id}/reset-password` | Admin | Administrator reset of another user's password without requiring old password. | None |
-| **Household Accounts & Categories** | | | |
-| `GET /api/accounts` | Both | List active bank and credit card accounts. | None |
-| `POST /api/accounts` | Admin | Create a new account (`AccountName`, `Institution`, `AccountType`). | Coalesced (`account_create`) |
-| `PUT /api/accounts/{id}` | Admin | Rename or edit source account display name, institution format, and account type. | Coalesced (`account_rename`) |
-| `GET /api/categories` | Both | List active categories with optional `?sortBy=alpha_asc\|recent\|custom_order\|budget_desc`. | None |
-| `POST /api/categories` | Both | Create a new category. | Coalesced (`category_create`) |
-| `PUT /api/categories/{id}` | Both | Edit category properties and update `UpdatedAt`. | Coalesced (`category_update`) |
-| `PUT /api/categories/{id}/budget` | Both | Update a category's `MonthlyBudget` target and `UpdatedAt`. | Coalesced (`budget_edit`) |
-| `DELETE /api/categories/{id}` | Both | Delete category (optional `?replacementCategoryId=` to reassign transactions/rules). | **Major** (`category_delete`) |
-| `POST /api/categories/{id}/merge-into/{targetId}` | Both | Merge source category into target category and update target `UpdatedAt`. | **Major** (`category_merge`) |
-| `GET /api/topology` | Both | Return all active categories and `CategorizationRules`. | None |
-| `POST /api/rules` | Both | Create a categorization rule. | Coalesced (`rule_create`) |
-| `PUT /api/rules/{id}` | Both | Update an existing categorization rule and `UpdatedAt`. | Coalesced (`rule_update`) |
-| `DELETE /api/rules/{id}` | Both | Delete a categorization rule. | Coalesced (`rule_delete`) |
-| `POST /api/rules/back-propagate` | Both | Dry-run or commit retroactive rule evaluation across historical transactions. | Coalesced (when `dryRun = false`, `backprop`) |
-| `POST /api/uploads/stage` | Admin | Parse Chase/Wells Fargo CSV files, classify rows, compute `DedupHash`, and persist staging session in SQLite. | None |
-| `POST /api/uploads/commit` | Admin | Commit approved staged rows from SQLite `StagingSessions` into `Transactions` / `DeletedTransactionHashes`. | **Major** (`csv_upload`) |
-| `POST /api/transactions/{id}/categorize` | Both | Categorize or recategorize an expense with non-mutually exclusive `applyMovingForward` and `applyToPast` flags. | Coalesced (`recategorize`) |
-| `GET /api/transactions/similar-count` | Both | Returns count of past transactions matching `pattern`. | None |
-| `GET /api/transactions` | Both / Admin | Query transactions with filters and `sortBy` (`date_desc`, `date_asc`, `recent_changes`, `merchant_asc`, `merchant_desc`, `amount_desc`, `amount_asc`). | None |
-| `PUT /api/transactions/{id}` | Admin | Edit transaction fields and `Notes` (single consolidated backup request even when creating/back-propagating a rule). | Coalesced (`data_edit`) |
-| `POST /api/transactions/{id}/split` | Admin | Split a transaction into multiple categorized child legs. | **Major** (`transaction_split`) |
-| `DELETE /api/transactions/{id}` | Admin | Delete an income or expense transaction (with `?addToTombstone=true/false`). | Coalesced (`transaction_delete`) |
-| `POST /api/transactions/bulk-delete` | Admin | Bulk-delete selected income/expense transactions in one atomic transaction. | **Major** (`bulk_delete`) |
-| `POST /api/transactions/clear-history` | Admin | Clear all transactions (or a single account's transactions), optionally resetting account-scoped `DeletedTransactionHashes` and `StagingSessions`, with an optional pre-clear backup (`createBackupFirst = true`). | **Immediate Pre-Clear** (`pre_clear_history`) |
-| `POST /api/admin/reset-all` | Admin | Reset all live database tables to a clean state (optionally creating a `pre_reset_all` snapshot first and optionally re-seeding default starter categories/rules) while preserving all backup databases and backup retention policy. | **Immediate Pre-Reset** (`pre_reset_all`) |
-| `GET /api/cashflow` | Both | Returns cashflow summary, Sankey nodes/links, `uncategorizedTransactions`, and `?categorySort=` ordering. | None |
-| `GET /api/budgets/{yearMonth?}` | Both | Returns monthly budget summary, category progress cards, and uncategorized transactions for the month. | None |
-| `GET /api/settings` | Both | Returns income configuration and monthly overrides. | None |
-| `PUT /api/settings` | Admin | Updates persistent monthly income, payroll match pattern, and income mode. | Coalesced (`settings_update`) |
-| `PUT /api/settings/income-overrides` | Admin | Upserts a monthly income override for a specific `YearMonth`. | Coalesced (`income_override`) |
-| `DELETE /api/settings/income-overrides/{yearMonth}` | Admin | Deletes a monthly income override. | Coalesced (`income_override_delete`) |
-| `GET /api/backups` | Admin | Returns backup directory path, active policy `config`, storage/queue `status`, and `backups` list. | None |
-| `PUT /api/backups/config` | Admin | Updates `BackupAutoMode`, `BackupDebounceSeconds`, `BackupMinIntervalMinutes`, and `MaxRetainedBackups`, and prunes excess snapshots. | None |
-| `POST /api/backups/trigger` | Admin | Immediately flushes any pending coalesced changes and creates a verified manual snapshot. | **Immediate** (`manual`) |
-| `GET /api/backups/download/{fileName}` | Admin | Downloads a specific `.db` backup file. | None |
-| `DELETE /api/backups/{fileName}` | Admin | Deletes a single `.db` backup snapshot from disk. | None |
-| `POST /api/backups/bulk-delete` | Admin | Deletes multiple selected `.db` backup snapshots in one operation. | None |
-| `POST /api/backups/prune` | Admin | Prunes older snapshots so only the `keepCount` newest `.db` files remain. | None |
-| `POST /api/backups/restore/{fileName}` | Admin | Verifies snapshot integrity, optionally creates a `pre_restore` safety snapshot, atomically restores `budget.db`, and runs schema migrations. | **Immediate** (`pre_restore`) |
-| `POST /api/backups/restore-upload` | Admin | Uploads an external `.db` snapshot file, verifies SQLite integrity, optionally creates a `pre_restore` safety snapshot, and restores `budget.db`. | **Immediate** (`pre_restore`) |
+Every mapped route in `src/HomeBudget.Web/Program.cs` is listed below. ASP.NET Core `FallbackPolicy` denies unauthenticated requests by default (`401 Unauthorized` JSON); any new endpoint must explicitly declare `[AllowAnonymous]`, `"Authenticated"`, or `"AdminOnly"`. All state-changing methods (`POST`, `PUT`, `DELETE`, `PATCH`) enforce `CsrfAndOriginMiddleware`.
+
+| Method & Route | Auth Policy | Step-Up? | Description | Backup Behavior (`Coalesced` Default) |
+| :--- | :--- | :---: | :--- | :--- |
+| **Authentication, Users & Security Audit (`/api/auth/*`, `/api/users/*`, `/api/audit-logs`)** | | | | |
+| `GET /api/auth/status` | `AllowAnonymous` | — | Returns `{ isSetupRequired, isAuthenticated, currentUser? }` (never leaks setup token). | None |
+| `POST /api/auth/setup` | `AllowAnonymous` *(Bootstrap Token + 0 Users + Rate Limited)* | — | Atomic one-time creation of `admin` & `user` accounts + sets `AuthInitialized = '1'`. | **Major** (`initial_setup`) |
+| `POST /api/auth/login` | `AllowAnonymous` *(Rate Limited)* | — | Validates credentials via dummy-padded constant-time path, checks atomic lockout, rehashes if needed, issues `HomeBudget.Auth`. | None |
+| `POST /api/auth/logout` | `Authenticated` | — | Signs out session cookie (`?allDevices=true` optionally rotates `SecurityStamp`). | None |
+| `GET /api/auth/me` | `Authenticated` | — | Returns current authenticated user profile (`userId`, `username`, `displayName`, `role`). | None |
+| `PUT /api/auth/change-password` | `Authenticated` | Current Password | Self-service passphrase change (`12`–`128` chars), rotates `SecurityStamp`, re-issues current session cookie. | None |
+| `GET /api/users` | `AdminOnly` | — | Lists fixed accounts with `lastLoginAt`, `isActive`, `isLockedOut`, and remaining lockout minutes. | None |
+| `PUT /api/users/{id:int}/reset-password` | `AdminOnly` | — | Sets new password for target account, clears lockout, and rotates `SecurityStamp`. | None |
+| `POST /api/users/{id:int}/unlock` | `AdminOnly` | — | Clears `FailedLoginAttempts` and `LockoutEndUtc` on a locked account. | None |
+| `PUT /api/users/{id:int}/active` | `AdminOnly` | — | Enables/disables `user` account; immediately rotates `SecurityStamp` on disable; rejects disabling last active `Admin`. | None |
+| `GET /api/audit-logs` | `AdminOnly` | — | Queries paginated redacted `SecurityAuditLogs` entries for Admin inspection. | None |
+| **Household Accounts & Categories** | | | | |
+| `GET /api/accounts` | `Authenticated` | — | Lists active bank and credit card accounts (needed for Inspector/Cashflow dropdowns). | None |
+| `POST /api/accounts` | `AdminOnly` | — | Creates a new source account (`AccountName`, `Institution`, `AccountType`). | Coalesced (`account_create`) |
+| `PUT /api/accounts/{id:int}` | `AdminOnly` | — | Renames or edits source account display name, institution format, and account type. | Coalesced (`account_rename`) |
+| `GET /api/categories` | `Authenticated` | — | Lists active categories with optional `?sortBy=alpha_asc\|recent\|custom_order\|budget_desc`. | None |
+| `POST /api/categories` | `Authenticated` | — | Creates a new category. | Coalesced (`category_create`) |
+| `PUT /api/categories/{id:int}` | `Authenticated` | — | Edits category properties and updates `UpdatedAt`. | Coalesced (`category_update`) |
+| `DELETE /api/categories/{id:int}` | `Authenticated` | — | Deletes category (optional `?replacementCategoryId=` to reassign transactions/rules). | **Major** (`category_delete`) |
+| `PUT /api/categories/{id:int}/budget` | `Authenticated` | — | Updates a category's `MonthlyBudget` target and `UpdatedAt`. | Coalesced (`budget_edit`) |
+| `POST /api/categories/{id:int}/merge-into/{targetId:int}` | `Authenticated` | — | Merges source category into target category and updates target `UpdatedAt`. | **Major** (`category_merge`) |
+| **Taxonomy & Auto-Categorization Rules** | | | | |
+| `GET /api/topology` | `Authenticated` | — | Returns all active categories and `CategorizationRules`. | None |
+| `POST /api/rules` | `Authenticated` | — | Creates an auto-categorization rule. | Coalesced (`rule_create`) |
+| `PUT /api/rules/{id:int}` | `Authenticated` | — | Updates an existing categorization rule and `UpdatedAt`. | Coalesced (`rule_update`) |
+| `DELETE /api/rules/{id:int}` | `Authenticated` | — | Deletes a categorization rule. | Coalesced (`rule_delete`) |
+| `POST /api/rules/back-propagate` | **`AdminOnly`** | — | Bulk dry-run or commit of retroactive rule evaluation across all historical transactions. | Coalesced (when `dryRun = false`, `backprop`) |
+| **Cashflow & Monthly Budgets** | | | | |
+| `GET /api/cashflow` | `Authenticated` | — | Returns cashflow summary (including effective monthly income), Sankey nodes/links, `uncategorizedTransactions`, and `?categorySort=`. | None |
+| `GET /api/budgets/{yearMonth?}` | `Authenticated` | — | Returns monthly budget summary, category progress cards, and uncategorized transactions for the month. | None |
+| **CSV Uploads & Transactions** | | | | |
+| `POST /api/uploads/stage` | `AdminOnly` | — | Parses Chase/Amex/Citi/Wells Fargo CSVs, computes `DedupHash`, persists `StagingSessions` *(enforces `CsrfAndOriginMiddleware` explicitly alongside `.DisableAntiforgery()`)*. | None |
+| `POST /api/uploads/commit` | `AdminOnly` | — | Commits approved staged rows into `Transactions` / `DeletedTransactionHashes`. | **Major** (`csv_upload`) |
+| `GET /api/transactions/similar-count` | `Authenticated` | — | Returns count of past transactions matching `pattern` for the Categorize modal. | None |
+| `POST /api/transactions/{id:int}/categorize` | `Authenticated` | — | Categorizes or recategorizes an expense with non-mutually exclusive `applyMovingForward` and `applyToPast` flags. | Coalesced (`recategorize`) |
+| `GET /api/transactions` | `Authenticated` | — | Queries transactions with multi-criteria filters and `sortBy` (read-only table for `User`; edit actions gated below). | None |
+| `PUT /api/transactions/{id:int}` | `AdminOnly` | — | Edits raw transaction fields and `Notes`. | Coalesced (`data_edit`) |
+| `POST /api/transactions/{id:int}/split` | `AdminOnly` | — | Splits a transaction into multiple categorized child legs. | **Major** (`transaction_split`) |
+| `DELETE /api/transactions/{id:int}` | `AdminOnly` | — | Deletes an income or expense transaction (with `?addToTombstone=true/false`). | Coalesced (`transaction_delete`) |
+| `POST /api/transactions/bulk-delete` | `AdminOnly` | — | Bulk-deletes selected transactions in one atomic transaction. | **Major** (`bulk_delete`) |
+| `POST /api/transactions/clear-history` | `AdminOnly` | — | Clears transactions (all or single account) with optional pre-clear backup and tombstone/staging cleanup. | **Immediate Pre-Clear** (`pre_clear_history`) |
+| `POST /api/admin/reset-all` | `AdminOnly` | **Yes** | Resets live financial tables while preserving all backups, retention policy, `Users`, `AuthInitialized`, and `SecurityAuditLogs`. | **Immediate Pre-Reset** (`pre_reset_all`) |
+| **Settings & Income Overrides *(Admin Only)*** | | | | |
+| `GET /api/settings` | **`AdminOnly`** | — | Returns Admin household income config, `googlePayrollMatchPattern`, `hasGeminiApiKey`, and `incomeOverrides`. | None |
+| `PUT /api/settings` | `AdminOnly` | — | Updates persistent monthly income, payroll match pattern, income mode, and optional Gemini API key. | Coalesced (`settings_update`) |
+| `PUT /api/settings/income-overrides` | `AdminOnly` | — | Upserts a monthly income override for a specific `YearMonth`. | Coalesced (`income_override`) |
+| `DELETE /api/settings/income-overrides/{yearMonth}` | `AdminOnly` | — | Deletes a monthly income override. | Coalesced (`income_override_delete`) |
+| **SQLite Backups & Restore** | | | | |
+| `GET /api/backups` | `AdminOnly` | — | Returns backup directory metadata, policy `config`, storage/queue `status`, and snapshots list. | None |
+| `PUT /api/backups/config` | `AdminOnly` | — | Updates backup mode, debounce, cooldown, and max retained snapshots; prunes excess snapshots. | None |
+| `POST /api/backups/trigger` | `AdminOnly` | — | Flushes pending coalesced changes and creates a verified manual snapshot. | **Immediate** (`manual`) |
+| `GET /api/backups/download/{fileName}` | `AdminOnly` | — | Downloads a specific `.db` financial backup file. | None |
+| `DELETE /api/backups/{fileName}` | `AdminOnly` | — | Deletes a single `.db` backup snapshot from disk. | None |
+| `POST /api/backups/bulk-delete` | `AdminOnly` | — | Deletes multiple selected `.db` snapshots in one operation. | None |
+| `POST /api/backups/prune` | `AdminOnly` | — | Prunes older snapshots so only `keepCount` newest `.db` files remain. | None |
+| `POST /api/backups/restore/{fileName}` | `AdminOnly` | **Yes** | Verifies snapshot integrity, optionally takes `pre_restore` snapshot, restores financial data, migrates schema, and preserves authoritative `Users`/`SecurityAuditLogs`. | **Immediate** (`pre_restore`) |
+| `POST /api/backups/restore-upload` | `AdminOnly` | **Yes** | Uploads external `.db` snapshot *(enforces `CsrfAndOriginMiddleware` alongside `.DisableAntiforgery()`)*, verifies integrity, restores financial data, and preserves authoritative identity state. | **Immediate** (`pre_restore`) |
 
 ---
 
@@ -723,8 +812,9 @@ While HomeBudget operates on a private household LAN, adding authentication intr
 | Staging Sessions, Categories, Rules, and Income Overrides) to start   |
 | from a clean slate.                                                   |
 |                                                                       |
-| 🛡️ Backup Databases Preserved: Existing SQLite backup snapshots in   |
-|    Backups/ are NEVER deleted by this operation.                      |
+| 🛡️ Preserved Assets: Existing SQLite backup snapshots in Backups/,    |
+|    Data Protection keys, user credentials, and audit logs are NEVER   |
+|    deleted by this operation.                                         |
 |                                                                       |
 | [x] Back up current database first ("pre_reset_all" safety snapshot)  |
 |                                                                       |
@@ -732,7 +822,9 @@ While HomeBudget operates on a private household LAN, adding authentication intr
 |     (Uncheck to start with zero categories and zero rules)            |
 |                                                                       |
 | [x] I understand this will reset all live database information        |
-|     (backup databases will NOT be deleted)                            |
+|     (backup databases and user accounts will NOT be deleted)          |
+|                                                                       |
+| Step-Up Confirmation (Admin Password): [ ••••••••••••••••••••••••• ]  |
 |                                                                       |
 |                      [ Cancel ]  [ Backup & Reset All Information ]   |
 +-----------------------------------------------------------------------+
@@ -742,19 +834,28 @@ While HomeBudget operates on a private household LAN, adding authentication intr
 
 ## 7. Trust Model, Error Handling & Verification Strategy
 
-### 7.1 Household LAN Trust Model & Persona Boundaries
-- **Network Boundary:** The service is deployed on a trusted home PC behind a Windows Defender Firewall rule restricting TCP port `8080` to `LocalSubnet` (`Private` network profile).
-- **Ergonomic Personas:** Because only household members on the local Wi-Fi/LAN can reach the application, endpoints do not require user authentication tokens. Instead, destructive administrative actions (`Reset All Information`, `Clear Transaction History`, `Restore Database`, `Bulk Delete`) enforce multi-step confirmation modals and pre-checked SQLite safety snapshots (`pre_reset_all`, `pre_clear_history`, `pre_restore`).
+### 7.1 Authoritative Authenticated LAN Trust Model
+- **Network Boundary Is Defense-in-Depth Only:** The service is deployed on a Windows 11 host behind a Windows Defender Firewall rule restricting inbound HTTPS traffic (TCP port `8443`) to `LocalSubnet` on the `Private` network profile. Local network membership is strictly a network exposure boundary—**never** an identity, authentication, or authorization mechanism.
+- **Mandatory Transport Encryption (HTTPS):** Because household credentials and session cookies traverse Wi-Fi/LAN connections, TLS/HTTPS (`:8443`) is a **mandatory prerequisite** before enabling authentication. Authentication cookies set `SecurePolicy = CookieSecurePolicy.Always`, and authentication or authenticated `/api/*` requests arriving over unencrypted HTTP are refused or redirected to HTTPS.
+- **Deny-by-Default Server Authorization:** ASP.NET Core configures `AuthorizationOptions.FallbackPolicy` to require an authenticated user principal by default. Every `/api/*` endpoint requires authentication (and role checks for `AdminOnly` routes) unless explicitly allowlisted with `[AllowAnonymous]` (`GET /api/auth/status`, rate-limited/bootstrap-protected `POST /api/auth/setup`, and rate-limited `POST /api/auth/login`).
+- **Server-Side Enforcement Contract:** Frontend tab hiding, read-only buttons, and hidden admin panels are strictly UX conveniences. Every security decision (`Admin` vs `User`, `IsActive`, `SecurityStamp`, CSRF/Origin validation, and step-up re-authentication) is enforced on the server before data access or mutations execute.
+- **Safeguards for High-Impact Actions:** Destructive administrative actions (`Reset All Information`, `Restore Database`, `Clear Transaction History`, `Bulk Delete`) enforce server-side `AdminOnly` authorization, multi-step confirmation modals, pre-checked SQLite safety snapshots (`pre_reset_all`, `pre_clear_history`, `pre_restore`), and recent-password step-up confirmation on `Reset All` and `Restore Database`.
 
 ### 7.2 Error Handling & Diagnostic Reporting Contract
-- **Structured Problem Details (`Results.Problem` / `{ error }`):** Endpoints performing database mutations or administrative operations catch `InvalidOperationException` and `SqliteException`, log full diagnostic context on the server, and return structured JSON (`{ error }` or RFC 7807 `ProblemDetails` with `detail` and `title`).
-- **Frontend `apiFetch` Extraction (`app.js`):** The client `apiFetch` wrapper parses `errObj.error || errObj.detail || errObj.title` from non-2xx JSON responses and displays actionable error messages in toast notifications so database or validation errors are immediately visible.
+- **Structured Problem Details (`Results.Problem` / `{ error }`):** Endpoints performing database mutations or administrative operations catch `InvalidOperationException` and `SqliteException`, log full diagnostic context on the server (with strict redaction of passwords, hashes, cookies, setup tokens, and recovery secrets), and return structured JSON (`{ error }` or RFC 7807 `ProblemDetails` with `detail` and `title`).
+- **Consistent API Auth Errors (No Browser Redirects):** Unauthenticated API requests return `401 Unauthorized` JSON and unauthorized role requests return `403 Forbidden` JSON—never HTML login redirects.
+- **Generic Login Failure Messages:** Authentication failures for unknown usernames and wrong passwords return identical public responses (`401 Unauthorized` `"Invalid username or password."`) without revealing account existence.
+- **Frontend `apiFetch` Extraction (`app.js`):** The client `apiFetch` wrapper parses `errObj.error || errObj.detail || errObj.title` from non-2xx JSON responses, triggers safe local-route re-authentication flows on `401` across active tabs, and displays actionable toast notifications.
 
-### 7.3 Automated Verification & Upgrade Testing Strategy
+### 7.3 Automated Verification, Security & Upgrade Testing Strategy
 1. **Frontend Module & Contract Verification (`node tests/frontend_verification.mjs`):**
-   - Verifies ES6 syntax (`node --check`) across all frontend modules (`app.js`, `sankeyChart.js`, and all view modules), validates sorting algorithms (`sortCategories`, `sortTransactions`), verifies XSS escaping (`escapeHtml`), and asserts that all required modal and toolbar element IDs (`#resetAllDatabaseAdminBtn`, `#clearHistoryAdminBtn`, `#restoreDatabaseModalBtn`, `#backPropSortSelect`, etc.) are mounted.
-2. **Backend Integration & Schema Upgrade Verification (`tests/HomeBudget.Tests`):**
-   - Covers legacy v1/v2.0 database migration (`ApplyIdempotentSchemaMigrationsAsync`, including `UploadBatches` FK removal, `Accounts` `CHECK` removal, and `DeletedTransactionHashes.AccountId`), CSV ingestion & provenance immutability, coalesced backup scheduling/pruning, verified restore, account-scoped Clear History, and Reset All Information (both with and without default re-seeding, verifying backup retention policy preservation and non-resurrection across restarts).
+   - Verifies ES6 syntax (`node --check`) across all frontend modules (`app.js`, `sankeyChart.js`, and all view modules including `loginView.js`), validates sorting algorithms (`sortCategories`, `sortTransactions`), verifies XSS escaping (`escapeHtml`), asserts CSRF header dispatch in `apiFetch`, verifies multi-tab logout sync and safe local return-route sanitization, and asserts role-based element rendering rules (`Admin` vs `User`).
+2. **Backend Schema, Upgrade & Lifecycle Integration Verification (`tests/HomeBudget.Tests/DatabaseAndServicesIntegrationTests.cs`):**
+   - Covers legacy v1/v2.0/v2.8 database upgrades (`ApplyIdempotentSchemaMigrationsAsync` including transactional rollback on simulated migration failure), CSV ingestion & provenance immutability, coalesced backup scheduling/pruning, verified restore from older backups lacking `Users`/`SecurityAuditLogs`, account-scoped Clear History, and Reset All Information—verifying authoritative preservation of **all** `Users` rows (active and inactive), `Settings.AuthInitialized`, `SecurityAuditLogs`, and backup retention policies under the exclusive lifecycle mutex.
+3. **Authentication, RBAC & Browser-Security Negative Verification (`tests/HomeBudget.Tests/AuthServiceTests.cs` & `AuthAndSecurityIntegrationTests.cs`):**
+   - **Route Authorization Matrix & Fail-Closed Guard:** Reflection/endpoint-catalog test failing if any mapped `/api/*` route lacks an explicit policy/allowlist, plus full positive and negative request matrix across Anonymous, `User`, and `Admin` identities for all endpoints (including `/api/settings`, `/api/rules/back-propagate`, `/api/users/*`, `/api/audit-logs`, `/api/backups/*`, `/api/uploads/*`, `/api/transactions/*`).
+   - **Setup, Lockout & Rate Limiting:** Invalid/reused bootstrap token rejection, concurrent `POST /api/auth/setup` race prevention, permanent disablement after setup (and after reset), rate-limit `429` enforcement, concurrent failed-login atomic counter integrity, lockout threshold/expiry boundaries, generic error equivalence, and Admin unlock.
+   - **Passwords, Cookies, CSRF, Headers & Recovery:** `12`–`128` char UTF-8 & whitespace preservation, common-password rejection, `PasswordHasher<User>` `SuccessRehashNeeded` auto-upgrade on login, `RememberMe` persistent vs session cookie issuance and absolute lifetime ceiling, `HttpOnly`/`Secure`/`SameSite=Lax` flags, HTTPS enforcement, `SecurityStamp` revocation on password change/reset/deactivation, last-admin deactivation guard, missing `X-HomeBudget-Request` / invalid `Origin` / `Referer` / cross-origin CORS rejection (`403`), `Cache-Control: no-store` & CSP header checks, one-time consumed break-glass recovery, missing/corrupt Data Protection key safe failure, and audit log secret redaction assertions.
 
 
 

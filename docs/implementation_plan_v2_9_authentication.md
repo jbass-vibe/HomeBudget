@@ -1,409 +1,407 @@
-# Implementation Plan: Role-Based User Authentication & Security Hardening (v2.9)
+# Implementation Plan: Security-Hardened Role-Based Authentication & Mandatory LAN HTTPS (v2.9)
 
-**Document Version:** 1.0 (Aligns with `design_doc.md` v2.9)  
-**Target Architecture:** ASP.NET Core (.NET 10 Minimal APIs) + SQLite (WAL Mode) + Windows 11 IIS + Vanilla ES6  
-**Primary Roles:** `Admin` (Husband) and `User` (Wife)  
-
----
-
-## 1. Executive Summary & Goals
-
-This plan outlines the complete engineering tasks to transition HomeBudget from an open household trust model to an authenticated **Role-Based Access Control (RBAC)** system. 
-
-### Key Deliverables:
-1. **Dual-Persona RBAC:**
-   - **`admin` (Husband):** Full control over CSV ingestion, raw transaction edits/splits/deletions, account management, database lifecycle (Reset All, Clear History), backup restore, and user password administration.
-   - **`user` (Wife):** Access to Budgets, Cashflow & Sankey visualizations, category CRUD, expense recategorization with forward rule creation (`applyMovingForward`) and historical propagation (`applyToPast`), and read-only Transaction Inspector access.
-2. **Friction-Free Mobile Sessions (iOS Safari):**
-   - 90-day persistent cookie sessions (`IsPersistent = true`) with sliding expiration.
-   - Disk-persisted Data Protection keys (`C:\ProgramData\HomeBudget\keys`) so IIS worker process recycles never terminate active sessions.
-3. **Password Security & Lifecycle:**
-   - First-run onboarding wizard (`POST /api/auth/setup`).
-   - PBKDF2 password hashing (HMAC-SHA512, 100,000 iterations, 128-bit salt) using ASP.NET Core `PasswordHasher<TUser>`.
-   - Minimum 8-character password policy.
-   - 15-minute brute-force lockout after 5 consecutive failed attempts per account.
-   - Immediate session invalidation via `SecurityStamp` when passwords change.
-   - IIS failsafe emergency reset via `appsettings.json` (`HomeBudget:AdminPasswordResetOverride`).
-4. **Data Integrity & Lifecycle Protection:**
-   - User logins and credentials **strictly preserved** across database restores (`POST /api/backups/restore*`) and clean resets (`POST /api/admin/reset-all`).
-5. **CSRF Protection:**
-   - `SameSite=Lax` cookies + custom `X-HomeBudget-Request: 1` header verification on mutating calls.
-6. **Optional LAN HTTPS Runbook:**
-   - Ready-to-execute PowerShell / `mkcert` deployment runbook for IIS port `8443` and iOS Safari full certificate trust.
+**Document Version:** 2.0 (Security-Hardened Revision; aligns with `design_doc.md` v2.9)  
+**Target Architecture:** ASP.NET Core (.NET 10 Minimal APIs) + SQLite (WAL Mode) + Windows 11 IIS (HTTPS `:8443`) + Vanilla ES6  
+**Security Roles & Fixed Household Accounts:** `Admin` (`admin`) and `User` (`user`) — neutral security roles; `DisplayName` is configurable UI metadata only and is never used for authorization.
 
 ---
 
-## 2. Architecture & Component Interaction
+## 1. Executive Summary & Architectural Goals
+
+This plan specifies the complete, security-hardened engineering tasks to transition HomeBudget from an open household network model to an authenticated **Role-Based Access Control (RBAC)** system backed by mandatory LAN transport encryption.
+
+### Key Deliverables & Security Guarantees:
+1. **Mandatory LAN HTTPS Prerequisite (Port `8443`):**
+   - Authentication cannot be enabled over plaintext HTTP. IIS binds HTTPS Port `8443` using a locally trusted `mkcert` certificate behind a `LocalSubnet` firewall rule.
+   - Cookies use `CookieSecurePolicy.Always`, plain HTTP auth/API traffic is refused or redirected to HTTPS, and HTTPS responses emit `Strict-Transport-Security`.
+2. **Deny-by-Default Neutral RBAC (`FallbackPolicy` + Fixed Two-Account Model):**
+   - `Admin` (`admin`): Full system access including CSV uploads, raw transaction edit/split/delete, source account management, bulk rule back-propagation, income settings/overrides, backups/restore, clear history/reset all (with recent-password step-up confirmation), user administration, and security audit logs.
+   - `User` (`user`): Access to Cashflow & Sankey, Monthly Budgets, Category CRUD/Merge, expense recategorization with both forward rule creation (`applyMovingForward`) and historical matching (`applyToPast`), individual rule CRUD (Sections 1 & 2 only), read-only Transaction Inspector, and self-service passphrase change.
+   - Server authorization policies (`AdminOnly`, `Authenticated`, deny-by-default `FallbackPolicy`) enforce all access control independently of frontend UI visibility.
+3. **Protected First-Run Bootstrap & Atomic Setup:**
+   - Startup generates a host-local 32-byte one-time `setup-token.txt` (restrictive NTFS ACLs) whenever `Users` is empty and `Settings.AuthInitialized != '1'`.
+   - `POST /api/auth/setup` verifies the bootstrap token in constant time, acquires a `SemaphoreSlim` lock, and inserts both `admin` and `user` plus `AuthInitialized = '1'` inside a single SQLite `BEGIN IMMEDIATE` transaction.
+4. **Hardened Passphrase Policy, Rate Limiting & Atomic Lockout:**
+   - **12–128 UTF-8 character** passphrases with exact whitespace preservation, paste/password-manager autofill support, common-password screening, ASP.NET Core `PasswordHasher<User>` (`IdentityV3`), and automatic rehash-on-login (`SuccessRehashNeeded`).
+   - Partitioned rate limiting (`AddRateLimiter` by client IP and target username returning `429`), atomic SQLite lockout counter updates (5 failures $\rightarrow$ 15-minute lockout), dummy-hash timing equalization + generic `401` invalid-credential responses, and Admin unlock/enable-disable controls.
+5. **Cookie Persistence (`RememberMe`), Session Revocation & DPAPI Key Ring:**
+   - `RememberMe = true`: 90-day persistent cookie with sliding expiration capped at an **180-day absolute lifetime** (`AuthIssuedAt`).
+   - `RememberMe = false`: non-persistent browser session cookie (12h idle / 24h absolute max).
+   - Data Protection keys stored outside `wwwroot` in `<DatabaseDirectory>\keys\`, encrypted at rest via Windows DPAPI, restricted by NTFS ACLs, and decoupled from `.db` financial backups.
+   - `SecurityStamp` validation revokes all sessions on password change (re-issuing current session), Admin reset, account deactivation (`IsActive = 0`), or emergency recovery.
+6. **Layered CSRF, Same-Origin CORS, Origin Validation & Security Headers:**
+   - Strict same-origin CORS, `SameSite = SameSiteMode.Lax`, `Origin`/`Referer` verification, and `X-HomeBudget-Request: 1` enforced via `CsrfAndOriginMiddleware` across all mutating endpoints (including `/api/auth/login`, `/api/auth/setup`, `/api/auth/logout`, and multipart uploads/restores).
+   - CSP, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Permissions-Policy`, and `Cache-Control: no-store` on `/api/*`.
+7. **Authoritative Identity Preservation, One-Time Recovery & Audit Trail:**
+   - Restore and `Reset All` execute under `BackupService.ExecuteExclusiveLifecycleActionAsync` and preserve **ALL** `Users` rows (active and inactive), `Settings.AuthInitialized`, and `SecurityAuditLogs` atomically.
+   - Host-local single-use `<DatabaseDirectory>\admin-recovery.token` replaces plaintext `appsettings.json` overrides and deletes itself immediately upon consumption.
+   - `SecurityAuditService` records security events in `SecurityAuditLogs` with strict secret redaction.
+
+---
+
+## 2. Security Request Pipeline & Authentication Flow
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Wife as Wife (iPhone / Safari)
-    actor Husband as Husband (Desktop / Admin)
-    participant Client as Web Frontend (ES6)
-    participant Middleware as Auth & CSRF Middleware
-    participant AuthSvc as AuthService
-    participant DB as SQLite (budget.db)
+    actor AdminOp as Operator / Admin (Host or Desktop HTTPS)
+    actor UserClient as Household User (iPhone Safari HTTPS)
+    participant Edge as IIS TLS (:8443) + Security Headers
+    participant Guard as RateLimiter & CsrfAndOriginMiddleware
+    participant Auth as Cookie Auth + FallbackPolicy + AuthService
+    participant Audit as SecurityAuditService
+    participant DB as SQLite WAL (budget.db)
 
-    Note over Client, DB: First-Time Initialization
-    Client->>AuthSvc: GET /api/auth/status
-    AuthSvc->>DB: SELECT COUNT(*) FROM Users
-    DB-->>AuthSvc: 0 users
-    AuthSvc-->>Client: { isSetupRequired: true }
-    Husband->>Client: Fills Initial Setup (Admin & User Passwords)
-    Client->>AuthSvc: POST /api/auth/setup (min 8 chars)
-    AuthSvc->>DB: INSERT admin & user (PBKDF2 hashes, fresh SecurityStamps)
-    AuthSvc-->>Client: Setup Completed
+    Note over AdminOp, DB: Phase 1 & 3 — Protected First-Run Setup (One-Time Host Bootstrap Token)
+    AdminOp->>Edge: GET /api/auth/status (HTTPS :8443)
+    Edge->>Auth: FallbackPolicy allows AllowAnonymous
+    Auth->>DB: Check Users count & AuthInitialized
+    DB-->>Auth: count=0, AuthInitialized='0'
+    Auth-->>AdminOp: { isSetupRequired: true, isAuthenticated: false }
+    AdminOp->>Edge: POST /api/auth/setup (BootstrapToken + Passphrases + Origin + X-HomeBudget-Request)
+    Edge->>Guard: Verify HTTPS, Origin/Referer, X-HomeBudget-Request, RateLimit
+    Guard->>Auth: Constant-time BootstrapToken check + SemaphoreSlim
+    Auth->>DB: BEGIN IMMEDIATE -> Insert admin & user + AuthInitialized='1' -> COMMIT
+    Auth->>Audit: Log SETUP_COMPLETED (no secrets)
+    Auth-->>AdminOp: 200 OK (Delete setup-token.txt)
 
-    Note over Client, DB: Regular Session & 90-Day Persistence
-    Wife->>Client: Logs in with "Remember this device"
-    Client->>Middleware: POST /api/auth/login (X-HomeBudget-Request: 1)
-    Middleware->>AuthSvc: ValidateCredentials
-    AuthSvc->>DB: Check Lockout & Verify Hash
-    AuthSvc-->>Middleware: Success (reset failed attempts)
-    Middleware-->>Wife: Set-Cookie: HomeBudget.Auth (HttpOnly, SameSite=Lax, 90d)
-    
-    Note over Client, DB: Session Validation Across IIS Recycles
-    Wife->>Client: Navigates to Budgets View
-    Client->>Middleware: GET /api/budgets (Sends Cookie)
-    Middleware->>Middleware: Decrypts ticket using persisted keys
-    Middleware->>DB: Validates SecurityStamp from ticket
-    Middleware-->>Client: 200 OK (Data returned)
+    Note over UserClient, DB: Phase 4 — Hardened Sign-In & Persistent Mobile Cookie
+    UserClient->>Edge: POST /api/auth/login (Username, Password, RememberMe=true)
+    Edge->>Guard: Verify HTTPS, Origin, X-HomeBudget-Request, IP+User RateLimit
+    Guard->>Auth: Verify Hash (or Dummy Hash), Check Lockout / IsActive
+    Auth->>DB: Reset FailedLoginAttempts / Rehash if IdentityV3 upgrade needed
+    Auth->>Audit: Log LOGIN_SUCCESS
+    Auth-->>UserClient: Set-Cookie: HomeBudget.Auth (HttpOnly, Secure=Always, SameSite=Lax, 90d)
+
+    Note over UserClient, DB: Authenticated Request + Stamp Validation + Deny-by-Default
+    UserClient->>Edge: GET /api/budgets (Sends Cookie)
+    Edge->>Auth: Decrypt DPAPI Key Ring -> Validate SecurityStamp, IsActive, AuthIssuedAt
+    Auth->>DB: Verify current stamp & active status
+    Auth-->>UserClient: 200 OK (Cache-Control: no-store, CSP headers)
 ```
 
 ---
 
-## 3. Detailed Implementation Phases
+## 3. Revised Phased Implementation Roadmap
 
-### Phase 1: Database Schema & Migration (`Users` Table)
+### Phase 0: Finalize Security Contract & Endpoint Matrix
+*Objective: Lock down all security policy decisions and route classifications before writing application code.*
 
-#### 1.1 Schema Definition (`deploy/schema.sql`)
-Add the `Users` table and username index:
-```sql
-CREATE TABLE IF NOT EXISTS Users (
-    UserId               INTEGER PRIMARY KEY AUTOINCREMENT,
-    Username             TEXT    NOT NULL UNIQUE COLLATE NOCASE, -- 'admin', 'user'
-    PasswordHash         TEXT    NOT NULL,
-    DisplayName          TEXT    NOT NULL,                       -- 'Husband', 'Wife'
-    Role                 TEXT    NOT NULL CHECK (Role IN ('Admin', 'User')),
-    SecurityStamp        TEXT    NOT NULL DEFAULT '',            -- UUID for session revocation
-    FailedLoginAttempts  INTEGER NOT NULL DEFAULT 0,             -- Lockout tracker
-    LockoutEndUtc        TEXT    NULL,                           -- ISO-8601 lockout expiration
-    IsActive             INTEGER NOT NULL DEFAULT 1,
-    LastLoginAt          TEXT    NULL,
-    CreatedAt            TEXT    NOT NULL DEFAULT (datetime('now')),
-    UpdatedAt            TEXT    NOT NULL DEFAULT (datetime('now'))
-);
+1. **Trust Model Resolution:** Confirm `design_doc.md` Section 7.1 reflects LAN firewall as network defense-in-depth only, mandatory HTTPS, and deny-by-default server authorization.
+2. **Approve Complete 51-Route Matrix:** Confirm `AllowAnonymous` allowlist (strictly `GET /api/auth/status`, `POST /api/auth/setup`, `POST /api/auth/login`), `Authenticated` shared routes, and `AdminOnly` routes (specifically resolving `GET /api/settings` $\rightarrow$ `AdminOnly` and `POST /api/rules/back-propagate` $\rightarrow$ `AdminOnly`).
+3. **Approve Policy Specifications:**
+   - Host bootstrap token file (`setup-token.txt`) + atomic setup transaction + `AuthInitialized` lock.
+   - `12`–`128` UTF-8 char passphrase policy + `PasswordHasher<User>` `IdentityV3` + auto-rehash.
+   - `RememberMe = true` (90d persistent, 180d absolute max) vs `RememberMe = false` (session cookie, 12h/24h max).
+   - Step-up password confirmation on `POST /api/admin/reset-all`, `POST /api/backups/restore/{fileName}`, and `POST /api/backups/restore-upload`.
+   - One-time host-local `admin-recovery.token` replacing `appsettings.json` override.
+4. **Confirm Security Acceptance Checklist:** Lock the 12-item release gate criteria in Section 5.
 
-CREATE INDEX IF NOT EXISTS IX_Users_Username ON Users(Username);
-```
-
-#### 1.2 Idempotent Schema Migrations (`src/HomeBudget.Web/Data/DatabaseInitializer.cs`)
-In `ApplyIdempotentSchemaMigrationsAsync`:
-1. Check if `Users` table exists in `sqlite_master`. If missing, execute `CREATE TABLE IF NOT EXISTS Users`.
-2. Inspect `pragma_table_info('Users')`:
-   - If missing `SecurityStamp`, add column `SecurityStamp TEXT NOT NULL DEFAULT ''`.
-   - If missing `FailedLoginAttempts`, add column `FailedLoginAttempts INTEGER NOT NULL DEFAULT 0`.
-   - If missing `LockoutEndUtc`, add column `LockoutEndUtc TEXT NULL`.
-
-#### 1.3 Preserving Users Across Clean Resets (`DatabaseInitializer.RecreateCleanSchemaAsync`)
-Modify table teardown logic:
-1. In `RecreateCleanSchemaAsync`, **exclude `Users` from the dropped tables**, or cache existing `Users` rows in-memory before dropping and re-insert them immediately after recreating schema.
-2. Ensure that `ResetAllDatabaseAsync` never wipes user credentials.
-
-#### 1.4 Preserving Users Across Backup Restores (`src/HomeBudget.Web/Services/BackupService.cs`)
-In `RestoreSnapshotAsync` and `RestoreUploadedSnapshotAsync`:
-1. Query current live users: `SELECT * FROM Users;` into a local list.
-2. Perform the atomic SQLite copy/restore.
-3. Run `ApplyIdempotentSchemaMigrationsAsync(targetConn)` on the restored database.
-4. If the cached users list is non-empty, re-insert/upsert the active users into the restored database under a transaction, ensuring active credentials survive restores of older v1–v2.8 snapshots.
+> **Exit Criteria:** Zero unresolved security policy ambiguities remain across `design_doc.md` and this plan.
 
 ---
 
-### Phase 2: Data Protection, Cookie Authentication & Middleware
+### Phase 1: Mandatory HTTPS, TLS & Data Protection Key Foundation
+*Objective: Establish encrypted transport and ACL-protected cryptographic key storage before enabling authentication in any deployed environment.*
 
-#### 2.1 Persisted Data Protection Keys (`src/HomeBudget.Web/Program.cs`)
-Configure ASP.NET Core Data Protection to store cryptographic keys in `<DatabaseDirectory>\keys\`:
-```csharp
-string programDataDir = Path.GetDirectoryName(dbPath) ?? @"C:\ProgramData\HomeBudget";
-string keysDir = Path.Combine(programDataDir, "keys");
-Directory.CreateDirectory(keysDir);
+#### 1.1 IIS HTTPS Binding, `mkcert` Issuance & Renewal Runbook (`docs/https_setup_runbook.md`)
+1. Document PowerShell installation of `mkcert` on Windows 11 (`choco install mkcert` or verified release binary) and `mkcert -install`.
+2. Document SAN certificate issuance covering `homebudget.local`, host LAN IP, `localhost`, and `127.0.0.1` exported to `homebudget.pfx`, imported into `LocalMachine\My`, and bound to IIS Port `8443`.
+3. Configure Windows Defender Firewall inbound rule strictly on `Private` profile for `LocalSubnet` TCP Port `8443`, and disable/redirect plain HTTP Port `8080`.
+4. Document one-time household mobile client trust setup (`rootCA.pem` installation + full trust toggle in iOS `Certificate Trust Settings`).
+5. Document certificate expiration (~825 days) and LAN IP change renewal script (zero database or DP-key impact).
 
-builder.Services.AddDataProtection()
-    .PersistKeysToFileSystem(new DirectoryInfo(keysDir))
-    .SetApplicationName("HomeBudget");
-```
+#### 1.2 Server HTTPS Enforcement & Cookie Secure Policy (`src/HomeBudget.Web/Program.cs`)
+1. Enforce HTTPS for auth & API endpoints: configure `UseHttpsRedirection()` (or custom HTTPS gate middleware controlled cleanly for automated integration test hosts) rejecting unencrypted `/api/auth/*` and authenticated `/api/*` requests (`400 Bad Request` / `403 Forbidden`) when `RequireHttps` is active (default `true` in Production).
+2. Configure HSTS (`builder.Services.AddHsts(...)`, `app.UseHsts()`) emitting `Strict-Transport-Security: max-age=31536000; includeSubDomains` on HTTPS responses.
+3. Set `options.Cookie.SecurePolicy = CookieSecurePolicy.Always` in `AddCookie` (with an explicit test-environment option only if an in-memory test host runs over HTTPS/TestServer, preferring `WebApplicationFactory` configured with HTTPS scheme).
 
-#### 2.2 Cookie Authentication Setup (`src/HomeBudget.Web/Program.cs`)
-```csharp
-builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
-    .AddCookie(options =>
-    {
-        options.Cookie.Name = "HomeBudget.Auth";
-        options.Cookie.HttpOnly = true;
-        options.Cookie.SameSite = SameSiteMode.Lax;
-        options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
-        options.ExpireTimeSpan = TimeSpan.FromDays(90);
-        options.SlidingExpiration = true;
-        options.Events = new CookieAuthenticationEvents
-        {
-            OnRedirectToLogin = ctx =>
-            {
-                ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                return Task.CompletedTask;
-            },
-            OnRedirectToAccessDenied = ctx =>
-            {
-                ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
-                return Task.CompletedTask;
-            },
-            OnValidatePrincipal = async ctx =>
-            {
-                var authService = ctx.HttpContext.RequestServices.GetRequiredService<AuthService>();
-                bool isValid = await authService.ValidatePrincipalSecurityStampAsync(ctx.Principal);
-                if (!isValid)
-                {
-                    ctx.RejectPrincipal();
-                    await ctx.HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
-                }
-            }
-        };
-    });
+#### 1.3 Data Protection Key Ring Directory, NTFS ACLs & Windows DPAPI (`Program.cs` & Deployment Script)
+1. Configure persistent key directory outside IIS `wwwroot` at `<DatabaseDirectory>\keys\` (`C:\ProgramData\HomeBudget\keys\`):
+   ```csharp
+   var dpBuilder = builder.Services.AddDataProtection()
+       .PersistKeysToFileSystem(new DirectoryInfo(keysDir))
+       .SetApplicationName("HomeBudget")
+       .SetDefaultKeyLifetime(TimeSpan.FromDays(90));
 
-builder.Services.AddAuthorization(options =>
-{
-    options.AddPolicy("AdminOnly", policy => policy.RequireRole("Admin"));
-    options.AddPolicy("Authenticated", policy => policy.RequireAuthenticatedUser());
-});
-```
+   if (OperatingSystem.IsWindows())
+   {
+       dpBuilder.ProtectKeysWithDpapi(protectToLocalMachine: true);
+   }
+   ```
+2. Add PowerShell ACL hardening step in `docs/https_setup_runbook.md` / `docs/deployment_and_rollback_runbook.md` to disable NTFS inheritance on `C:\ProgramData\HomeBudget\` (`keys/`, `setup-token.txt`, `admin-recovery.token`, `budget.db`) and grant access exclusively to `IIS AppPool\HomeBudget` and `BUILTIN\Administrators`.
+3. Document key-ring asset separation from `.db` financial backups, key backup guidance, and graceful fail-closed behavior if keys are deleted/corrupted (logs diagnostic warning and returns `401` so users cleanly re-sign in without crashing).
 
-#### 2.3 CSRF Header Validation Middleware (`src/HomeBudget.Web/Program.cs`)
-Add lightweight middleware before routing:
-- For HTTP methods `POST`, `PUT`, `DELETE`:
-  - Allow `/api/auth/login` and `/api/auth/setup` without custom header (or require header consistently via frontend).
-  - For all other mutating routes, check if request contains header `X-HomeBudget-Request: 1`. If missing, return `400 Bad Request ("Missing required CSRF header")`.
+> **Exit Criteria:** Login payloads and `HomeBudget.Auth` cookies cannot traverse HTTP; DP keys are encrypted at rest outside `wwwroot` with restrictive NTFS ACLs.
 
 ---
 
-### Phase 3: Backend Authentication Models & `AuthService`
+### Phase 2: Identity & Audit Schema + Lifecycle-Safe Migrations, Reset & Restore
+*Objective: Persist fixed household identity records and security audit logs safely across v1–v2.8 upgrades, clean resets, and backup restores.*
+
+#### 2.1 Canonical Schema Additions (`deploy/schema.sql`)
+1. Add `Users` table with neutral role semantics and lockout/revocation fields:
+   - `UserId`, `Username` (`UNIQUE COLLATE NOCASE`, fixed `'admin'` / `'user'`), `PasswordHash`, `DisplayName` (cosmetic UI label), `Role` (`CHECK (Role IN ('Admin', 'User'))`), `SecurityStamp`, `FailedLoginAttempts`, `LockoutEndUtc`, `IsActive`, `LastLoginAt`, `CreatedAt`, `UpdatedAt`.
+2. Add `SecurityAuditLogs` table:
+   - `AuditLogId`, `TimestampUtc`, `EventType`, `Outcome`, `ActorUserId`, `ActorUsername`, `TargetUsername`, `SourceIp`, `Details`.
+3. Add indexes: `IX_Users_Username`, `IX_SecurityAuditLogs_Timestamp`.
+4. Seed default `Settings` sentinel `('AuthInitialized', '0')` via `INSERT OR IGNORE`.
+
+#### 2.2 Idempotent Transactional Schema Upgrades (`src/HomeBudget.Web/Data/DatabaseInitializer.cs`)
+1. In `ApplyIdempotentSchemaMigrationsAsync`:
+   - Execute upgrades inside an explicit SQLite transaction (`BEGIN IMMEDIATE` / `COMMIT`, automatic `ROLLBACK` on exception so partial migrations never leave corrupt state).
+   - Create `Users` and `SecurityAuditLogs` if absent and add missing identity columns idempotently via `pragma_table_info('Users')`.
+   - Ensure `Settings` contains `AuthInitialized = '1'` whenever an existing database already contains rows in `Users`.
+
+#### 2.3 Authoritative Identity Preservation Across `Reset All` & Backup `Restore` (`DatabaseInitializer.cs` & `BackupService.cs`)
+1. **Clean Reset (`DatabaseInitializer.RecreateCleanSchemaAsync`):**
+   - Preserve **ALL** `Users` rows (both `IsActive = 1` and `IsActive = 0`, including hashes, `SecurityStamp`, lockout state, roles, `LastLoginAt`), `Settings.AuthInitialized`, and `SecurityAuditLogs` inside the reset transaction alongside backup policy settings (`BackupAutoMode`, `BackupDebounceSeconds`, `BackupMinIntervalMinutes`, `MaxRetainedBackups`).
+2. **Database Restore (`BackupService.RestoreSnapshotAsync` & `RestoreUploadedSnapshotAsync`):**
+   - Acquire `BackupService.ExecuteExclusiveLifecycleActionAsync` mutex (blocking concurrent mutations/restores and canceling pending debounce backups).
+   - Before replacing live `budget.db`, capture authoritative live state in memory: **ALL** `Users` rows (active and inactive), `Settings.AuthInitialized`, and `SecurityAuditLogs`.
+   - Validate target snapshot via `PRAGMA integrity_check;`, create verified `pre_restore` safety backup if requested (aborting on failure), copy target snapshot to a **staged temporary DB file**, execute `ApplyIdempotentSchemaMigrationsAsync(stagedConn)`, and atomically overwrite `Users`, `AuthInitialized`, and `SecurityAuditLogs` with the authoritative live state inside a single `BEGIN IMMEDIATE` transaction before atomically swapping the validated staged DB into `budget.db` (or rolling back safely from `pre_restore` on any error).
+
+> **Exit Criteria:** Financial restores from any older v1–v2.8 or stale backup never overwrite or roll back current passwords, stamps, lockouts, or disabled statuses; resets never wipe identity or re-open anonymous setup.
+
+---
+
+### Phase 3: Authentication, Password Policy, Protected Setup, Lockout, Recovery & Audit Services
+*Objective: Implement security services cleanly separated from `Program.cs` so every component is independently unit-testable.*
 
 #### 3.1 Models & DTOs (`src/HomeBudget.Web/Models/Entities.cs` & `Dtos.cs`)
-```csharp
-public sealed class User
-{
-    public int UserId { get; set; }
-    public string Username { get; set; } = "";
-    public string PasswordHash { get; set; } = "";
-    public string DisplayName { get; set; } = "";
-    public string Role { get; set; } = "User"; // "Admin" or "User"
-    public string SecurityStamp { get; set; } = "";
-    public int FailedLoginAttempts { get; set; }
-    public string? LockoutEndUtc { get; set; }
-    public bool IsActive { get; set; } = true;
-    public string? LastLoginAt { get; set; }
-    public string CreatedAt { get; set; } = "";
-    public string UpdatedAt { get; set; } = "";
-}
+- Add `User`, `SecurityAuditLog`, `AuthStatusDto`, `SetupRequest` (`BootstrapToken`, `AdminDisplayName`, `AdminPassword`, `UserDisplayName`, `UserPassword`), `LoginRequest` (`Username`, `Password`, `RememberMe`), `ChangePasswordRequest` (`CurrentPassword`, `NewPassword`), `ResetUserPasswordRequest` (`NewPassword`), `UpdateUserActiveRequest` (`IsActive`), `StepUpConfirmRequest` (`ConfirmPassword`), `UserSummaryDto` (including `RemainingLockoutMinutes`), and `AuditLogQueryDto`.
 
-public record AuthStatusDto(bool IsSetupRequired, bool IsAuthenticated, string? Username, string? DisplayName, string? Role);
-public record SetupRequest(string AdminDisplayName, string AdminPassword, string UserDisplayName, string UserPassword);
-public record LoginRequest(string Username, string Password, bool RememberMe);
-public record ChangePasswordRequest(string CurrentPassword, string NewPassword);
-public record ResetUserPasswordRequest(string NewPassword);
-public record UserSummaryDto(int UserId, string Username, string DisplayName, string Role, bool IsActive, string? LastLoginAt, bool IsLockedOut);
-```
+#### 3.2 Passphrase Policy Validator (`src/HomeBudget.Web/Services/PasswordPolicyValidator.cs`)
+1. Enforce minimum **12 characters** and maximum **128 UTF-8 characters** (no arbitrary character-class rules).
+2. Preserve exact Unicode characters and leading/trailing whitespace (no silent truncation, no `.Trim()`).
+3. Reject passwords matching account `Username` or `DisplayName`, single repeated-character patterns, and an embedded offline list of trivial/breached 12+ character passphrases (e.g., `"password1234"`, `"123456789012"`, `"qwertyuiop12"`).
 
-#### 3.2 Service Implementation (`src/HomeBudget.Web/Services/AuthService.cs`)
-Implement the following methods:
-1. `Task<bool> IsSetupRequiredAsync()`: `SELECT COUNT(*) == 0 FROM Users;`
-2. `Task CompleteInitialSetupAsync(SetupRequest req)`:
-   - Validate passwords $\ge 8$ chars.
-   - Hash passwords with `PasswordHasher<User>`.
-   - Insert `admin` and `user` records with fresh `SecurityStamp = Guid.NewGuid().ToString("N")`.
-3. `Task<(bool Success, string? Error, User? User)> AuthenticateAsync(string username, string password)`:
-   - Look up user by username (`COLLATE NOCASE`).
-   - Check `LockoutEndUtc`: If $> \text{now}$, return error: `"Account is locked due to multiple failed logins. Try again in {minutes} minute(s)."`.
-   - Verify password:
-     - If failure: increment `FailedLoginAttempts`. If attempts $\ge 5$, set `LockoutEndUtc = DateTime.UtcNow.AddMinutes(15)`. Return `"Invalid username or password."`.
-     - If success: reset `FailedLoginAttempts = 0`, `LockoutEndUtc = null`, update `LastLoginAt = DateTime.UtcNow.ToString("o")`. Return User.
-4. `Task<bool> ValidatePrincipalSecurityStampAsync(ClaimsPrincipal? principal)`:
-   - Extract `UserId` and `SecurityStamp` claim.
-   - Query DB for user. If user is null, inactive, or `dbUser.SecurityStamp != claimStamp`, return `false`.
-5. `Task<(bool Success, string? Error)> ChangePasswordAsync(int userId, string currentPassword, string newPassword)`:
-   - Validate new password length $\ge 8$.
-   - Verify current password.
-   - Hash new password, generate new `SecurityStamp`, update DB.
-6. `Task<(bool Success, string? Error)> ResetUserPasswordAsync(int targetUserId, string newPassword)`:
-   - Validate new password length $\ge 8$.
-   - Hash new password, generate new `SecurityStamp`, reset lockout attempts, update DB.
-7. `Task CheckAdminPasswordOverrideAsync(IConfiguration config)`:
-   - On startup, read `HomeBudget:AdminPasswordResetOverride`. If non-empty:
-     - Update `admin` password, reset `SecurityStamp`, clear lockout, and log warning.
+#### 3.3 Security Audit Service (`src/HomeBudget.Web/Services/SecurityAuditService.cs`)
+1. Implement `LogEventAsync(string eventType, string outcome, int? actorUserId, string? actorUsername, string? targetUsername, string? sourceIp, string? details)` writing to `SecurityAuditLogs` and structured `ILogger`.
+2. Enforce strict field redaction (truncate/sanitize `Details`; assert/block secrets) so passwords, hashes, cookies, DP keys, bootstrap tokens, and recovery secrets are never logged.
+3. Implement `QueryLogsAsync(int limit, int offset, string? eventType)` for `GET /api/audit-logs`, plus automatic retention pruning (> 365 days or > 10,000 entries).
+
+#### 3.4 Protected Authentication & Recovery Service (`src/HomeBudget.Web/Services/AuthService.cs`)
+1. **First-Run Bootstrap Secret (`EnsureBootstrapTokenAsync`):**
+   - When `Users` count == 0 and `Settings.AuthInitialized != '1'`, generate 32 cryptographically random bytes (`Base64Url`) and write to `<DatabaseDirectory>\setup-token.txt` (if not already present) with restrictive ACLs on Windows; log file location notice without logging the token itself to untrusted sinks.
+2. **Atomic Setup (`CompleteInitialSetupAsync`):**
+   - Rate-limited; verifies `BootstrapToken` via `CryptographicOperations.FixedTimeEquals`; acquires in-process `SemaphoreSlim`; opens SQLite `BEGIN IMMEDIATE` transaction verifying `Users` count == 0 and `AuthInitialized != '1'`; validates both passphrases via `PasswordPolicyValidator`; hashes via `PasswordHasher<User>` (`IdentityV3`); inserts fixed `admin` (`Role = 'Admin'`) and `user` (`Role = 'User'`) accounts; sets `Settings('AuthInitialized', '1')`; logs `SETUP_COMPLETED`; commits; deletes `setup-token.txt`.
+3. **Authentication, Dummy-Timing Balance, Auto-Rehash & Atomic Lockout (`AuthenticateAsync`):**
+   - Look up user by `Username` (`COLLATE NOCASE`).
+   - If user not found: run dummy `PasswordHasher.VerifyHashedPassword` against a static dummy hash to prevent username-enumeration timing oracle, audit `LOGIN_FAILURE`, and return generic `"Invalid username or password."`.
+   - If `!user.IsActive`: verify/normalize timing, audit `LOGIN_FAILURE` (`Details = "Inactive account"`), and return generic `"Invalid username or password."`.
+   - If `LockoutEndUtc > now`: audit `LOGIN_FAILURE` (`Details = "Locked out"`), return generic throttled/cooldown error without leaking account existence.
+   - Verify password via `PasswordHasher<User>`:
+     - On `Failed`: execute atomic single-statement SQL `UPDATE Users SET FailedLoginAttempts = FailedLoginAttempts + 1, LockoutEndUtc = CASE WHEN FailedLoginAttempts + 1 >= 5 THEN datetime('now', '+15 minutes') ELSE LockoutEndUtc END WHERE UserId = @UserId;`, audit `LOGIN_FAILURE` (and `ACCOUNT_LOCKED` if threshold reached), return generic error.
+     - On `Success` or `SuccessRehashNeeded`: if `SuccessRehashNeeded`, rehash passphrase transparently; atomically clear `FailedLoginAttempts = 0` & `LockoutEndUtc = NULL`, update `LastLoginAt`; audit `LOGIN_SUCCESS`; return `User`.
+4. **Principal Validation (`ValidatePrincipalSecurityStampAsync`):**
+   - Validate `UserId`, `SecurityStamp`, `IsActive == 1`, and `AuthIssuedAt` against SQLite and configured absolute lifetime ceiling (180 days persistent / 24 hours non-persistent).
+5. **Password Change, Admin Reset, Unlock, Step-Up & Activation Lifecycle:**
+   - `ChangePasswordAsync`: verify current password, validate new passphrase, rehash, rotate `SecurityStamp`, audit `PASSWORD_CHANGED`.
+   - `ResetUserPasswordAsync`: (`AdminOnly`) validate new passphrase, rehash, rotate `SecurityStamp`, clear lockout, audit `ADMIN_PASSWORD_RESET`.
+   - `UnlockUserAsync`: (`AdminOnly`) clear `FailedLoginAttempts = 0` and `LockoutEndUtc = NULL`, audit `ACCOUNT_UNLOCKED`.
+   - `SetUserActiveAsync`: (`AdminOnly`) reject disabling last active `Admin`; on disable (`IsActive = false`), immediately rotate `SecurityStamp` and clear sessions; audit `USER_STATUS_CHANGED` + `SESSION_REVOKED`.
+   - `VerifyStepUpPasswordAsync`: verifies current `Admin` user's password prior to `Reset All` or `Restore Database`; audits `STEPUP_FAILED` on mismatch.
+6. **One-Time Break-Glass Admin Recovery (`ProcessBreakGlassRecoveryAsync`):**
+   - Replaces `appsettings.json` `AdminPasswordResetOverride` completely.
+   - Checks `<DatabaseDirectory>\admin-recovery.token` on startup; if present: reads temporary passphrase, validates via `PasswordPolicyValidator`, updates `admin` hash, rotates `SecurityStamp`, clears lockout, sets `IsActive = 1`, audits `EMERGENCY_RECOVERY` (never logging the password), and **immediately deletes `admin-recovery.token`** so restarts never replay the recovery.
+
+> **Exit Criteria:** Setup races, invalid bootstrap tokens, concurrent lockout races, hash upgrades, deactivation revocation, and one-time break-glass recovery are all enforced in service logic and unit-tested.
 
 ---
 
-### Phase 4: API Endpoint Gating (`src/HomeBudget.Web/Program.cs`)
+### Phase 4: Cookie Options, Middleware Pipeline, CSRF/Origin/CORS, Rate Limiting & Complete Route Matrix
+*Objective: Wire ASP.NET Core security middleware in exact execution order and enforce deny-by-default authorization across all 51 routes.*
 
-Map and protect Minimal API routes:
+#### 4.1 Cookie Authentication & Deny-by-Default Authorization (`src/HomeBudget.Web/Program.cs`)
+1. Configure `AddCookie`:
+   - `Name = "HomeBudget.Auth"`, `HttpOnly = true`, `SameSite = SameSiteMode.Lax`, `SecurePolicy = CookieSecurePolicy.Always`, `Path = "/"`.
+   - `OnRedirectToLogin` returns `401 Unauthorized` JSON; `OnRedirectToAccessDenied` logs `AUTHZ_DENIED` audit event and returns `403 Forbidden` JSON.
+   - `OnValidatePrincipal` calls `AuthService.ValidatePrincipalSecurityStampAsync` (rejecting mismatched `SecurityStamp`, `IsActive = 0`, or exceeded absolute `AuthIssuedAt` lifetime).
+2. Configure `SignInAsync` properties per `LoginRequest.RememberMe`:
+   - `RememberMe = true`: `IsPersistent = true`, `ExpiresUtc = UtcNow.AddDays(90)`, `AllowRefresh = true` (sliding, capped at 180-day `AuthIssuedAt` absolute ceiling).
+   - `RememberMe = false`: `IsPersistent = false`, `ExpiresUtc = UtcNow.AddHours(12)`, `AllowRefresh = true` (browser session cookie capped at 24h absolute).
+3. Configure `AddAuthorization`:
+   - `FallbackPolicy = new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build();` *(Deny-by-default for every endpoint without explicit `[AllowAnonymous]`!)*.
+   - Named policies: `"Authenticated"` (`RequireAuthenticatedUser()`), `"AdminOnly"` (`RequireRole("Admin")`).
 
-| Route | Policy / Authorization | Handler Logic |
-| :--- | :--- | :--- |
-| `GET /api/auth/status` | AllowAnonymous | Returns `{ isSetupRequired, isAuthenticated, user }` |
-| `POST /api/auth/setup` | AllowAnonymous | Calls `AuthService.CompleteInitialSetupAsync`. Aborts if setup already done. |
-| `POST /api/auth/login` | AllowAnonymous | Validates credentials, issues cookie via `HttpContext.SignInAsync`. |
-| `POST /api/auth/logout` | RequireAuthorization | Calls `HttpContext.SignOutAsync`. |
-| `GET /api/auth/me` | RequireAuthorization | Returns current user claims. |
-| `PUT /api/auth/change-password` | RequireAuthorization | Calls `AuthService.ChangePasswordAsync`. |
-| `GET /api/users` | RequireAuthorization("AdminOnly") | Lists users with lockout status. |
-| `PUT /api/users/{id}/reset-password` | RequireAuthorization("AdminOnly") | Resets target user's password. |
-| `POST /api/uploads/stage` | RequireAuthorization("AdminOnly") | CSV upload staging |
-| `POST /api/uploads/commit` | RequireAuthorization("AdminOnly") | CSV upload commit |
-| `PUT /api/transactions/{id}` | RequireAuthorization("AdminOnly") | Edit raw transaction |
-| `POST /api/transactions/{id}/split` | RequireAuthorization("AdminOnly") | Split transaction |
-| `DELETE /api/transactions/{id}` | RequireAuthorization("AdminOnly") | Delete transaction |
-| `POST /api/transactions/bulk-delete` | RequireAuthorization("AdminOnly") | Bulk delete transactions |
-| `POST /api/transactions/clear-history`| RequireAuthorization("AdminOnly")| Clear transaction history |
-| `POST /api/admin/reset-all` | RequireAuthorization("AdminOnly") | Reset all database information |
-| `POST /api/accounts` / `PUT /api/accounts/{id}` | RequireAuthorization("AdminOnly") | Add / Rename account |
-| `POST /api/rules/back-propagate` | RequireAuthorization("AdminOnly") | Bulk rule back-propagation |
-| `/api/backups/*` | RequireAuthorization("AdminOnly") | All backup management & restore routes |
-| `POST /api/transactions/{id}/categorize` | RequireAuthorization | Shared: allows Wife to recategorize with forward & past flags |
-| `GET /api/categories`, `POST/PUT/DELETE /api/categories/*` | RequireAuthorization | Shared: allows Wife full category management |
-| `POST /api/rules`, `PUT /api/rules/{id}`, `DELETE /api/rules/{id}` | RequireAuthorization | Shared: allows Wife to add/delete rules |
-| `GET /api/cashflow`, `GET /api/budgets/*`, `GET /api/transactions` | RequireAuthorization | Shared data views |
+#### 4.2 Rate Limiting, CSRF/Origin/CORS & Security Headers (`RateLimitingExtensions.cs`, `CsrfAndOriginMiddleware.cs`, `Program.cs`)
+1. **Rate Limiting (`RateLimitingExtensions.cs`):**
+   - Apply partitioned policy `"auth-limiter"` to `POST /api/auth/login` and `POST /api/auth/setup`:
+     - Partitioned by client IP (`10 req / 1 min`, `30 req / 15 min`) and normalized target username on login.
+     - Rejects excess traffic with `429 Too Many Requests`, `Retry-After` header, and generic JSON `{ error }`.
+2. **Strict Same-Origin CORS (`Program.cs`):**
+   - Configure no external origins or `AllowAnyOrigin()`. Enforce strictly same-origin operation.
+3. **`CsrfAndOriginMiddleware.cs`:**
+   - Runs before endpoint execution on all state-changing methods (`POST`, `PUT`, `DELETE`, `PATCH`) matching `/api/*`:
+     1. Rejects non-HTTPS requests when HTTPS enforcement is enabled.
+     2. Validates `Origin` header (or fallback `Referer` header when `Origin` is omitted) exactly matches `Request.Scheme://Request.Host` (returns `403 Forbidden` + audits `CSRF_REJECTED` on mismatch).
+     3. Requires header `X-HomeBudget-Request: 1` across **every** mutating endpoint—including `/api/auth/login`, `/api/auth/setup`, `/api/auth/logout`, `/api/uploads/stage`, and `/api/backups/restore-upload` (Explicitly compensating for `.DisableAntiforgery()` on multipart Minimal API handlers before reading form streams).
+4. **Security & Cache Headers Middleware (`Program.cs`):**
+   - Sets `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Permissions-Policy: camera=(), microphone=(), geolocation=()`, and `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`.
+   - Sets `Cache-Control: no-store, no-cache, must-revalidate` and `Pragma: no-cache` on all `/api/*` responses.
+5. **Exact Middleware Pipeline Order in `Program.cs`:**
+   `UseHttpsRedirection / HTTPS Gate` $\rightarrow$ `UseHsts` $\rightarrow$ `SecurityHeadersMiddleware` $\rightarrow$ `UseDefaultFiles` $\rightarrow$ `UseStaticFiles` $\rightarrow$ `UseRouting` $\rightarrow$ `UseCors` (same-origin) $\rightarrow$ `UseRateLimiter` $\rightarrow$ `UseAuthentication` $\rightarrow$ `UseAuthorization` $\rightarrow$ `UseMiddleware<CsrfAndOriginMiddleware>()` $\rightarrow$ `Map*` endpoints.
 
----
+#### 4.3 Complete 51-Route Authorization Matrix (`src/HomeBudget.Web/Program.cs`)
+Every mapped route must be explicitly registered and covered by automated route-matrix tests:
 
-### Phase 5: Frontend Views, Navigation & Security Adaptations
+| Category | Route(s) | Policy | Extra Guards |
+| :--- | :--- | :--- | :--- |
+| **Auth (Anonymous Allowlist)** | `GET /api/auth/status` | `AllowAnonymous` | None (never leaks token) |
+| **Auth (Anonymous Allowlist)** | `POST /api/auth/setup` | `AllowAnonymous` | `auth-limiter`, `CsrfAndOriginMiddleware`, `BootstrapToken`, atomic `AuthInitialized == '0'` |
+| **Auth (Anonymous Allowlist)** | `POST /api/auth/login` | `AllowAnonymous` | `auth-limiter`, `CsrfAndOriginMiddleware`, atomic lockout |
+| **Auth (Authenticated)** | `POST /api/auth/logout`, `GET /api/auth/me`, `PUT /api/auth/change-password` | `Authenticated` | `CsrfAndOriginMiddleware` on POST/PUT; current password required on change |
+| **Users & Audit** | `GET /api/users`, `PUT /api/users/{id:int}/reset-password`, `POST /api/users/{id:int}/unlock`, `PUT /api/users/{id:int}/active`, `GET /api/audit-logs` | `AdminOnly` | `CsrfAndOriginMiddleware`; last-admin guard on `/active` |
+| **Accounts** | `GET /api/accounts` | `Authenticated` | Read-only for dropdowns |
+| **Accounts (Admin)** | `POST /api/accounts`, `PUT /api/accounts/{id:int}` | `AdminOnly` | `CsrfAndOriginMiddleware` |
+| **Categories** | `GET /api/categories`, `POST /api/categories`, `PUT /api/categories/{id:int}`, `DELETE /api/categories/{id:int}`, `PUT /api/categories/{id:int}/budget`, `POST /api/categories/{id:int}/merge-into/{targetId:int}` | `Authenticated` | `CsrfAndOriginMiddleware` on mutations |
+| **Topology & Rules** | `GET /api/topology`, `POST /api/rules`, `PUT /api/rules/{id:int}`, `DELETE /api/rules/{id:int}` | `Authenticated` | `CsrfAndOriginMiddleware` on mutations |
+| **Rules Back-Prop** | `POST /api/rules/back-propagate` | **`AdminOnly`** | `CsrfAndOriginMiddleware` |
+| **Cashflow & Budgets** | `GET /api/cashflow`, `GET /api/budgets/{yearMonth?}` | `Authenticated` | Returns computed effective monthly income |
+| **CSV Uploads** | `POST /api/uploads/stage`, `POST /api/uploads/commit` | `AdminOnly` | `CsrfAndOriginMiddleware` (compensates `.DisableAntiforgery()`) |
+| **Transactions (Shared)** | `GET /api/transactions/similar-count`, `POST /api/transactions/{id:int}/categorize`, `GET /api/transactions` | `Authenticated` | `User` can view/filter/recategorize (with forward & past modal options) |
+| **Transactions (Admin)** | `PUT /api/transactions/{id:int}`, `POST /api/transactions/{id:int}/split`, `DELETE /api/transactions/{id:int}`, `POST /api/transactions/bulk-delete`, `POST /api/transactions/clear-history` | `AdminOnly` | `CsrfAndOriginMiddleware` |
+| **Admin Reset** | `POST /api/admin/reset-all` | `AdminOnly` | `CsrfAndOriginMiddleware` + **Step-Up Password** |
+| **Settings & Income** | `GET /api/settings`, `PUT /api/settings`, `PUT /api/settings/income-overrides`, `DELETE /api/settings/income-overrides/{yearMonth}` | **`AdminOnly`** | Resolves settings contradiction (`User` UI hides Income section) |
+| **Backups & Restore** | `GET /api/backups`, `PUT /api/backups/config`, `POST /api/backups/trigger`, `GET /api/backups/download/{fileName}`, `DELETE /api/backups/{fileName}`, `POST /api/backups/bulk-delete`, `POST /api/backups/prune` | `AdminOnly` | `CsrfAndOriginMiddleware` on mutations |
+| **Restore Execution** | `POST /api/backups/restore/{fileName}`, `POST /api/backups/restore-upload` | `AdminOnly` | `CsrfAndOriginMiddleware` (compensates `.DisableAntiforgery()`) + **Step-Up Password** |
 
-#### 5.1 Global Application State (`src/HomeBudget.Web/wwwroot/js/app.js`)
-1. Extend `state` with `currentUser: null`.
-2. Update `apiFetch(url, options)`:
-   - Automatically attach header `'X-HomeBudget-Request': '1'` on all requests.
-   - Include `credentials: 'same-origin'`.
-   - If response status is `401 Unauthorized`, clear `state.currentUser` and trigger `renderLoginView(container)`.
-3. In `initApp()`:
-   - Call `GET /api/auth/status`.
-   - If `isSetupRequired == true`, open `renderSetupModal()`.
-   - If `!isAuthenticated`, open `renderLoginView()`.
-   - If authenticated, set `state.currentUser`, render header user pill, and proceed to requested view.
-
-#### 5.2 Header Navigation & Role Visibility (`src/HomeBudget.Web/wwwroot/js/app.js`)
-Dynamically render navigation items based on `state.currentUser.role`:
-- **`Admin` navigation:**
-  `[Monthly Budgets] [Cashflow & Sankey] [Upload CSVs] [Transaction Inspector] [Categories & Admin]`
-- **`User` (Wife) navigation:**
-  `[Monthly Budgets] [Cashflow & Sankey] [Transaction Inspector] [Categories & Rules]`
-  *(The "Upload CSVs" tab is hidden entirely).*
-- **User Profile Menu:**
-  - Displays user avatar and name: `Husband (Admin)` or `Wife`.
-  - Dropdown items:
-    - **Change Password...** (`openChangePasswordModal()`)
-    - **Log Out** (`POST /api/auth/logout`)
-
-#### 5.3 Login & Setup Views
-1. **Login View (`src/HomeBudget.Web/wwwroot/js/views/loginView.js`):**
-   - Clean, mobile-optimized card with inputs: `Username` (`admin` or `user`), `Password`, and a pre-checked `[x] Remember this device (90 days)` checkbox.
-   - Handles lockout messaging: *"Account temporarily locked. Please try again in X minutes."*
-2. **Setup Modal (`openInitialSetupModal`):**
-   - Non-dismissible modal asking to configure passwords for `admin` and `user` (with min 8-character validation).
-
-#### 5.4 Transaction Inspector Role Adaptation (`src/HomeBudget.Web/wwwroot/js/views/inspectorView.js`)
-- If `state.currentUser.role === 'User'`:
-  - Render search, date presets, category filters, account filters, and the transactions data table in read-only mode.
-  - Hide header buttons: `🗑 Clear Transaction History...`, `⚠️ Reset All Information...`.
-  - In each transaction table row, hide: `Edit`, `Split`, `Delete` buttons. (Retain `Recategorize` button so she can reassign categories).
-
-#### 5.5 Categories & Rules View Role Adaptation (`src/HomeBudget.Web/wwwroot/js/views/topologyView.js`)
-- If `state.currentUser.role === 'User'`:
-  - Show **Section 1: Spending Category Topology** (Full Add, Edit, Delete, Reorder).
-  - Show **Section 2: Auto-Categorization Rules** (View rules, Add rule, Delete rule; hide `⚡ Preview & Back-Propagate Rules` button).
-  - Completely hide **Section 3: Source Accounts & Cards**, **Section 4: Household Income**, and **Section 5: Backups & Admin**.
-- If `state.currentUser.role === 'Admin'`:
-  - Show all 5 sections.
-  - In Section 5, add a **User Accounts & Security** sub-panel listing `admin` and `user`, displaying last login timestamp, lockout status, and a **Reset Password** button for the `user` account.
+> **Exit Criteria:** Unauthenticated callers receive `401` JSON on all non-allowlisted `/api/*` routes; `User` callers receive `403` JSON on all `AdminOnly` routes; cross-origin/missing-CSRF mutations fail closed with `403`.
 
 ---
 
-### Phase 6: Automated Testing & Verification
+### Phase 5: Frontend UX, Accessibility, Multi-Tab Sync & Role-Aware Views
+*Objective: Deliver accessible login, setup, password management, multi-tab session handling, and clean role-aware navigation without breaking strict CSP (`script-src 'self'`).*
 
-1. **Unit Tests (`tests/HomeBudget.Tests/AuthServiceTests.cs`):**
-   - Verify PBKDF2 hashing & verification.
-   - Verify lockout triggers after 5 failed attempts within 15 minutes.
-   - Verify successful login resets failed attempt counter.
-   - Verify password change regenerates `SecurityStamp`.
-   - Verify minimum 8-character password enforcement.
-2. **Integration Tests (`tests/HomeBudget.Tests/DatabaseAndServicesIntegrationTests.cs`):**
-   - Verify initial setup flow (`POST /api/auth/setup`).
-   - Verify cookie issuance and authentication.
-   - Verify Admin-only endpoint gating returns `403 Forbidden` for `User` role.
-   - Verify `ResetAllDatabaseAsync` preserves `Users` table and credentials.
-   - Verify `RestoreSnapshotAsync` preserves active `Users` across restore.
-   - Verify emergency admin password reset override from configuration.
-3. **Frontend Verification (`tests/frontend_verification.mjs`):**
-   - Verify syntax of all updated ES6 modules (`node --check`).
-   - Assert `X-HomeBudget-Request` header presence in `apiFetch`.
-   - Assert role-based visibility rules for nav tabs, inspector buttons, and topology sections.
+#### 5.1 Application Shell, `apiFetch`, Multi-Tab Sync & Safe Return Route (`src/HomeBudget.Web/wwwroot/js/app.js`)
+1. **Auth State & Return Route:** Store `state.currentUser` and sanitize post-login return hash strictly against an allowlist of local views (`#budgets`, `#cashflow`, `#inspector`, `#upload`, `#topology`)—never redirecting to external URLs.
+2. **`apiFetch` Security Contract:**
+   - Send `'X-HomeBudget-Request': '1'` and `credentials: 'same-origin'` on all requests.
+   - Never log credentials or tokens to browser `console`.
+   - On `401 Unauthorized`, capture current safe local view route, clear `state.currentUser`, broadcast session-expired sync event, and render accessible re-login prompt preserving a clear banner (*"Your session expired. Sign in again to continue."*).
+3. **Multi-Tab Synchronization (`storage` event):**
+   - Signing out (`POST /api/auth/logout`) or expiring writes a timestamped `homebudget:auth-sync` key to `localStorage` so any other open tab immediately clears in-memory views and navigates cleanly to the Login screen.
+4. **Role-Aware Navigation & Account Menu:**
+   - Render top/bottom nav dynamically (`User` hides `Upload CSVs`; `Admin` shows all 5 views).
+   - Display visible signed-in badge (`escapeHtml(currentUser.displayName)` + role badge `Admin` or `User`) and account dropdown:
+     - **Change My Passphrase...** (clearly separated from Admin's user-reset control).
+     - **Sign Out** (plus option **Sign Out All Devices** calling `?allDevices=true`).
+5. **Step-Up Confirmation in High-Impact Admin Modals (`app.js`):**
+   - Add required `Current Admin Password` (`type="password"`) input inside `openResetAllDatabaseModal` and `openRestoreDatabaseModal` wired to backend step-up verification.
+
+#### 5.2 Login & Setup Views (`src/HomeBudget.Web/wwwroot/js/views/loginView.js`)
+1. **Initial Setup Screen:**
+   - Non-dismissible card requiring: **Host Bootstrap Token** (read by Admin from `C:\ProgramData\HomeBudget\setup-token.txt`), `Admin` Display Name + Passphrase + Confirm Passphrase, and `User` Display Name + Passphrase + Confirm Passphrase.
+   - Inline validation enforcing `12`–`128` chars (preserving spaces/Unicode), confirmation matching, loading spinner & disabled submit button during request.
+2. **Sign-In Screen:**
+   - Accessible semantic `<form>` with `<label for=...>`, keyboard `Enter` submit, focus management on open/error, ARIA live error announcements (`role="alert"`), paste and password-manager `autocomplete` (`username`, `current-password`), **Show/Hide Password** toggle (`aria-pressed`), **`[x] Remember this device (90 days)`** checkbox (`RememberMe`), and clear generic/cooldown error rendering.
+
+#### 5.3 Role-Aware Inspector & Topology Views (`inspectorView.js`, `topologyView.js`)
+1. **`inspectorView.js`:** When `role === 'User'`, render filter/search/view table + `Recategorize` button (permitting `applyMovingForward` and `applyToPast`), while hiding `Edit`, `Split`, `Delete`, `Bulk Delete`, `Clear History`, and `Reset All`.
+2. **`topologyView.js`:**
+   - When `role === 'User'`, **only fetch `apiFetch('/api/topology')`** (do NOT call `/api/settings`, `/api/backups`, `/api/users`, or `/api/audit-logs`), render Section 1 (Categories full CRUD) and Section 2 (Rules add/edit/delete without bulk back-propagation), and hide Sections 3, 4, and 5.
+   - When `role === 'Admin'`, fetch `/api/topology`, `/api/settings`, `/api/backups`, `/api/users`, and `/api/audit-logs` and render Section 5 sub-panels:
+     - **User Accounts & Lockouts:** Displays `admin` and `user` `DisplayName`, `Role`, `LastLoginAt`, `IsActive`, live lockout countdown if locked, **Unlock Account**, **Reset User Passphrase...**, and **Enable/Disable User** toggle (disabled for `admin`).
+     - **Recent Security Audit Events:** Paginated/filterable read-only table of `SecurityAuditLogs` (`TimestampUtc`, `EventType`, `Outcome`, `ActorUsername`, `TargetUsername`, `SourceIp`, `Details`).
+
+> **Exit Criteria:** Accessible, CSP-compliant UI works smoothly on Desktop and iPhone Safari across login, setup, session expiry, multi-tab logout, and step-up modals.
 
 ---
 
-### Phase 7: Optional LAN HTTPS / TLS Deployment Runbook
+### Phase 6: Security Audit, Negative Verification & Comprehensive Test Suite
+*Objective: Prove all security, concurrency, lifecycle, and browser-boundary guarantees with automated positive and negative tests.*
 
-For a green lock and warning-free experience on iPhone Safari over LAN:
+1. **Passphrase & Hashing Unit Tests (`tests/HomeBudget.Tests/PasswordPolicyTests.cs` & `AuthServiceTests.cs`):**
+   - Enforce `12`–`128` UTF-8 boundaries; preserve leading/trailing whitespace & Unicode (no truncation/trimming); reject common weak/username passwords.
+   - Verify `PasswordHasher<User>` `IdentityV3` hashing and transparent rehash-on-login when `SuccessRehashNeeded` is returned.
+   - Verify unknown username and wrong password return indistinguishable public error messages and balanced timing.
+   - Verify atomic concurrent failed logins (e.g., 5 parallel wrong attempts lock the account without lost increments), lockout expiry boundary, and Admin unlock.
+   - Verify disabling the last active `Admin` is rejected; disabling `User` rotates `SecurityStamp`.
+   - Verify one-time break-glass recovery consumes `admin-recovery.token`, sets fresh hash & stamp, cannot replay on subsequent restart, and logs redacted `EMERGENCY_RECOVERY`.
+2. **Route Authorization, CSRF, Rate Limit & Transport Integration Tests (`tests/HomeBudget.Tests/AuthAndSecurityIntegrationTests.cs`):**
+   - **Deny-by-Default Route Catalog Check:** Enumerate all mapped `EndpointDataSource` `/api/*` routes in `Program.cs` and fail if any route lacks explicit `[AllowAnonymous]`, `"Authenticated"`, or `"AdminOnly"` metadata.
+   - **Complete Positive/Negative Matrix:** Test all 51 routes as Anonymous (`401` JSON, never HTML redirect), `User` (`403` on all `AdminOnly` routes including `/api/settings`, `/api/rules/back-propagate`, `/api/users/*`, `/api/audit-logs`, `/api/accounts` writes, `/api/uploads/*`, `/api/backups/*`, `/api/transactions` edit/split/delete/clear, `/api/admin/reset-all`), and `Admin` (`200`).
+   - **Setup Hardening:** Reject missing/invalid `setup-token.txt`; test parallel `POST /api/auth/setup` race (only 1 succeeds with `200`, concurrent caller gets `409`); verify setup stays closed permanently even after `Reset All`.
+   - **Rate Limiting:** Verify `429 Too Many Requests` + `Retry-After` on `/api/auth/login` and `/api/auth/setup` burst requests.
+   - **Session & Cookie Modes:** Test `RememberMe = true` (persistent cookie, 90d sliding, 180d `AuthIssuedAt` ceiling rejection) vs `RememberMe = false` (non-persistent session cookie, 24h ceiling); verify `HttpOnly`, `Secure`, `SameSite=Lax`; verify logout clears cookie; verify password change rotates `SecurityStamp` (revoking old device) while re-issuing current cookie; verify Admin reset & `IsActive = 0` immediately reject existing cookies; verify missing/corrupt DP keys fail safely (`401`).
+   - **CSRF, Origin, CORS, HTTPS & Headers:** Reject missing `X-HomeBudget-Request: 1`, cross-origin `Origin`/`Referer`, and CORS preflight across `POST`, `PUT`, `DELETE`, `PATCH`, `/api/auth/login`, `/api/auth/setup`, `/api/auth/logout`, `/api/uploads/stage`, and `/api/backups/restore-upload`; assert plain HTTP auth failure when HTTPS required; assert CSP, `nosniff`, `DENY`, `no-referrer`, and `Cache-Control: no-store` on `/api/*`.
+   - **Step-Up Confirmation & Audit Log Redaction:** Verify `Reset All` and `Restore` reject wrong/missing `ConfirmPassword`; verify `SecurityAuditLogs` records all security events and **never** contains passwords, hashes, cookies, bootstrap tokens, or recovery secrets.
+3. **Migration, Restore & Reset Lifecycle Integration Tests (`tests/HomeBudget.Tests/DatabaseAndServicesIntegrationTests.cs`):**
+   - Fresh DB creation + idempotent re-run of `InitializeAsync`.
+   - Upgrade from v1/v2.0/v2.8 DB fixtures; simulated migration failure rolls back cleanly without corrupting schema.
+   - Restore from v2.8 snapshot lacking `Users`/`SecurityAuditLogs` AND restore from snapshot with stale `Users` rows: verify live authoritative `Users` (both active AND inactive, newer hashes, stamps, lockouts), `AuthInitialized`, and `SecurityAuditLogs` survive intact inside `ExecuteExclusiveLifecycleActionAsync`.
+   - Verify concurrency during restore/reset and failure rollback if identity re-application errors.
+4. **Frontend Verification (`tests/frontend_verification.mjs`):**
+   - Syntax checks (`node --check`) on all JS modules including `loginView.js`.
+   - Assert `X-HomeBudget-Request` header in `apiFetch`, cross-tab sync key, safe local return-route filtering, role-based conditional API calls in `topologyView.js`, and role-based UI controls in `inspectorView.js`.
 
-#### Step 1: Install `mkcert` on Host PC
-Open administrative PowerShell on the Windows 11 host PC:
-```powershell
-choco install mkcert
-# or download mkcert.exe from GitHub releases
-mkcert -install
-```
+> **Exit Criteria:** Full C# test suite and `node tests/frontend_verification.mjs` pass 100% including all negative, concurrency, and security tests.
 
-#### Step 2: Generate Certificate for PC Hostname & LAN IP
-```powershell
-$lanIp = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias "Wi-Fi*","Ethernet*").IPAddress | Select-Object -First 1
-mkcert -pkcs12 -p12-file homebudget.pfx homebudget.local $lanIp localhost 127.0.0.1
-```
+---
 
-#### Step 3: Bind Port 8443 in IIS Manager
-1. Open **IIS Manager** (`inetmgr`).
-2. Navigate to **Server Certificates** -> **Import** -> Select `homebudget.pfx`.
-3. Right-click the **HomeBudget** website -> **Edit Bindings...** -> **Add...**:
-   - Type: `https`
-   - Port: `8443`
-   - SSL Certificate: Select the imported `homebudget.local` certificate.
-4. Open port `8443` in Windows Defender Firewall for `LocalSubnet`:
-   ```powershell
-   New-NetFirewallRule -DisplayName "HomeBudget HTTPS LAN" -Direction Inbound -LocalPort 8443 -Protocol TCP -Action Allow -RemoteAddress LocalSubnet
-   ```
+### Phase 7: Controlled IIS Rollout, Smoke Verification & Rollback Runbook
+*Objective: Deploy authentication into production safely without credential exposure or data loss.*
 
-#### Step 4: Install Root CA on Wife's iPhone (One-Time 60-Second Setup)
-1. Find `rootCA.pem` path by running `mkcert -CAROOT`.
-2. AirDrop or email `rootCA.pem` to the iPhone.
-3. On the iPhone:
-   - Tap **Profile Downloaded** in **Settings** -> Tap **Install**.
-   - Go to **Settings** -> **General** -> **About** -> **Certificate Trust Settings**.
-   - Under "Enable full trust for root certificates", toggle **ON** for the local CA.
-4. Open Safari to `https://<PC-LAN-IP>:8443` -> Enjoy a native, permanent green lock with 90-day persistent mobile login!
+Produce `docs/deployment_and_rollback_runbook.md` alongside `docs/https_setup_runbook.md` covering this 12-step rollout & verification gate:
+1. **Pre-Upgrade Backup:** Create and verify an offline `pre_v2_9_upgrade.db` copy of `budget.db` (`PRAGMA integrity_check`).
+2. **Deploy Binary & Schema:** Publish `.NET 10` app to IIS site folder; start once or verify schema upgrade applies `Users`, `SecurityAuditLogs`, and `Settings.AuthInitialized`.
+3. **Data Protection Key Ring & ACLs:** Verify `C:\ProgramData\HomeBudget\keys\` exists outside `wwwroot` with inheritance disabled and ACLs limited to `IIS AppPool\HomeBudget` and `Administrators`.
+4. **Configure & Verify HTTPS (`:8443`):** Install `mkcert` cert, bind `:8443`, restrict Firewall to `LocalSubnet`, and install `rootCA.pem` on household iPhone/devices.
+5. **Lock Down HTTP (`:8080`):** Remove HTTP binding or restrict `:8080` to HTTPS redirect; verify HTTP login attempt fails.
+6. **Verify First-Run Readiness:** Confirm `GET https://<host>:8443/api/auth/status` returns `isSetupRequired: true` and `C:\ProgramData\HomeBudget\setup-token.txt` was generated with restricted ACLs.
+7. **Complete First-Run Setup:** From the trusted desktop browser, submit bootstrap token + 12+ char passphrases for `admin` and `user`; confirm `setup-token.txt` is automatically deleted and `HomeBudget.Auth` cookie has `HttpOnly`, `Secure`, `SameSite=Lax`.
+8. **Verify Both Roles (`Admin` & `User`):** Log in on Desktop (`admin`) and iPhone Safari (`user` with `RememberMe`); verify green lock, 5-tab vs 4-tab nav, and `User` forward+past modal recategorization.
+9. **Negative API Verification:** From an authenticated `User` cookie session, execute `Invoke-RestMethod` / `curl` against `GET /api/settings`, `POST /api/rules/back-propagate`, `POST /api/uploads/commit`, and `GET /api/backups` — verify HTTP `403`.
+10. **Session & Lifecycle Smoke Checks:** Verify self-service password change, logout cross-tab sync, lockout + Admin unlock, and `GET /api/audit-logs` (confirming zero leaked secrets).
+11. **IIS Recycle & Host Reboot Survival Test:** Recycle `HomeBudget` AppPool and reboot Windows 11 host; confirm iPhone Safari remains signed in seamlessly (DPAPI DP key ring preserved).
+12. **Decoupled Rollback Procedure:** Document separate **Application Code Rollback** (reverting binary/config to v2.8 while preserving `Users`/`SecurityAuditLogs`/`keys/` for retry) vs **Database Rollback** (restoring `pre_v2_9_upgrade.db` cleanly without leaving stray unauthenticated HTTP listeners exposed).
+
+> **Exit Criteria:** All 12 rollout checks and the Security Acceptance Checklist pass on the live IIS host.
 
 ---
 
 ## 4. File Modification Index
 
-| File Path | Description of Changes |
-| :--- | :--- |
-| `deploy/schema.sql` | Add `Users` table and `IX_Users_Username` index |
-| `src/HomeBudget.Web/Data/DatabaseInitializer.cs` | Add idempotent `Users` migration; preserve `Users` in `RecreateCleanSchemaAsync` |
-| `src/HomeBudget.Web/Services/BackupService.cs` | Preserve active `Users` table across database snapshot restores |
-| `src/HomeBudget.Web/Models/Entities.cs` | Add `User` entity class |
-| `src/HomeBudget.Web/Models/Dtos.cs` | Add auth request/response DTOs (`LoginRequest`, `SetupRequest`, `ChangePasswordRequest`, etc.) |
-| `src/HomeBudget.Web/Services/AuthService.cs` | Implement hashing, setup, credential checks, lockout, and password management |
-| `src/HomeBudget.Web/Program.cs` | Configure Data Protection key persistence, Cookie Auth, CSRF check, and auth routes |
-| `src/HomeBudget.Web/wwwroot/js/app.js` | Add `currentUser` state, CSRF header in `apiFetch`, role-based navigation, user header menu |
-| `src/HomeBudget.Web/wwwroot/js/views/loginView.js` | Create mobile-responsive login interface with 90-day remember-me |
-| `src/HomeBudget.Web/wwwroot/js/views/inspectorView.js` | Enforce read-only UI controls when `role === 'User'` |
-| `src/HomeBudget.Web/wwwroot/js/views/topologyView.js` | Render Sections 1 & 2 only for Wife; add User Management in Section 5 for Admin |
-| `tests/HomeBudget.Tests/AuthServiceTests.cs` | Add unit tests for hashing, lockout, and password change |
-| `tests/HomeBudget.Tests/DatabaseAndServicesIntegrationTests.cs` | Add integration tests for auth routes, role gating, and reset/restore preservation |
-| `tests/frontend_verification.mjs` | Add syntax and role assertion tests for new frontend modules |
-| `docs/https_setup_runbook.md` | Add IIS port 8443 and mkcert setup runbook |
+| File Path | Action | Description of Changes |
+| :--- | :--- | :--- |
+| `deploy/schema.sql` | Modify | Add `Users`, `SecurityAuditLogs`, `IX_SecurityAuditLogs_Timestamp`, and `Settings.AuthInitialized` |
+| `src/HomeBudget.Web/Data/DatabaseInitializer.cs` | Modify | Transactional pre-schema `Users`/`SecurityAuditLogs` migrations; preserve all `Users`, `AuthInitialized`, and `SecurityAuditLogs` in `RecreateCleanSchemaAsync` |
+| `src/HomeBudget.Web/Services/BackupService.cs` | Modify | Capture & restore authoritative live `Users` (active + inactive), `AuthInitialized`, and `SecurityAuditLogs` atomically in staged restore inside `ExecuteExclusiveLifecycleActionAsync` |
+| `src/HomeBudget.Web/Models/Entities.cs` | Modify | Add `User` and `SecurityAuditLog` entity classes |
+| `src/HomeBudget.Web/Models/Dtos.cs` | Modify | Add auth/user/audit/step-up DTOs (`SetupRequest` with `BootstrapToken`, `LoginRequest`, `StepUpConfirmRequest`, `UpdateUserActiveRequest`, `UserSummaryDto`, etc.) |
+| `src/HomeBudget.Web/Services/PasswordPolicyValidator.cs` | **New** | Enforce `12`–`128` UTF-8 char length, exact whitespace retention, and common/username password blocklist |
+| `src/HomeBudget.Web/Services/SecurityAuditService.cs` | **New** | Persist redacted security audit events to `SecurityAuditLogs` + host logger + query/prune helpers |
+| `src/HomeBudget.Web/Services/AuthService.cs` | **New** | Bootstrap token generation/verification, atomic setup, `PasswordHasher<User>` `IdentityV3` + auto-rehash, dummy timing normalization, atomic SQLite lockout, `SecurityStamp` validation, step-up verification, unlock/activation, and single-use `admin-recovery.token` |
+| `src/HomeBudget.Web/Security/CsrfAndOriginMiddleware.cs` | **New** | Enforce `Origin`/`Referer` same-origin validation + `X-HomeBudget-Request: 1` across all mutating endpoints (including auth and multipart uploads) |
+| `src/HomeBudget.Web/Security/RateLimitingExtensions.cs` | **New** | Partitioned IP + target-username `AddRateLimiter` policy (`429` + `Retry-After`) for login & setup |
+| `src/HomeBudget.Web/Program.cs` | Modify | HTTPS gate, HSTS, security/CSP/`no-store` headers, DPAPI-protected persisted Data Protection keys, Cookie Auth (`SecurePolicy.Always`, `RememberMe` lifetimes), `FallbackPolicy` deny-by-default, strict same-origin CORS, and all 51 explicitly gated routes |
+| `src/HomeBudget.Web/wwwroot/index.html` | Modify | Role-aware navigation containers and user profile menu mount points |
+| `src/HomeBudget.Web/wwwroot/js/app.js` | Modify | `currentUser` state, CSRF header in `apiFetch`, `401` re-auth + safe local route return, `localStorage` cross-tab auth sync, step-up password fields in Reset/Restore modals, Change Passphrase modal |
+| `src/HomeBudget.Web/wwwroot/js/views/loginView.js` | **New** | Accessible Setup (with Bootstrap Token) & Sign-In UI (show/hide toggle, paste/autofill, loading states, `RememberMe`, ARIA live errors) |
+| `src/HomeBudget.Web/wwwroot/js/views/inspectorView.js` | Modify | Read-only transaction table + `Recategorize` for `User` role (server still enforces `AdminOnly` APIs) |
+| `src/HomeBudget.Web/wwwroot/js/views/topologyView.js` | Modify | Conditional API fetching for `Admin` vs `User`; Sections 1–2 only for `User`; Admin User Management (reset, unlock, active toggle) + Security Audit Log viewer in Section 5 |
+| `tests/HomeBudget.Tests/PasswordPolicyTests.cs` | **New** | Unit tests for passphrase bounds, Unicode, whitespace preservation, and weak-password screening |
+| `tests/HomeBudget.Tests/AuthServiceTests.cs` | **New** | Unit tests for bootstrap token, atomic setup, `IdentityV3` auto-rehash, generic failure timing/errors, concurrent atomic lockout, unlock, activation/deactivation, and one-time recovery |
+| `tests/HomeBudget.Tests/AuthAndSecurityIntegrationTests.cs` | **New** | Route-catalog fail-closed test, 51-route x 3-identity matrix, HTTPS gate, `RememberMe` cookie modes & ceiling, CSRF/Origin/CORS/CSP/`no-store` verification, rate-limit `429`, step-up confirmation, DP key failure resilience, and audit log redaction |
+| `tests/HomeBudget.Tests/DatabaseAndServicesIntegrationTests.cs` | Modify | Expand migration rollback, stale/legacy backup restore preserving authoritative all-users/audit state, and concurrency mutex tests |
+| `tests/frontend_verification.mjs` | Modify | Syntax checks (`node --check`), CSRF/sync/route-return assertions, and role-based UI assertions |
+| `docs/https_setup_runbook.md` | **New** | Windows 11 IIS HTTPS `:8443` `mkcert` setup, firewall `LocalSubnet`, iPhone Root CA trust, and cert renewal runbook |
+| `docs/deployment_and_rollback_runbook.md` | **New** | NTFS ACL script, 12-step rollout verification checklist, and decoupled Code vs Database rollback procedures |
+
+---
+
+## 5. Security Acceptance Checklist (Sign-Off Gate)
+
+- [ ] No private `/api/*` endpoint is reachable anonymously (`FallbackPolicy` + route-catalog test verified).
+- [ ] No `AdminOnly` endpoint can be invoked by a `User` even via crafted direct HTTP calls (`403 Forbidden`).
+- [ ] No password or `HomeBudget.Auth` cookie is accepted or transmitted over plaintext HTTP (`CookieSecurePolicy.Always`).
+- [ ] First-run setup requires valid host-local `setup-token.txt`, executes atomically, and stays closed after completion and after `Reset All`.
+- [ ] `CsrfAndOriginMiddleware` and same-origin CORS reject missing headers, invalid `Origin`/`Referer`, and cross-origin requests across login, setup, logout, uploads, and mutations.
+- [ ] Rate limiting (`429`) and atomic 5-fail / 15-minute lockout behave accurately without leaking username existence.
+- [ ] `RememberMe` persistent (90d / 180d max) vs non-persistent session (12h / 24h max) cookies verify on desktop and iOS Safari.
+- [ ] Password change, Admin reset, and deactivation (`IsActive = 0`) revoke prior sessions immediately via `SecurityStamp`; last active `Admin` cannot be disabled.
+- [ ] Data Protection keys live outside `wwwroot`, carry restrictive NTFS ACLs + DPAPI encryption, and survive IIS AppPool recycles and host reboots.
+- [ ] Database restore and `Reset All` preserve **all** current `Users` (active + inactive), `Settings.AuthInitialized`, and `SecurityAuditLogs` atomically.
+- [ ] Break-glass admin recovery consumes `admin-recovery.token` once, cannot replay on restart, and records a redacted audit entry.
+- [ ] All security events record cleanly in `SecurityAuditLogs` with zero leaked secrets.
