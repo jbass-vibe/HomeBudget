@@ -3,7 +3,7 @@ import { renderCashflowView } from './views/cashflowView.js';
 import { renderUploadView } from './views/uploadView.js';
 import { renderInspectorView } from './views/inspectorView.js';
 import { renderTopologyView } from './views/topologyView.js';
-import { renderLoginView } from './views/loginView.js';
+import { renderLoginView, attachPasswordToggle } from './views/loginView.js';
 
 const ALLOWED_VIEWS = new Set(['budgets', 'cashflow', 'upload', 'inspector', 'topology']);
 const AUTH_SYNC_KEY = 'homebudget:auth-sync';
@@ -38,6 +38,7 @@ export function getSavedSort(stateKey, fallback) {
 export const state = {
   currentUser: null,
   pendingReturnView: null,
+  authNotice: null,
   currentView: 'budgets',
   selectedYearMonth: new Date().toISOString().slice(0, 7),
   cashflowWindow: 'mtd',
@@ -220,8 +221,12 @@ export async function apiFetch(url, options = {}) {
   const rawText = await res.text();
 
   if (res.status === 401 && !url.startsWith('/api/auth/login') && !url.startsWith('/api/auth/setup') && !url.startsWith('/api/auth/status')) {
-    if (state.currentUser && isAllowedViewForCurrentUser(state.currentView)) {
-      state.pendingReturnView = state.currentView;
+    if (state.currentUser) {
+      if (isAllowedViewForCurrentUser(state.currentView)) {
+        state.pendingReturnView = state.currentView;
+      }
+      state.authNotice = 'Your session expired. Sign in again to continue.';
+      broadcastAuthSync();
     }
     state.currentUser = null;
     closeModal();
@@ -1043,21 +1048,30 @@ export function openChangePasswordModal() {
   openModal(`
     <h3 style="margin-top:0;">Change My Passphrase</h3>
     <p style="font-size:13px;color:#64748B;">
-      Passphrases must be 12–128 characters. Changing your passphrase will invalidate other active sessions.
+      Passphrases must be 12–128 characters (spaces allowed). Changing your passphrase immediately invalidates other active sessions for your account.
     </p>
     <div id="changePassError" role="alert" aria-live="polite" style="display:none;background:#FEF2F2;border:1px solid #FECACA;color:#B91C1C;border-radius:8px;padding:8px 10px;font-size:12px;font-weight:600;margin-bottom:10px;"></div>
     <div style="display:flex;flex-direction:column;gap:10px;margin:12px 0;">
       <div>
         <label for="currentPassInput" style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Current Passphrase</label>
-        <input type="password" id="currentPassInput" class="input-control" style="width:100%;" autocomplete="current-password" />
+        <div style="display:flex;gap:6px;">
+          <input type="password" id="currentPassInput" class="input-control" style="flex:1;" autocomplete="current-password" />
+          <button type="button" class="btn btn-outline btn-sm" id="toggleCurrentPassBtn" aria-pressed="false">Show</button>
+        </div>
       </div>
       <div>
         <label for="newPassInput" style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">New Passphrase (12–128 characters)</label>
-        <input type="password" id="newPassInput" class="input-control" style="width:100%;" autocomplete="new-password" minlength="12" maxlength="128" />
+        <div style="display:flex;gap:6px;">
+          <input type="password" id="newPassInput" class="input-control" style="flex:1;" autocomplete="new-password" minlength="12" maxlength="128" />
+          <button type="button" class="btn btn-outline btn-sm" id="toggleNewPassBtn" aria-pressed="false">Show</button>
+        </div>
       </div>
       <div>
         <label for="confirmNewPassInput" style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Confirm New Passphrase</label>
-        <input type="password" id="confirmNewPassInput" class="input-control" style="width:100%;" autocomplete="new-password" minlength="12" maxlength="128" />
+        <div style="display:flex;gap:6px;">
+          <input type="password" id="confirmNewPassInput" class="input-control" style="flex:1;" autocomplete="new-password" minlength="12" maxlength="128" />
+          <button type="button" class="btn btn-outline btn-sm" id="toggleConfirmNewPassBtn" aria-pressed="false">Show</button>
+        </div>
       </div>
     </div>
     <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:14px;">
@@ -1065,6 +1079,10 @@ export function openChangePasswordModal() {
       <button class="btn btn-primary" id="saveChangePassBtn">Update Passphrase</button>
     </div>
   `, (m) => {
+    attachPasswordToggle(m.querySelector('#currentPassInput'), m.querySelector('#toggleCurrentPassBtn'));
+    attachPasswordToggle(m.querySelector('#newPassInput'), m.querySelector('#toggleNewPassBtn'));
+    attachPasswordToggle(m.querySelector('#confirmNewPassInput'), m.querySelector('#toggleConfirmNewPassBtn'));
+
     const errEl = m.querySelector('#changePassError');
     const saveBtn = m.querySelector('#saveChangePassBtn');
     m.querySelector('#cancelChangePassBtn').onclick = closeModal;
@@ -1122,6 +1140,7 @@ export async function signOut(allDevices = false) {
   }
   state.currentUser = null;
   state.pendingReturnView = null;
+  state.authNotice = null;
   state.accounts = [];
   state.categories = [];
   closeModal();
@@ -1234,6 +1253,7 @@ export async function initAuth() {
     const status = await apiFetch('/api/auth/status');
     if (!status?.isSetupRequired && status?.isAuthenticated && status?.currentUser) {
       state.currentUser = status.currentUser;
+      state.authNotice = null;
       renderUserChrome();
       const targetView = (state.pendingReturnView && isAllowedViewForCurrentUser(state.pendingReturnView))
         ? state.pendingReturnView
@@ -1245,7 +1265,9 @@ export async function initAuth() {
 
     state.currentUser = null;
     renderUserChrome();
-    renderLoginView(container, status, async (authenticatedUser) => {
+    const notice = state.authNotice;
+    state.authNotice = null;
+    renderLoginView(container, { ...status, notice }, async (authenticatedUser) => {
       state.currentUser = authenticatedUser;
       renderUserChrome();
       const targetView = (state.pendingReturnView && isAllowedViewForCurrentUser(state.pendingReturnView))

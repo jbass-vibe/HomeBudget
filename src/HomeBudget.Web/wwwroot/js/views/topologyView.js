@@ -17,6 +17,7 @@ import {
   openRestoreDatabaseModal,
   openAccountModal
 } from '../app.js';
+import { attachPasswordToggle } from './loginView.js';
 
 export function sortRules(rules, catNameById = {}, sortMode = 'priority_asc') {
   const list = Array.isArray(rules) ? [...rules] : [];
@@ -238,7 +239,10 @@ export async function renderTopologyView(container) {
                 <td>${r.isRegex ? 'Yes' : 'No'}</td>
                 <td><strong>${escapeHtml(catNameById[r.categoryId] || r.categoryId)}</strong></td>
                 <td>${r.defaultSubcategory ? escapeHtml(r.defaultSubcategory) : '<span style="color:#94A3B8;">None</span>'}</td>
-                <td><button class="btn btn-danger btn-sm del-rule-btn" data-id="${r.ruleId}">Delete</button></td>
+                <td style="white-space:nowrap;">
+                  <button class="btn btn-outline btn-sm edit-rule-btn" data-id="${r.ruleId}">Edit</button>
+                  <button class="btn btn-danger btn-sm del-rule-btn" data-id="${r.ruleId}">Delete</button>
+                </td>
               </tr>
             `).join('')}
           </tbody>
@@ -722,6 +726,68 @@ export async function renderTopologyView(container) {
     });
   };
 
+  // Edit Rule Modal (Admin & User)
+  container.querySelectorAll('.edit-rule-btn').forEach(btn => {
+    btn.onclick = () => {
+      const ruleId = Number(btn.dataset.id);
+      const rule = rules.find(r => r.ruleId === ruleId);
+      if (!rule) return;
+
+      openModal(`
+        <h3 style="margin-top:0;">Edit Auto-Categorization Rule</h3>
+        <div style="display:flex;flex-direction:column;gap:12px;margin:14px 0;">
+          <div>
+            <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Match Pattern</label>
+            <input type="text" id="editRulePattern" class="input-control" style="width:100%;" value="${escapeHtml(rule.matchPattern)}" placeholder="Substring or Regex" />
+          </div>
+          <div>
+            <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Target Category</label>
+            <select id="editRuleCat" class="select-control" style="width:100%;">
+              ${dropdownCategories.map(c => `<option value="${c.categoryId}" ${c.categoryId === rule.categoryId ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Default Subcategory (Optional)</label>
+            <input type="text" id="editRuleSubcat" class="input-control" style="width:100%;" value="${escapeHtml(rule.defaultSubcategory || '')}" placeholder="Default Subcategory (Optional)" />
+          </div>
+          <div>
+            <label style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Priority (Lower = Evaluated Earlier)</label>
+            <input type="number" id="editRulePriority" class="input-control" style="width:100%;" value="${rule.priority}" />
+          </div>
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;">
+            <input type="checkbox" id="editRuleRegex" ${rule.isRegex ? 'checked' : ''} />
+            <span>Evaluate pattern as Regular Expression</span>
+          </label>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:10px;">
+          <button class="btn btn-outline" id="cancelEditRule">Cancel</button>
+          <button class="btn btn-primary" id="saveEditRule">Save Rule</button>
+        </div>
+      `, (m) => {
+        m.querySelector('#cancelEditRule').onclick = closeModal;
+        m.querySelector('#saveEditRule').onclick = async () => {
+          try {
+            await apiFetch(`/api/rules/${ruleId}`, {
+              method: 'PUT',
+              body: JSON.stringify({
+                matchPattern: m.querySelector('#editRulePattern').value.trim(),
+                categoryId: Number(m.querySelector('#editRuleCat').value),
+                defaultSubcategory: m.querySelector('#editRuleSubcat').value.trim() || null,
+                priority: Number(m.querySelector('#editRulePriority').value || 50),
+                isRegex: m.querySelector('#editRuleRegex').checked
+              })
+            });
+            closeModal();
+            showToast('Rule updated');
+            renderTopologyView(container);
+          } catch (err) {
+            alert(`Rule error: ${err.message}`);
+          }
+        };
+      });
+    };
+  });
+
   // Delete Rule
   container.querySelectorAll('.del-rule-btn').forEach(btn => {
     btn.onclick = async () => {
@@ -1049,17 +1115,23 @@ export async function renderTopologyView(container) {
       openModal(`
         <h3 style="margin-top:0;">Reset Passphrase for <code>${escapeHtml(username)}</code></h3>
         <p style="font-size:13px;color:#64748B;">
-          Sets a new passphrase (12–128 characters) and immediately revokes existing sessions for this account.
+          Sets a new passphrase (12–128 characters, spaces allowed) and immediately revokes existing sessions for this account.
         </p>
         <div id="adminResetPassError" role="alert" aria-live="polite" style="display:none;background:#FEF2F2;border:1px solid #FECACA;color:#B91C1C;border-radius:8px;padding:8px 10px;font-size:12px;font-weight:600;margin-bottom:10px;"></div>
         <div style="display:flex;flex-direction:column;gap:10px;margin:12px 0;">
           <div>
             <label for="adminNewUserPass" style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">New Passphrase</label>
-            <input type="password" id="adminNewUserPass" class="input-control" style="width:100%;" autocomplete="new-password" minlength="12" maxlength="128" />
+            <div style="display:flex;gap:6px;">
+              <input type="password" id="adminNewUserPass" class="input-control" style="flex:1;" autocomplete="new-password" minlength="12" maxlength="128" />
+              <button type="button" class="btn btn-outline btn-sm" id="toggleAdminNewUserPassBtn" aria-pressed="false">Show</button>
+            </div>
           </div>
           <div>
             <label for="adminConfirmUserPass" style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Confirm New Passphrase</label>
-            <input type="password" id="adminConfirmUserPass" class="input-control" style="width:100%;" autocomplete="new-password" minlength="12" maxlength="128" />
+            <div style="display:flex;gap:6px;">
+              <input type="password" id="adminConfirmUserPass" class="input-control" style="flex:1;" autocomplete="new-password" minlength="12" maxlength="128" />
+              <button type="button" class="btn btn-outline btn-sm" id="toggleAdminConfirmUserPassBtn" aria-pressed="false">Show</button>
+            </div>
           </div>
         </div>
         <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:14px;">
@@ -1067,6 +1139,9 @@ export async function renderTopologyView(container) {
           <button class="btn btn-primary" id="saveAdminResetPassBtn">Reset Passphrase</button>
         </div>
       `, (m) => {
+        attachPasswordToggle(m.querySelector('#adminNewUserPass'), m.querySelector('#toggleAdminNewUserPassBtn'));
+        attachPasswordToggle(m.querySelector('#adminConfirmUserPass'), m.querySelector('#toggleAdminConfirmUserPassBtn'));
+
         const errEl = m.querySelector('#adminResetPassError');
         const saveBtn = m.querySelector('#saveAdminResetPassBtn');
         m.querySelector('#cancelAdminResetPassBtn').onclick = closeModal;
@@ -1083,7 +1158,7 @@ export async function renderTopologyView(container) {
           saveBtn.textContent = 'Resetting...';
           try {
             await apiFetch(`/api/users/${userId}/reset-password`, {
-              method: 'POST',
+              method: 'PUT',
               body: JSON.stringify({ newPassword })
             });
             closeModal();

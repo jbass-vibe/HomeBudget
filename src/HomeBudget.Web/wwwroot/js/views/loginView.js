@@ -1,6 +1,6 @@
 import { apiFetch, escapeHtml } from '../app.js';
 
-function attachPasswordToggle(inputEl, toggleBtn) {
+export function attachPasswordToggle(inputEl, toggleBtn) {
   if (!inputEl || !toggleBtn) return;
   toggleBtn.addEventListener('click', () => {
     const isPassword = inputEl.type === 'password';
@@ -12,20 +12,22 @@ function attachPasswordToggle(inputEl, toggleBtn) {
 
 export function renderLoginView(container, authStatus, onAuthenticated) {
   const isSetup = Boolean(authStatus?.isSetupRequired);
+  const noticeMessage = authStatus?.notice || '';
 
   if (isSetup) {
     container.innerHTML = `
-      <div class="auth-card" style="max-width:520px;">
+      <div class="auth-card" style="max-width:540px;">
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
           <div class="brand-logo">HB</div>
           <div>
             <h1 style="margin:0;font-size:20px;font-weight:800;">HomeBudget Initial Setup</h1>
-            <div style="font-size:12px;color:#64748B;">Create passphrases for Admin and Household User accounts</div>
+            <div style="font-size:12px;color:#64748B;">Create passphrases for your Admin (<code>admin</code>) and Household User (<code>user</code>) accounts</div>
           </div>
         </div>
 
-        <div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:10px;padding:12px;font-size:12px;color:#1E3A8A;margin-bottom:16px;">
-          <strong>Bootstrap Token Required:</strong> Open <code>setup-token.txt</code> in your HomeBudget database directory on the server to copy the one-time setup token.
+        <div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:10px;padding:12px;font-size:12px;color:#1E3A8A;margin-bottom:16px;line-height:1.5;">
+          <strong>1-Time Bootstrap Token Required:</strong> Open <code>setup-token.txt</code> in your HomeBudget database folder on the Windows host (default: <code>C:\\ProgramData\\HomeBudget\\setup-token.txt</code>), or run in PowerShell:<br/>
+          <code style="display:inline-block;margin-top:4px;background:#DBEAFE;padding:2px 6px;border-radius:4px;user-select:all;">Get-Content C:\\ProgramData\\HomeBudget\\setup-token.txt | Set-Clipboard</code>
         </div>
 
         <div id="authErrorBanner" role="alert" aria-live="polite" style="display:none;background:#FEF2F2;border:1px solid #FECACA;color:#B91C1C;border-radius:8px;padding:10px 12px;font-size:13px;font-weight:600;margin-bottom:14px;"></div>
@@ -41,13 +43,13 @@ export function renderLoginView(container, authStatus, onAuthenticated) {
 
           <hr style="border:none;border-top:1px solid #E2E8F0;margin:4px 0;" />
 
-          <div style="font-size:13px;font-weight:800;color:#0F172A;">1. Admin Account (<code>admin</code>)</div>
+          <div style="font-size:13px;font-weight:800;color:#0F172A;">1. Admin Account (Username: <code>admin</code>)</div>
           <div>
             <label for="setupAdminDisplayInput" style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Admin Display Name</label>
             <input type="text" id="setupAdminDisplayInput" class="input-control" style="width:100%;" value="Admin" maxlength="64" required />
           </div>
           <div>
-            <label for="setupAdminPassInput" style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Admin Passphrase (12–128 characters)</label>
+            <label for="setupAdminPassInput" style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Admin Passphrase (12–128 characters, spaces allowed)</label>
             <div style="display:flex;gap:6px;">
               <input type="password" id="setupAdminPassInput" class="input-control" style="flex:1;" autocomplete="new-password" minlength="12" maxlength="128" required placeholder="At least 12 characters" />
               <button type="button" class="btn btn-outline btn-sm" id="toggleAdminPassBtn" aria-pressed="false">Show</button>
@@ -55,18 +57,21 @@ export function renderLoginView(container, authStatus, onAuthenticated) {
           </div>
           <div>
             <label for="setupAdminConfirmInput" style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Confirm Admin Passphrase</label>
-            <input type="password" id="setupAdminConfirmInput" class="input-control" style="width:100%;" autocomplete="new-password" minlength="12" maxlength="128" required placeholder="Re-enter admin passphrase" />
+            <div style="display:flex;gap:6px;">
+              <input type="password" id="setupAdminConfirmInput" class="input-control" style="flex:1;" autocomplete="new-password" minlength="12" maxlength="128" required placeholder="Re-enter admin passphrase" />
+              <button type="button" class="btn btn-outline btn-sm" id="toggleAdminConfirmBtn" aria-pressed="false">Show</button>
+            </div>
           </div>
 
           <hr style="border:none;border-top:1px solid #E2E8F0;margin:4px 0;" />
 
-          <div style="font-size:13px;font-weight:800;color:#0F172A;">2. Household User Account (<code>user</code>)</div>
+          <div style="font-size:13px;font-weight:800;color:#0F172A;">2. Household User Account (Username: <code>user</code>)</div>
           <div>
             <label for="setupUserDisplayInput" style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">User Display Name</label>
             <input type="text" id="setupUserDisplayInput" class="input-control" style="width:100%;" value="Household User" maxlength="64" required />
           </div>
           <div>
-            <label for="setupUserPassInput" style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">User Passphrase (12–128 characters)</label>
+            <label for="setupUserPassInput" style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">User Passphrase (12–128 characters, spaces allowed)</label>
             <div style="display:flex;gap:6px;">
               <input type="password" id="setupUserPassInput" class="input-control" style="flex:1;" autocomplete="new-password" minlength="12" maxlength="128" required placeholder="At least 12 characters" />
               <button type="button" class="btn btn-outline btn-sm" id="toggleUserPassBtn" aria-pressed="false">Show</button>
@@ -74,7 +79,10 @@ export function renderLoginView(container, authStatus, onAuthenticated) {
           </div>
           <div>
             <label for="setupUserConfirmInput" style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Confirm User Passphrase</label>
-            <input type="password" id="setupUserConfirmInput" class="input-control" style="width:100%;" autocomplete="new-password" minlength="12" maxlength="128" required placeholder="Re-enter user passphrase" />
+            <div style="display:flex;gap:6px;">
+              <input type="password" id="setupUserConfirmInput" class="input-control" style="flex:1;" autocomplete="new-password" minlength="12" maxlength="128" required placeholder="Re-enter user passphrase" />
+              <button type="button" class="btn btn-outline btn-sm" id="toggleUserConfirmBtn" aria-pressed="false">Show</button>
+            </div>
           </div>
 
           <button type="submit" class="btn btn-primary" id="setupSubmitBtn" style="margin-top:6px;width:100%;">
@@ -86,7 +94,9 @@ export function renderLoginView(container, authStatus, onAuthenticated) {
 
     attachPasswordToggle(container.querySelector('#setupTokenInput'), container.querySelector('#toggleSetupTokenBtn'));
     attachPasswordToggle(container.querySelector('#setupAdminPassInput'), container.querySelector('#toggleAdminPassBtn'));
+    attachPasswordToggle(container.querySelector('#setupAdminConfirmInput'), container.querySelector('#toggleAdminConfirmBtn'));
     attachPasswordToggle(container.querySelector('#setupUserPassInput'), container.querySelector('#toggleUserPassBtn'));
+    attachPasswordToggle(container.querySelector('#setupUserConfirmInput'), container.querySelector('#toggleUserConfirmBtn'));
 
     const form = container.querySelector('#setupForm');
     const errBanner = container.querySelector('#authErrorBanner');
@@ -158,6 +168,12 @@ export function renderLoginView(container, authStatus, onAuthenticated) {
         </div>
       </div>
 
+      ${noticeMessage ? `
+        <div id="authNoticeBanner" role="status" aria-live="polite" style="background:#FFFBEB;border:1px solid #FDE68A;color:#92400E;border-radius:8px;padding:10px 12px;font-size:13px;font-weight:600;margin-bottom:14px;">
+          ${escapeHtml(noticeMessage)}
+        </div>
+      ` : ''}
+
       <div id="authErrorBanner" role="alert" aria-live="polite" style="display:none;background:#FEF2F2;border:1px solid #FECACA;color:#B91C1C;border-radius:8px;padding:10px 12px;font-size:13px;font-weight:600;margin-bottom:14px;"></div>
 
       <form id="loginForm" style="display:flex;flex-direction:column;gap:12px;">
@@ -176,7 +192,7 @@ export function renderLoginView(container, authStatus, onAuthenticated) {
 
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#334155;cursor:pointer;margin:2px 0;">
           <input type="checkbox" id="loginRememberCheck" checked />
-          <span>Keep me signed in on this device (14 days)</span>
+          <span>Remember this device (90 days)</span>
         </label>
 
         <button type="submit" class="btn btn-primary" id="loginSubmitBtn" style="margin-top:4px;width:100%;">

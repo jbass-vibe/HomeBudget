@@ -295,7 +295,7 @@ export async function renderCashflowView(container) {
                     </td>
                     <td>${escapeHtml(Array.from(g.accounts).join(', '))}</td>
                     <td class="${g.totalAmount < 0 ? 'amount-refund' : 'amount-expense'}"><strong>${formatCurrency(g.totalAmount)}</strong></td>
-                    <td style="white-space:nowrap;" onclick="event.stopPropagation();">
+                    <td class="stop-row-click" style="white-space:nowrap;">
                       <div style="display:flex;gap:6px;align-items:center;">
                         <select class="select-control quick-uncat-select" data-tx-id="${g.representativeTx.transactionId}">
                           <option value="">Choose Category...</option>
@@ -459,7 +459,7 @@ export async function renderCashflowView(container) {
                           </span>
                         ` : ''}
                       </div>
-                      <label style="font-size:11px;font-weight:700;color:#475569;display:inline-flex;align-items:center;gap:6px;" onclick="event.stopPropagation();">
+                      <label class="stop-row-click" style="font-size:11px;font-weight:700;color:#475569;display:inline-flex;align-items:center;gap:6px;">
                         Sort Transactions:
                         <select class="select-control cat-detail-tx-sort" style="font-size:11px;padding:3px 6px;">
                           ${renderTransactionSortOptions(state.cashflowTransactionSort)}
@@ -518,6 +518,10 @@ export async function renderCashflowView(container) {
   const openAddCat = () => openCategoryManagerModal(null, () => renderCashflowView(container));
   container.querySelector('#cashflowAddCatBtn').onclick = openAddCat;
   container.querySelector('#triageNewCatBtn').onclick = openAddCat;
+
+  container.querySelectorAll('.stop-row-click').forEach(el => {
+    el.onclick = (e) => e.stopPropagation();
+  });
 
   const handleCategorySortChange = (e) => {
     setSortPreference('cashflowCategorySort', e.target.value);
