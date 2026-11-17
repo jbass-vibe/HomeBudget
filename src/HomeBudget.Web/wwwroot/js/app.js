@@ -3,6 +3,10 @@ import { renderCashflowView } from './views/cashflowView.js';
 import { renderUploadView } from './views/uploadView.js';
 import { renderInspectorView } from './views/inspectorView.js';
 import { renderTopologyView } from './views/topologyView.js';
+import { renderLoginView } from './views/loginView.js';
+
+const ALLOWED_VIEWS = new Set(['budgets', 'cashflow', 'upload', 'inspector', 'topology']);
+const AUTH_SYNC_KEY = 'homebudget:auth-sync';
 
 const SORT_STORAGE_KEYS = {
   categoryDropdownSort: 'hb_cat_dropdown_sort',
@@ -32,6 +36,8 @@ export function getSavedSort(stateKey, fallback) {
 }
 
 export const state = {
+  currentUser: null,
+  pendingReturnView: null,
   currentView: 'budgets',
   selectedYearMonth: new Date().toISOString().slice(0, 7),
   cashflowWindow: 'mtd',
@@ -58,6 +64,16 @@ export const state = {
   accounts: [],
   categories: []
 };
+
+export function isAdmin() {
+  return state.currentUser?.role === 'Admin';
+}
+
+export function isAllowedViewForCurrentUser(viewName) {
+  if (!ALLOWED_VIEWS.has(viewName)) return false;
+  if (viewName === 'upload' && !isAdmin()) return false;
+  return true;
+}
 
 export function setSortPreference(stateKey, value) {
   state[stateKey] = value;
@@ -188,14 +204,29 @@ export function formatBackupStatus(backupFileCreated) {
 }
 
 export async function apiFetch(url, options = {}) {
+  const { headers: customHeaders, ...restOptions } = options;
+  const headers = {
+    'X-HomeBudget-Request': '1',
+    ...(restOptions.body && !(restOptions.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
+    ...(customHeaders || {})
+  };
+
   const res = await fetch(url, {
-    headers: options.body && !(options.body instanceof FormData)
-      ? { 'Content-Type': 'application/json', ...(options.headers || {}) }
-      : options.headers,
-    ...options
+    credentials: 'same-origin',
+    ...restOptions,
+    headers
   });
 
   const rawText = await res.text();
+
+  if (res.status === 401 && !url.startsWith('/api/auth/login') && !url.startsWith('/api/auth/setup') && !url.startsWith('/api/auth/status')) {
+    if (state.currentUser && isAllowedViewForCurrentUser(state.currentView)) {
+      state.pendingReturnView = state.currentView;
+    }
+    state.currentUser = null;
+    closeModal();
+    initAuth();
+  }
 
   if (!res.ok) {
     let errText = res.statusText;
@@ -777,6 +808,13 @@ export function openResetAllDatabaseModal(onSuccess) {
         </div>
       </label>
 
+      <div style="margin-top:4px;">
+        <label for="resetAllConfirmPassword" style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;color:#991B1B;">
+          Admin Passphrase Confirmation (Required)
+        </label>
+        <input type="password" id="resetAllConfirmPassword" class="input-control" style="width:100%;" autocomplete="current-password" placeholder="Enter your admin passphrase to authorize reset" />
+      </div>
+
       <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;background:#FFFBEB;border:1px solid #FDE68A;border-radius:10px;padding:10px 12px;cursor:pointer;">
         <input type="checkbox" id="resetAllConfirmCheck" style="margin-top:3px;" />
         <div>
@@ -793,10 +831,12 @@ export function openResetAllDatabaseModal(onSuccess) {
     const backupCheck = m.querySelector('#resetAllBackupCheck');
     const reseedCheck = m.querySelector('#resetAllReseedCheck');
     const confirmCheck = m.querySelector('#resetAllConfirmCheck');
+    const confirmPassInput = m.querySelector('#resetAllConfirmPassword');
     const confirmBtn = m.querySelector('#confirmResetAllBtn');
 
     function syncResetButtonState() {
-      confirmBtn.disabled = !confirmCheck.checked;
+      const hasPass = Boolean(confirmPassInput.value);
+      confirmBtn.disabled = !(confirmCheck.checked && hasPass);
       confirmBtn.textContent = backupCheck.checked
         ? 'Backup & Reset All Information'
         : 'Reset All Information (Keep Existing Backups)';
@@ -804,13 +844,15 @@ export function openResetAllDatabaseModal(onSuccess) {
 
     backupCheck.onchange = syncResetButtonState;
     confirmCheck.onchange = syncResetButtonState;
+    confirmPassInput.oninput = syncResetButtonState;
 
     m.querySelector('#cancelResetAllBtn').onclick = closeModal;
     confirmBtn.onclick = async () => {
-      if (!confirmCheck.checked) return;
+      if (!confirmCheck.checked || !confirmPassInput.value) return;
 
       const createBackupFirst = backupCheck.checked;
       const reseedDefaultCategoriesAndRules = reseedCheck.checked;
+      const confirmPassword = confirmPassInput.value;
 
       confirmBtn.disabled = true;
       confirmBtn.textContent = 'Resetting...';
@@ -820,7 +862,8 @@ export function openResetAllDatabaseModal(onSuccess) {
           method: 'POST',
           body: JSON.stringify({
             createBackupFirst,
-            reseedDefaultCategoriesAndRules
+            reseedDefaultCategoriesAndRules,
+            confirmPassword
           })
         });
         await refreshReferenceData();
@@ -892,6 +935,13 @@ export function openRestoreDatabaseModal(backups = [], preselectedFileName = '',
       <span>Create an automatic <code>pre_restore</code> safety backup of the current live database before restoring (Recommended)</span>
     </label>
 
+    <div style="margin:12px 0;">
+      <label for="restoreConfirmPassword" style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;color:#92400E;">
+        Admin Passphrase Confirmation (Required)
+      </label>
+      <input type="password" id="restoreConfirmPassword" class="input-control" style="width:100%;" autocomplete="current-password" placeholder="Enter your admin passphrase to authorize restore" />
+    </div>
+
     <div style="display:flex;justify-content:flex-end;gap:10px;">
       <button class="btn btn-outline" id="cancelRestoreBtn">Cancel</button>
       <button class="btn btn-danger" id="confirmRestoreBtn">Verify Integrity &amp; Restore Database</button>
@@ -922,7 +972,13 @@ export function openRestoreDatabaseModal(backups = [], preselectedFileName = '',
     m.querySelector('#cancelRestoreBtn').onclick = closeModal;
     m.querySelector('#confirmRestoreBtn').onclick = async () => {
       const createPreRestoreBackup = m.querySelector('#preRestoreSafetyCheck').checked;
+      const confirmPassword = m.querySelector('#restoreConfirmPassword').value;
       const confirmBtn = m.querySelector('#confirmRestoreBtn');
+
+      if (!confirmPassword) {
+        alert('Please enter your admin passphrase to authorize the restore.');
+        return;
+      }
 
       try {
         confirmBtn.disabled = true;
@@ -940,7 +996,7 @@ export function openRestoreDatabaseModal(backups = [], preselectedFileName = '',
           }
           res = await apiFetch(`/api/backups/restore/${encodeURIComponent(targetFile)}`, {
             method: 'POST',
-            body: JSON.stringify({ createPreRestoreBackup })
+            body: JSON.stringify({ createPreRestoreBackup, confirmPassword })
           });
         } else {
           const fileInput = m.querySelector('#restoreUploadFileInput');
@@ -954,6 +1010,7 @@ export function openRestoreDatabaseModal(backups = [], preselectedFileName = '',
           const formData = new FormData();
           formData.append('file', file);
           formData.append('createPreRestoreBackup', String(createPreRestoreBackup));
+          formData.append('confirmPassword', confirmPassword);
           res = await apiFetch('/api/backups/restore-upload', {
             method: 'POST',
             body: formData
@@ -982,30 +1039,227 @@ const viewTitles = {
   topology: 'Categories, Rules & Backups'
 };
 
+export function openChangePasswordModal() {
+  openModal(`
+    <h3 style="margin-top:0;">Change My Passphrase</h3>
+    <p style="font-size:13px;color:#64748B;">
+      Passphrases must be 12–128 characters. Changing your passphrase will invalidate other active sessions.
+    </p>
+    <div id="changePassError" role="alert" aria-live="polite" style="display:none;background:#FEF2F2;border:1px solid #FECACA;color:#B91C1C;border-radius:8px;padding:8px 10px;font-size:12px;font-weight:600;margin-bottom:10px;"></div>
+    <div style="display:flex;flex-direction:column;gap:10px;margin:12px 0;">
+      <div>
+        <label for="currentPassInput" style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Current Passphrase</label>
+        <input type="password" id="currentPassInput" class="input-control" style="width:100%;" autocomplete="current-password" />
+      </div>
+      <div>
+        <label for="newPassInput" style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">New Passphrase (12–128 characters)</label>
+        <input type="password" id="newPassInput" class="input-control" style="width:100%;" autocomplete="new-password" minlength="12" maxlength="128" />
+      </div>
+      <div>
+        <label for="confirmNewPassInput" style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Confirm New Passphrase</label>
+        <input type="password" id="confirmNewPassInput" class="input-control" style="width:100%;" autocomplete="new-password" minlength="12" maxlength="128" />
+      </div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:14px;">
+      <button class="btn btn-outline" id="cancelChangePassBtn">Cancel</button>
+      <button class="btn btn-primary" id="saveChangePassBtn">Update Passphrase</button>
+    </div>
+  `, (m) => {
+    const errEl = m.querySelector('#changePassError');
+    const saveBtn = m.querySelector('#saveChangePassBtn');
+    m.querySelector('#cancelChangePassBtn').onclick = closeModal;
+    saveBtn.onclick = async () => {
+      errEl.style.display = 'none';
+      const currentPassword = m.querySelector('#currentPassInput').value;
+      const newPassword = m.querySelector('#newPassInput').value;
+      const confirmPass = m.querySelector('#confirmNewPassInput').value;
+
+      if (!currentPassword || !newPassword) {
+        errEl.textContent = 'Please fill in all fields.';
+        errEl.style.display = 'block';
+        return;
+      }
+      if (newPassword !== confirmPass) {
+        errEl.textContent = 'New passphrases do not match.';
+        errEl.style.display = 'block';
+        return;
+      }
+
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Updating...';
+      try {
+        await apiFetch('/api/auth/change-password', {
+          method: 'PUT',
+          body: JSON.stringify({ currentPassword, newPassword })
+        });
+        closeModal();
+        showToast('Passphrase updated successfully.');
+      } catch (err) {
+        errEl.textContent = err.message || 'Failed to update passphrase.';
+        errEl.style.display = 'block';
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Update Passphrase';
+      }
+    };
+  });
+}
+
+function broadcastAuthSync() {
+  try {
+    if (typeof localStorage !== 'undefined' && localStorage !== null) {
+      localStorage.setItem(AUTH_SYNC_KEY, String(Date.now()));
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export async function signOut(allDevices = false) {
+  try {
+    await apiFetch(allDevices ? '/api/auth/logout?allDevices=true' : '/api/auth/logout', { method: 'POST' });
+  } catch {
+    // Proceed with local sign-out even if session was already expired
+  }
+  state.currentUser = null;
+  state.pendingReturnView = null;
+  state.accounts = [];
+  state.categories = [];
+  closeModal();
+  broadcastAuthSync();
+  await initAuth();
+}
+
+export function renderUserChrome() {
+  const shell = document.getElementById('appShell');
+  const user = state.currentUser;
+
+  if (shell) {
+    shell.classList.toggle('auth-locked', !user);
+  }
+
+  const admin = isAdmin();
+  document.querySelectorAll('[data-view="upload"]').forEach(btn => {
+    btn.style.display = admin ? '' : 'none';
+  });
+
+  const navTopLabel = document.querySelector('.nav-topology-label');
+  if (navTopLabel) {
+    navTopLabel.textContent = admin ? 'Categories, Rules & Backups' : 'Categories & Rules';
+  }
+  const mobileTopTab = document.querySelector('#mobileBottomNav [data-view="topology"] .tab-label');
+  if (mobileTopTab) {
+    mobileTopTab.textContent = admin ? 'Admin' : 'Rules';
+  }
+
+  const sidebarUserEl = document.getElementById('sidebarUserSection');
+  if (sidebarUserEl) {
+    if (!user) {
+      sidebarUserEl.innerHTML = '';
+    } else {
+      sidebarUserEl.innerHTML = `
+        <div class="sidebar-user-card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;">
+            <strong style="font-size:13px;color:#F8FAFC;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(user.displayName || user.username)}</strong>
+            <span class="auth-role-badge ${admin ? 'role-admin' : ''}">${escapeHtml(user.role)}</span>
+          </div>
+          <div style="font-size:11px;color:#94A3B8;margin-top:2px;">@${escapeHtml(user.username)}</div>
+          <div class="sidebar-user-actions">
+            <button type="button" class="sidebar-user-btn" id="changePassSidebarBtn">Passphrase</button>
+            <button type="button" class="sidebar-user-btn" id="signOutSidebarBtn">Sign Out</button>
+            <button type="button" class="sidebar-user-btn" id="signOutAllSidebarBtn" title="Revoke all sessions across devices">Sign Out All</button>
+          </div>
+        </div>
+      `;
+      sidebarUserEl.querySelector('#changePassSidebarBtn').onclick = openChangePasswordModal;
+      sidebarUserEl.querySelector('#signOutSidebarBtn').onclick = () => signOut(false);
+      sidebarUserEl.querySelector('#signOutAllSidebarBtn').onclick = () => signOut(true);
+    }
+  }
+
+  const mobileUserEl = document.getElementById('mobileUserSection');
+  if (mobileUserEl) {
+    if (!user) {
+      mobileUserEl.innerHTML = '';
+    } else {
+      mobileUserEl.innerHTML = `
+        <div style="display:flex;align-items:center;gap:6px;">
+          <button type="button" class="btn btn-outline btn-sm" id="mobilePassphraseBtn" style="padding:3px 7px;font-size:11px;">Key</button>
+          <button type="button" class="btn btn-outline btn-sm" id="mobileSignOutBtn" style="padding:3px 7px;font-size:11px;">Sign Out</button>
+        </div>
+      `;
+      mobileUserEl.querySelector('#mobilePassphraseBtn').onclick = openChangePasswordModal;
+      mobileUserEl.querySelector('#mobileSignOutBtn').onclick = () => signOut(false);
+    }
+  }
+}
+
 export async function navigateTo(viewName) {
-  state.currentView = viewName;
+  if (!state.currentUser) {
+    await initAuth();
+    return;
+  }
+
+  const safeView = isAllowedViewForCurrentUser(viewName) ? viewName : 'budgets';
+  state.currentView = safeView;
 
   document.querySelectorAll('[data-view]').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.view === viewName);
+    btn.classList.toggle('active', btn.dataset.view === safeView);
   });
 
   const mobileTitle = document.getElementById('mobileHeaderTitle');
   if (mobileTitle) {
-    mobileTitle.textContent = viewTitles[viewName] || 'HomeBudget';
+    mobileTitle.textContent = (safeView === 'topology' && !isAdmin())
+      ? 'Categories & Rules'
+      : (viewTitles[safeView] || 'HomeBudget');
   }
 
   const container = document.getElementById('viewContainer');
-  container.innerHTML = `<div class="card-panel">Loading ${escapeHtml(viewTitles[viewName] || viewName)}...</div>`;
+  container.innerHTML = `<div class="card-panel">Loading ${escapeHtml(viewTitles[safeView] || safeView)}...</div>`;
 
   try {
     await refreshReferenceData();
-    if (viewName === 'budgets') await renderBudgetsView(container);
-    else if (viewName === 'cashflow') await renderCashflowView(container);
-    else if (viewName === 'upload') await renderUploadView(container);
-    else if (viewName === 'inspector') await renderInspectorView(container);
-    else if (viewName === 'topology') await renderTopologyView(container);
+    if (safeView === 'budgets') await renderBudgetsView(container);
+    else if (safeView === 'cashflow') await renderCashflowView(container);
+    else if (safeView === 'upload') await renderUploadView(container);
+    else if (safeView === 'inspector') await renderInspectorView(container);
+    else if (safeView === 'topology') await renderTopologyView(container);
   } catch (err) {
     container.innerHTML = `<div class="card-panel" style="color:#DC2626;">Error loading view: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+export async function initAuth() {
+  const container = document.getElementById('viewContainer');
+  try {
+    const status = await apiFetch('/api/auth/status');
+    if (!status?.isSetupRequired && status?.isAuthenticated && status?.currentUser) {
+      state.currentUser = status.currentUser;
+      renderUserChrome();
+      const targetView = (state.pendingReturnView && isAllowedViewForCurrentUser(state.pendingReturnView))
+        ? state.pendingReturnView
+        : (isAllowedViewForCurrentUser(state.currentView) ? state.currentView : 'budgets');
+      state.pendingReturnView = null;
+      await navigateTo(targetView);
+      return;
+    }
+
+    state.currentUser = null;
+    renderUserChrome();
+    renderLoginView(container, status, async (authenticatedUser) => {
+      state.currentUser = authenticatedUser;
+      renderUserChrome();
+      const targetView = (state.pendingReturnView && isAllowedViewForCurrentUser(state.pendingReturnView))
+        ? state.pendingReturnView
+        : 'budgets';
+      state.pendingReturnView = null;
+      await navigateTo(targetView);
+    });
+  } catch (err) {
+    state.currentUser = null;
+    renderUserChrome();
+    if (container) {
+      container.innerHTML = `<div class="card-panel" style="color:#DC2626;">Unable to verify authentication status: ${escapeHtml(err.message)}</div>`;
+    }
   }
 }
 
@@ -1015,10 +1269,18 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   window.addEventListener('orientationchange', () => {
-    if (state.currentView === 'cashflow') {
+    if (state.currentUser && state.currentView === 'cashflow') {
       setTimeout(() => navigateTo('cashflow'), 200);
     }
   });
 
-  navigateTo('budgets');
+  window.addEventListener('storage', (e) => {
+    if (e.key === AUTH_SYNC_KEY) {
+      state.currentUser = null;
+      closeModal();
+      initAuth();
+    }
+  });
+
+  initAuth();
 });

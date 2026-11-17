@@ -656,3 +656,77 @@ body {
     left: 14px;
   }
 }
+
+/* Authentication Shell & Login/Setup View (v2.9) */
+.app-shell.auth-locked .desktop-sidebar,
+.app-shell.auth-locked .mobile-topbar,
+.app-shell.auth-locked .mobile-bottom-nav {
+  display: none !important;
+}
+
+.app-shell.auth-locked .view-container {
+  padding: 24px 16px;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 460px;
+  background: #FFFFFF;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  padding: 28px 24px;
+  box-shadow: var(--shadow-md);
+}
+
+.auth-role-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.2);
+  color: #93C5FD;
+}
+
+.auth-role-badge.role-admin {
+  background: rgba(16, 185, 129, 0.2);
+  color: #6EE7B7;
+}
+
+.sidebar-user-card {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.sidebar-user-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.sidebar-user-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #E2E8F0;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sidebar-user-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+  color: #FFFFFF;
+}
+

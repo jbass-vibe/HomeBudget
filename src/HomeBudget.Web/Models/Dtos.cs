@@ -318,6 +318,7 @@ public sealed class PruneBackupsRequest
 public sealed class RestoreBackupRequest
 {
     public bool CreatePreRestoreBackup { get; set; } = true;
+    public string? ConfirmPassword { get; set; }
 }
 
 public sealed class RestoreBackupResultDto
@@ -348,6 +349,7 @@ public sealed class ResetAllDatabaseRequest
 {
     public bool CreateBackupFirst { get; set; } = true;
     public bool ReseedDefaultCategoriesAndRules { get; set; } = true;
+    public string? ConfirmPassword { get; set; }
 }
 
 public sealed class ResetAllDatabaseResultDto
@@ -403,3 +405,51 @@ public sealed class StagingDecisionDto
     public string CleanMerchantName { get; set; } = "";
     public string TransactionType { get; set; } = TransactionTypes.Expense;
 }
+
+public sealed record CurrentUserDto(
+    int UserId,
+    string Username,
+    string DisplayName,
+    string Role);
+
+public sealed record AuthStatusDto(
+    bool IsSetupRequired,
+    bool IsAuthenticated,
+    CurrentUserDto? CurrentUser);
+
+public sealed record SetupRequest(
+    string BootstrapToken,
+    string AdminDisplayName,
+    string AdminPassword,
+    string UserDisplayName,
+    string UserPassword);
+
+public sealed record LoginRequest(
+    string Username,
+    string Password,
+    bool RememberMe);
+
+public sealed record ChangePasswordRequest(
+    string CurrentPassword,
+    string NewPassword);
+
+public sealed record ResetUserPasswordRequest(
+    string NewPassword);
+
+public sealed record UpdateUserActiveRequest(
+    bool IsActive);
+
+public sealed record UserSummaryDto(
+    int UserId,
+    string Username,
+    string DisplayName,
+    string Role,
+    bool IsActive,
+    string? LastLoginAt,
+    bool IsLockedOut,
+    int RemainingLockoutMinutes);
+
+public sealed record AuditLogResponseDto(
+    int TotalCount,
+    List<SecurityAuditLog> Items);
+

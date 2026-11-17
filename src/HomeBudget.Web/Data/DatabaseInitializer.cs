@@ -96,12 +96,41 @@ public sealed class DatabaseInitializer(
             UpdatedAt       TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
+        CREATE TABLE IF NOT EXISTS Users (
+            UserId               INTEGER PRIMARY KEY AUTOINCREMENT,
+            Username             TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+            PasswordHash         TEXT    NOT NULL,
+            DisplayName          TEXT    NOT NULL,
+            Role                 TEXT    NOT NULL CHECK (Role IN ('Admin', 'User')),
+            SecurityStamp        TEXT    NOT NULL DEFAULT '',
+            FailedLoginAttempts  INTEGER NOT NULL DEFAULT 0,
+            LockoutEndUtc        TEXT    NULL,
+            IsActive             INTEGER NOT NULL DEFAULT 1,
+            LastLoginAt          TEXT    NULL,
+            CreatedAt            TEXT    NOT NULL DEFAULT (datetime('now')),
+            UpdatedAt            TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS SecurityAuditLogs (
+            AuditLogId      INTEGER PRIMARY KEY AUTOINCREMENT,
+            TimestampUtc    TEXT    NOT NULL DEFAULT (datetime('now')),
+            EventType       TEXT    NOT NULL,
+            Outcome         TEXT    NOT NULL,
+            ActorUserId     INTEGER NULL,
+            ActorUsername   TEXT    NULL,
+            TargetUsername  TEXT    NULL,
+            SourceIp        TEXT    NULL,
+            Details         TEXT    NULL
+        );
+
         CREATE INDEX IF NOT EXISTS IX_Transactions_Date ON Transactions(TransactionDate);
         CREATE INDEX IF NOT EXISTS IX_Transactions_Category ON Transactions(CategoryId);
         CREATE INDEX IF NOT EXISTS IX_Transactions_Type ON Transactions(TransactionType);
         CREATE INDEX IF NOT EXISTS IX_Transactions_Merchant ON Transactions(CleanMerchantName);
         CREATE INDEX IF NOT EXISTS IX_Transactions_DedupHash ON Transactions(DedupHash);
         CREATE INDEX IF NOT EXISTS IX_Transactions_UpdatedAt ON Transactions(UpdatedAt);
+        CREATE INDEX IF NOT EXISTS IX_Users_Username ON Users(Username);
+        CREATE INDEX IF NOT EXISTS IX_SecurityAuditLogs_Timestamp ON SecurityAuditLogs(TimestampUtc);
         """;
 
     public async Task InitializeAsync(CancellationToken ct = default)
@@ -226,12 +255,44 @@ public sealed class DatabaseInitializer(
         bool reseedDefaultCategoriesAndRules,
         BackupPolicyConfigDto? preservedBackupPolicy = null)
     {
+        string authInitialized = "0";
+        int settingsExists = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'Settings';",
+            transaction: tx);
+        if (settingsExists > 0)
+        {
+            string? existingAuthInit = await conn.ExecuteScalarAsync<string?>(
+                "SELECT Value FROM Settings WHERE Key = 'AuthInitialized' LIMIT 1;",
+                transaction: tx);
+            if (existingAuthInit == "1")
+            {
+                authInitialized = "1";
+            }
+        }
+
+        int usersExists = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'Users';",
+            transaction: tx);
+        if (usersExists > 0)
+        {
+            int userCount = await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM Users;", transaction: tx);
+            if (userCount > 0)
+            {
+                authInitialized = "1";
+            }
+        }
+
         var userTables = (await conn.QueryAsync<string>(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%';",
             transaction: tx)).ToList();
 
         foreach (var tableName in userTables)
         {
+            if (string.Equals(tableName, "Users", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(tableName, "SecurityAuditLogs", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
             string safeIdentifier = tableName.Replace("\"", "\"\"");
             await conn.ExecuteAsync($"DROP TABLE IF EXISTS \"{safeIdentifier}\";", transaction: tx);
         }
@@ -241,7 +302,9 @@ public sealed class DatabaseInitializer(
             transaction: tx);
         if (seqExists > 0)
         {
-            await conn.ExecuteAsync("DELETE FROM sqlite_sequence;", transaction: tx);
+            await conn.ExecuteAsync(
+                "DELETE FROM sqlite_sequence WHERE name NOT IN ('Users', 'SecurityAuditLogs');",
+                transaction: tx);
         }
 
         await conn.ExecuteAsync(CanonicalTablesAndIndexesSql, transaction: tx);
@@ -272,14 +335,16 @@ public sealed class DatabaseInitializer(
             ('BackupDebounceSeconds', @DebounceSec),
             ('BackupMinIntervalMinutes', @MinIntervalMin),
             ('MaxRetainedBackups', @MaxRetained),
-            ('DefaultTaxonomySeeded', '1');
+            ('DefaultTaxonomySeeded', '1'),
+            ('AuthInitialized', @AuthInitialized);
             """,
             new
             {
                 AutoMode = autoMode,
                 DebounceSec = debounceSec,
                 MinIntervalMin = minIntervalMin,
-                MaxRetained = maxRetained
+                MaxRetained = maxRetained,
+                AuthInitialized = authInitialized
             },
             transaction: tx);
 
@@ -571,6 +636,102 @@ public sealed class DatabaseInitializer(
                 await conn.ExecuteAsync(
                     "INSERT OR IGNORE INTO Settings (Key, Value) VALUES ('DefaultTaxonomySeeded', '1');");
             }
+        }
+
+        // 10. Transactional Users & SecurityAuditLogs idempotent migration
+        await using var authMigTx = await conn.BeginTransactionAsync();
+        try
+        {
+            await conn.ExecuteAsync(
+                """
+                CREATE TABLE IF NOT EXISTS Users (
+                    UserId               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    Username             TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+                    PasswordHash         TEXT    NOT NULL,
+                    DisplayName          TEXT    NOT NULL,
+                    Role                 TEXT    NOT NULL CHECK (Role IN ('Admin', 'User')),
+                    SecurityStamp        TEXT    NOT NULL DEFAULT '',
+                    FailedLoginAttempts  INTEGER NOT NULL DEFAULT 0,
+                    LockoutEndUtc        TEXT    NULL,
+                    IsActive             INTEGER NOT NULL DEFAULT 1,
+                    LastLoginAt          TEXT    NULL,
+                    CreatedAt            TEXT    NOT NULL DEFAULT (datetime('now')),
+                    UpdatedAt            TEXT    NOT NULL DEFAULT (datetime('now'))
+                );
+                """,
+                transaction: authMigTx);
+
+            var userColumns = (await conn.QueryAsync<string>(
+                "SELECT name FROM pragma_table_info('Users');",
+                transaction: authMigTx)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            if (!userColumns.Contains("SecurityStamp"))
+            {
+                await conn.ExecuteAsync("ALTER TABLE Users ADD COLUMN SecurityStamp TEXT NOT NULL DEFAULT '';", transaction: authMigTx);
+            }
+            if (!userColumns.Contains("FailedLoginAttempts"))
+            {
+                await conn.ExecuteAsync("ALTER TABLE Users ADD COLUMN FailedLoginAttempts INTEGER NOT NULL DEFAULT 0;", transaction: authMigTx);
+            }
+            if (!userColumns.Contains("LockoutEndUtc"))
+            {
+                await conn.ExecuteAsync("ALTER TABLE Users ADD COLUMN LockoutEndUtc TEXT NULL;", transaction: authMigTx);
+            }
+            if (!userColumns.Contains("IsActive"))
+            {
+                await conn.ExecuteAsync("ALTER TABLE Users ADD COLUMN IsActive INTEGER NOT NULL DEFAULT 1;", transaction: authMigTx);
+            }
+            if (!userColumns.Contains("LastLoginAt"))
+            {
+                await conn.ExecuteAsync("ALTER TABLE Users ADD COLUMN LastLoginAt TEXT NULL;", transaction: authMigTx);
+            }
+            if (!userColumns.Contains("CreatedAt"))
+            {
+                await conn.ExecuteAsync("ALTER TABLE Users ADD COLUMN CreatedAt TEXT NOT NULL DEFAULT (datetime('now'));", transaction: authMigTx);
+            }
+            if (!userColumns.Contains("UpdatedAt"))
+            {
+                await conn.ExecuteAsync("ALTER TABLE Users ADD COLUMN UpdatedAt TEXT NOT NULL DEFAULT (datetime('now'));", transaction: authMigTx);
+            }
+
+            await conn.ExecuteAsync(
+                """
+                CREATE TABLE IF NOT EXISTS SecurityAuditLogs (
+                    AuditLogId      INTEGER PRIMARY KEY AUTOINCREMENT,
+                    TimestampUtc    TEXT    NOT NULL DEFAULT (datetime('now')),
+                    EventType       TEXT    NOT NULL,
+                    Outcome         TEXT    NOT NULL,
+                    ActorUserId     INTEGER NULL,
+                    ActorUsername   TEXT    NULL,
+                    TargetUsername  TEXT    NULL,
+                    SourceIp        TEXT    NULL,
+                    Details         TEXT    NULL
+                );
+                CREATE INDEX IF NOT EXISTS IX_Users_Username ON Users(Username);
+                CREATE INDEX IF NOT EXISTS IX_SecurityAuditLogs_Timestamp ON SecurityAuditLogs(TimestampUtc);
+                """,
+                transaction: authMigTx);
+
+            int existingUsersCount = await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM Users;", transaction: authMigTx);
+            if (existingUsersCount > 0)
+            {
+                await conn.ExecuteAsync(
+                    "INSERT INTO Settings (Key, Value, UpdatedAt) VALUES ('AuthInitialized', '1', datetime('now')) ON CONFLICT(Key) DO UPDATE SET Value = '1', UpdatedAt = datetime('now');",
+                    transaction: authMigTx);
+            }
+            else
+            {
+                await conn.ExecuteAsync(
+                    "INSERT OR IGNORE INTO Settings (Key, Value) VALUES ('AuthInitialized', '0');",
+                    transaction: authMigTx);
+            }
+
+            await authMigTx.CommitAsync();
+        }
+        catch
+        {
+            await authMigTx.RollbackAsync();
+            throw;
         }
     }
 }

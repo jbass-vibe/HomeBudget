@@ -455,27 +455,142 @@ public sealed class BackupService
             }
         }
 
-        // 3. Perform online SQLite page backup from snapshot into the live database
+        // 3. Perform staged restore + migration + authoritative identity preservation inside lifecycle mutex
         await _mutex.WaitAsync(ct);
+        string stagedPath = Path.Combine(Path.GetTempPath(), $"homebudget_restore_{Guid.NewGuid():N}.db");
         try
         {
             CancelPendingSchedule();
 
-            await using (var sourceConn = new SqliteConnection(checkConnStr))
-            await using (var destConn = await _connectionFactory.CreateOpenConnectionAsync(ct))
+            // 3a. Capture authoritative live identity & audit state before touching live DB
+            var liveUsers = new List<User>();
+            var liveAuditLogs = new List<SecurityAuditLog>();
+            string liveAuthInitialized = "0";
+
+            if (File.Exists(_connectionFactory.DatabasePath))
             {
-                await sourceConn.OpenAsync(ct);
-                sourceConn.BackupDatabase(destConn);
+                await using var liveConn = await _connectionFactory.CreateOpenConnectionAsync(ct);
+                int hasUsersTable = await liveConn.ExecuteScalarAsync<int>(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'Users';");
+                if (hasUsersTable > 0)
+                {
+                    liveUsers = (await liveConn.QueryAsync<User>(
+                        "SELECT UserId, Username, PasswordHash, DisplayName, Role, SecurityStamp, FailedLoginAttempts, LockoutEndUtc, IsActive, LastLoginAt, CreatedAt, UpdatedAt FROM Users ORDER BY UserId;"))
+                        .ToList();
+                    if (liveUsers.Count > 0)
+                    {
+                        liveAuthInitialized = "1";
+                    }
+                }
+
+                int hasAuditTable = await liveConn.ExecuteScalarAsync<int>(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'SecurityAuditLogs';");
+                if (hasAuditTable > 0)
+                {
+                    liveAuditLogs = (await liveConn.QueryAsync<SecurityAuditLog>(
+                        "SELECT AuditLogId, TimestampUtc, EventType, Outcome, ActorUserId, ActorUsername, TargetUsername, SourceIp, Details FROM SecurityAuditLogs ORDER BY AuditLogId;"))
+                        .ToList();
+                }
+
+                int hasSettingsTable = await liveConn.ExecuteScalarAsync<int>(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'Settings';");
+                if (hasSettingsTable > 0)
+                {
+                    string? settingVal = await liveConn.ExecuteScalarAsync<string?>(
+                        "SELECT Value FROM Settings WHERE Key = 'AuthInitialized' LIMIT 1;");
+                    if (settingVal == "1")
+                    {
+                        liveAuthInitialized = "1";
+                    }
+                }
             }
 
-            // 4. Re-apply idempotent schema migrations so even older snapshots upgrade cleanly
-            await using (var migratedConn = await _connectionFactory.CreateOpenConnectionAsync(ct))
+            // 3b. Copy snapshot into an isolated staging DB, run migrations, and atomically apply authoritative identity state
+            var stagedConnStr = new SqliteConnectionStringBuilder
             {
-                await DatabaseInitializer.ApplyIdempotentSchemaMigrationsAsync(migratedConn);
+                DataSource = stagedPath,
+                Mode = SqliteOpenMode.ReadWriteCreate,
+                Pooling = false
+            }.ToString();
+
+            await using (var sourceConn = new SqliteConnection(checkConnStr))
+            await using (var stagedConn = new SqliteConnection(stagedConnStr))
+            {
+                await sourceConn.OpenAsync(ct);
+                await stagedConn.OpenAsync(ct);
+                sourceConn.BackupDatabase(stagedConn);
+
+                await DatabaseInitializer.ApplyIdempotentSchemaMigrationsAsync(stagedConn);
+
+                await using var identityTx = await stagedConn.BeginTransactionAsync(ct);
+                if (liveUsers.Count > 0)
+                {
+                    await stagedConn.ExecuteAsync("DELETE FROM Users;", transaction: identityTx);
+                    foreach (var u in liveUsers)
+                    {
+                        await stagedConn.ExecuteAsync(
+                            """
+                            INSERT INTO Users (
+                                UserId, Username, PasswordHash, DisplayName, Role,
+                                SecurityStamp, FailedLoginAttempts, LockoutEndUtc,
+                                IsActive, LastLoginAt, CreatedAt, UpdatedAt
+                            ) VALUES (
+                                @UserId, @Username, @PasswordHash, @DisplayName, @Role,
+                                @SecurityStamp, @FailedLoginAttempts, @LockoutEndUtc,
+                                @IsActive, @LastLoginAt, @CreatedAt, @UpdatedAt
+                            );
+                            """,
+                            u,
+                            transaction: identityTx);
+                    }
+
+                    int maxUserId = liveUsers.Max(x => x.UserId);
+                    await stagedConn.ExecuteAsync(
+                        "INSERT INTO sqlite_sequence (name, seq) VALUES ('Users', @MaxId) ON CONFLICT(name) DO UPDATE SET seq = MAX(seq, @MaxId);",
+                        new { MaxId = maxUserId },
+                        transaction: identityTx);
+                }
+
+                if (liveAuditLogs.Count > 0)
+                {
+                    await stagedConn.ExecuteAsync("DELETE FROM SecurityAuditLogs;", transaction: identityTx);
+                    foreach (var log in liveAuditLogs)
+                    {
+                        await stagedConn.ExecuteAsync(
+                            """
+                            INSERT INTO SecurityAuditLogs (
+                                AuditLogId, TimestampUtc, EventType, Outcome,
+                                ActorUserId, ActorUsername, TargetUsername, SourceIp, Details
+                            ) VALUES (
+                                @AuditLogId, @TimestampUtc, @EventType, @Outcome,
+                                @ActorUserId, @ActorUsername, @TargetUsername, @SourceIp, @Details
+                            );
+                            """,
+                            log,
+                            transaction: identityTx);
+                    }
+
+                    int maxAuditId = liveAuditLogs.Max(x => x.AuditLogId);
+                    await stagedConn.ExecuteAsync(
+                        "INSERT INTO sqlite_sequence (name, seq) VALUES ('SecurityAuditLogs', @MaxId) ON CONFLICT(name) DO UPDATE SET seq = MAX(seq, @MaxId);",
+                        new { MaxId = maxAuditId },
+                        transaction: identityTx);
+                }
+
+                await stagedConn.ExecuteAsync(
+                    "INSERT INTO Settings (Key, Value, UpdatedAt) VALUES ('AuthInitialized', @Val, datetime('now')) ON CONFLICT(Key) DO UPDATE SET Value = @Val, UpdatedAt = datetime('now');",
+                    new { Val = liveAuthInitialized },
+                    transaction: identityTx);
+
+                await identityTx.CommitAsync(ct);
+
+                // 3c. Atomically copy verified, migrated, identity-preserving staged DB into live budget.db
+                await using var destConn = await _connectionFactory.CreateOpenConnectionAsync(ct);
+                stagedConn.BackupDatabase(destConn);
             }
 
             _cachedPolicy = null;
-            _logger.LogInformation("Restored live SQLite database from snapshot {FileName}", fileInfo.Name);
+            _logger.LogInformation("Restored live SQLite database from snapshot {FileName} with authoritative identity state preserved ({UserCount} users)", fileInfo.Name, liveUsers.Count);
 
             return new RestoreBackupResultDto
             {
@@ -486,6 +601,16 @@ public sealed class BackupService
         }
         finally
         {
+            try
+            {
+                if (File.Exists(stagedPath))
+                {
+                    File.Delete(stagedPath);
+                }
+            }
+            catch
+            {
+            }
             _mutex.Release();
         }
     }
@@ -560,6 +685,7 @@ public sealed class BackupService
         return rawReason.ToLowerInvariant() switch
         {
             "manual" => "Manual Snapshot",
+            "initial_setup" => "Initial Setup",
             "csv_upload" => "CSV Import",
             "pre_restore" => "Pre-Restore Safety",
             "pre_clear_history" => "Pre-Clear History Safety",

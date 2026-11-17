@@ -12,7 +12,7 @@
   <link rel="stylesheet" href="/css/sankey.css" />
 </head>
 <body>
-  <div class="app-shell">
+  <div class="app-shell" id="appShell">
     <!-- Desktop Admin Sidebar (Windows 11 PC View) -->
     <aside class="desktop-sidebar" id="desktopSidebar">
       <div class="brand-header">
@@ -42,11 +42,12 @@
         </button>
         <button class="nav-item" data-view="topology">
           <span class="nav-icon">&#9881;&#65039;</span>
-          <span>Categories, Rules &amp; Backups</span>
+          <span class="nav-topology-label">Categories, Rules &amp; Backups</span>
         </button>
       </nav>
 
       <div class="sidebar-footer">
+        <div id="sidebarUserSection"></div>
         <div class="lan-badge">
           <span class="status-dot"></span>
           <span>LAN-Only SQLite (WAL)</span>
@@ -61,8 +62,11 @@
           <span class="brand-logo-sm">HB</span>
           <span id="mobileHeaderTitle">Monthly Budgets</span>
         </div>
-        <div class="mobile-orientation-hint" id="orientationHint">
-          Rotate for Sankey &#8635;
+        <div style="display:flex;align-items:center;gap:8px;">
+          <div class="mobile-orientation-hint" id="orientationHint">
+            Rotate for Sankey &#8635;
+          </div>
+          <div id="mobileUserSection"></div>
         </div>
       </header>
 

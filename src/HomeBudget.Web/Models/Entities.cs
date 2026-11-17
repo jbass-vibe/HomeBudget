@@ -100,3 +100,32 @@ public sealed class StagingSessionEntity
     public string CandidatesJson { get; set; } = "[]";
     public string CreatedAt { get; set; } = "";
 }
+
+public sealed class User
+{
+    public int UserId { get; set; }
+    public string Username { get; set; } = "";
+    public string PasswordHash { get; set; } = "";
+    public string DisplayName { get; set; } = "";
+    public string Role { get; set; } = "User";
+    public string SecurityStamp { get; set; } = "";
+    public int FailedLoginAttempts { get; set; }
+    public string? LockoutEndUtc { get; set; }
+    public bool IsActive { get; set; } = true;
+    public string? LastLoginAt { get; set; }
+    public string CreatedAt { get; set; } = "";
+    public string UpdatedAt { get; set; } = "";
+}
+
+public sealed class SecurityAuditLog
+{
+    public int AuditLogId { get; set; }
+    public string TimestampUtc { get; set; } = "";
+    public string EventType { get; set; } = "";
+    public string Outcome { get; set; } = "";
+    public int? ActorUserId { get; set; }
+    public string? ActorUsername { get; set; }
+    public string? TargetUsername { get; set; }
+    public string? SourceIp { get; set; }
+    public string? Details { get; set; }
+}

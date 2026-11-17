@@ -262,6 +262,7 @@ async function loadTransactionsTable(mountEl) {
   if (filterState.maxAmount) params.set('maxAmount', filterState.maxAmount);
   if (filterState.search) params.set('search', filterState.search);
 
+  const admin = isAdmin();
   const data = await apiFetch(`/api/transactions?${params.toString()}`);
   const sortedDropdownCats = sortCategories(state.categories, state.categoryDropdownSort);
 
@@ -276,18 +277,20 @@ async function loadTransactionsTable(mountEl) {
       <div>
         <strong>Showing ${data.items.length} of ${data.totalCount} matching income &amp; expense records</strong>
       </div>
-      <div style="display:flex;gap:8px;align-items:center;">
-        <button class="btn btn-danger btn-sm" id="bulkDeleteSelectedBtn" style="display:none;">
-          &#128465; Delete Selected (<span id="selectedTxCount">0</span>)
-        </button>
-      </div>
+      ${admin ? `
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button class="btn btn-danger btn-sm" id="bulkDeleteSelectedBtn" style="display:none;">
+            &#128465; Delete Selected (<span id="selectedTxCount">0</span>)
+          </button>
+        </div>
+      ` : ''}
     </div>
 
     <div class="table-responsive">
       <table class="data-table">
         <thead>
           <tr>
-            <th><input type="checkbox" id="selectAllTxCheck" title="Select all visible rows" /></th>
+            ${admin ? '<th><input type="checkbox" id="selectAllTxCheck" title="Select all visible rows" /></th>' : ''}
             <th>Date</th>
             <th>Account</th>
             <th>Merchant / Description</th>
@@ -301,28 +304,36 @@ async function loadTransactionsTable(mountEl) {
         </thead>
         <tbody>
           ${data.items.length === 0 ? `
-            <tr><td colspan="10" style="text-align:center;color:#64748B;">No matching income or expense transactions found.</td></tr>
+            <tr><td colspan="${admin ? 10 : 9}" style="text-align:center;color:#64748B;">No matching income or expense transactions found.</td></tr>
           ` : data.items.map(tx => `
             <tr data-tx-id="${tx.transactionId}">
-              <td><input type="checkbox" class="tx-row-check" value="${tx.transactionId}" /></td>
+              ${admin ? `<td><input type="checkbox" class="tx-row-check" value="${tx.transactionId}" /></td>` : ''}
               <td>
-                <input type="date" class="input-control tx-date" value="${escapeHtml(tx.transactionDate)}" style="width:132px;" />
+                ${admin
+                  ? `<input type="date" class="input-control tx-date" value="${escapeHtml(tx.transactionDate)}" style="width:132px;" />`
+                  : `<span>${escapeHtml(tx.transactionDate)}</span>`}
               </td>
               <td>${escapeHtml(tx.accountName)}</td>
               <td>
-                <input type="text" class="input-control tx-merchant" value="${escapeHtml(tx.cleanMerchantName)}" style="width:165px;" />
+                ${admin
+                  ? `<input type="text" class="input-control tx-merchant" value="${escapeHtml(tx.cleanMerchantName)}" style="width:165px;" />`
+                  : `<strong>${escapeHtml(tx.cleanMerchantName)}</strong>`}
                 <div style="font-size:11px;color:#64748B;">${escapeHtml(tx.rawDescription)}</div>
               </td>
               <td>
-                <select class="select-control tx-type">
-                  <option value="Expense" ${tx.transactionType === 'Expense' ? 'selected' : ''}>Expense</option>
-                  <option value="IncomeDeposit" ${tx.transactionType === 'IncomeDeposit' ? 'selected' : ''}>IncomeDeposit (Income)</option>
-                  <option value="Refund" ${tx.transactionType === 'Refund' ? 'selected' : ''}>Refund</option>
-                  <option value="CreditCardPayoff" ${tx.transactionType === 'CreditCardPayoff' ? 'selected' : ''}>CreditCardPayoff</option>
-                </select>
+                ${admin ? `
+                  <select class="select-control tx-type">
+                    <option value="Expense" ${tx.transactionType === 'Expense' ? 'selected' : ''}>Expense</option>
+                    <option value="IncomeDeposit" ${tx.transactionType === 'IncomeDeposit' ? 'selected' : ''}>IncomeDeposit (Income)</option>
+                    <option value="Refund" ${tx.transactionType === 'Refund' ? 'selected' : ''}>Refund</option>
+                    <option value="CreditCardPayoff" ${tx.transactionType === 'CreditCardPayoff' ? 'selected' : ''}>CreditCardPayoff</option>
+                  </select>
+                ` : `<span>${escapeHtml(tx.transactionType)}</span>`}
               </td>
               <td>
-                <input type="number" step="0.01" class="input-control tx-amount" value="${tx.amount}" style="width:95px;font-weight:700;" />
+                ${admin
+                  ? `<input type="number" step="0.01" class="input-control tx-amount" value="${tx.amount}" style="width:95px;font-weight:700;" />`
+                  : `<span style="font-weight:700;">${formatCurrency(tx.amount)}</span>`}
               </td>
               <td>
                 <select class="select-control tx-cat" data-orig-cat="${tx.categoryId || ''}">
@@ -333,16 +344,20 @@ async function loadTransactionsTable(mountEl) {
                 </div>
               </td>
               <td>
-                <input type="text" class="input-control tx-subcat" value="${escapeHtml(tx.subcategory || '')}" placeholder="None" style="width:95px;" />
+                ${admin
+                  ? `<input type="text" class="input-control tx-subcat" value="${escapeHtml(tx.subcategory || '')}" placeholder="None" style="width:95px;" />`
+                  : `<span>${escapeHtml(tx.subcategory || '') || '<span style="color:#94A3B8;">None</span>'}</span>`}
               </td>
               <td>
-                <input type="text" class="input-control tx-notes" value="${escapeHtml(tx.notes || '')}" placeholder="Add note..." style="width:130px;" />
+                ${admin
+                  ? `<input type="text" class="input-control tx-notes" value="${escapeHtml(tx.notes || '')}" placeholder="Add note..." style="width:130px;" />`
+                  : `<span>${escapeHtml(tx.notes || '')}</span>`}
               </td>
               <td style="white-space:nowrap;">
-                <button class="btn btn-primary btn-sm tx-save-btn" title="Save field edits">Save</button>
+                ${admin ? '<button class="btn btn-primary btn-sm tx-save-btn" title="Save field edits">Save</button>' : ''}
                 <button class="btn btn-outline btn-sm tx-cat-modal-btn" title="Categorize with Forward/Past options">Categorize</button>
-                <button class="btn btn-outline btn-sm tx-split-btn" title="Split Transaction">Split</button>
-                <button class="btn btn-danger btn-sm tx-del-btn" title="Delete Income or Expense from DB">&#128465;</button>
+                ${admin ? '<button class="btn btn-outline btn-sm tx-split-btn" title="Split Transaction">Split</button>' : ''}
+                ${admin ? '<button class="btn btn-danger btn-sm tx-del-btn" title="Delete Income or Expense from DB">&#128465;</button>' : ''}
               </td>
             </tr>
           `).join('')}
@@ -357,6 +372,7 @@ async function loadTransactionsTable(mountEl) {
   const selCountSpan = mountEl.querySelector('#selectedTxCount');
 
   const updateBulkBar = () => {
+    if (!bulkDelBtn || !selCountSpan) return;
     const selectedIds = rowChecks.filter(c => c.checked).map(c => Number(c.value));
     selCountSpan.textContent = String(selectedIds.length);
     bulkDelBtn.style.display = selectedIds.length > 0 ? 'inline-flex' : 'none';
@@ -370,7 +386,8 @@ async function loadTransactionsTable(mountEl) {
   }
   rowChecks.forEach(c => { c.onchange = updateBulkBar; });
 
-  bulkDelBtn.onclick = () => {
+  if (bulkDelBtn) {
+    bulkDelBtn.onclick = () => {
     const selectedIds = rowChecks.filter(c => c.checked).map(c => Number(c.value));
     if (selectedIds.length === 0) return;
 
@@ -401,6 +418,7 @@ async function loadTransactionsTable(mountEl) {
       };
     });
   };
+  }
 
   mountEl.querySelectorAll('.tx-cat').forEach(sel => {
     sel.onchange = () => {

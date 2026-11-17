@@ -328,6 +328,58 @@ public sealed class DatabaseAndServicesIntegrationTests : IDisposable
         Assert.Equal("Renamed Sapphire Card", txWithAcct.AccountName);
     }
 
+    [Fact]
+    public async Task RestoreSnapshot_PreservesLiveUsersAuditLogsAndAuthInitialized()
+    {
+        await using (var conn = await _connectionFactory.CreateOpenConnectionAsync())
+        {
+            await conn.ExecuteAsync(
+                """
+                CREATE TABLE IF NOT EXISTS Settings (Key TEXT PRIMARY KEY, Value TEXT NOT NULL, UpdatedAt TEXT NOT NULL DEFAULT (datetime('now')));
+                CREATE TABLE IF NOT EXISTS Accounts (AccountId INTEGER PRIMARY KEY, AccountName TEXT NOT NULL, Institution TEXT NOT NULL, AccountType TEXT NOT NULL, IsActive INTEGER NOT NULL DEFAULT 1, CreatedAt TEXT NOT NULL DEFAULT (datetime('now')));
+                CREATE TABLE IF NOT EXISTS Categories (CategoryId INTEGER PRIMARY KEY, Name TEXT NOT NULL UNIQUE, IsBigBoxMerchantCategory INTEGER NOT NULL DEFAULT 0, MonthlyBudget NUMERIC NOT NULL DEFAULT 0, SortOrder INTEGER NOT NULL DEFAULT 100, ColorHex TEXT NOT NULL DEFAULT '#3B82F6', IsActive INTEGER NOT NULL DEFAULT 1, CreatedAt TEXT NOT NULL DEFAULT (datetime('now')));
+                CREATE TABLE IF NOT EXISTS CategorizationRules (RuleId INTEGER PRIMARY KEY, MatchPattern TEXT NOT NULL, IsRegex INTEGER NOT NULL DEFAULT 0, CategoryId INTEGER NOT NULL, DefaultSubcategory TEXT NULL, Priority INTEGER NOT NULL DEFAULT 100, IsActive INTEGER NOT NULL DEFAULT 1, CreatedAt TEXT NOT NULL DEFAULT (datetime('now')));
+                CREATE TABLE IF NOT EXISTS Transactions (TransactionId INTEGER PRIMARY KEY AUTOINCREMENT, AccountId INTEGER NOT NULL, TransactionDate TEXT NOT NULL, PostDate TEXT NULL, RawDescription TEXT NOT NULL, CleanMerchantName TEXT NOT NULL, Amount NUMERIC NOT NULL, TransactionType TEXT NOT NULL, CategoryId INTEGER NULL, Subcategory TEXT NULL, IsCategoryManuallyLocked INTEGER NOT NULL DEFAULT 0, ParentTransactionId INTEGER NULL, DedupHash TEXT NOT NULL, Notes TEXT NULL);
+                """);
+            await DatabaseInitializer.ApplyIdempotentSchemaMigrationsAsync(conn);
+        }
+
+        // Create an older snapshot before users exist
+        string? preUsersBackup = await _backupService.CreateSnapshotNowAsync("pre_users_snapshot");
+        Assert.NotNull(preUsersBackup);
+
+        // Now populate live Users (active + inactive), SecurityAuditLogs, and AuthInitialized='1'
+        await using (var conn = await _connectionFactory.CreateOpenConnectionAsync())
+        {
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO Users (Username, PasswordHash, DisplayName, Role, SecurityStamp, IsActive)
+                VALUES ('admin', 'HASH_ADMIN_NEW', 'Admin', 'Admin', 'STAMP_A', 1),
+                       ('user', 'HASH_USER_DISABLED', 'User', 'User', 'STAMP_U', 0);
+                INSERT INTO Settings (Key, Value) VALUES ('AuthInitialized', '1')
+                ON CONFLICT(Key) DO UPDATE SET Value = '1';
+                INSERT INTO SecurityAuditLogs (TimestampUtc, EventType, Outcome, ActorUsername, Details)
+                VALUES (datetime('now'), 'LOGIN_SUCCESS', 'Success', 'admin', 'Before restore');
+                """);
+        }
+
+        await _backupService.RestoreSnapshotAsync(preUsersBackup!, createPreRestoreBackup: false);
+
+        await using (var conn = await _connectionFactory.CreateOpenConnectionAsync())
+        {
+            var users = (await conn.QueryAsync<User>("SELECT * FROM Users ORDER BY UserId;")).ToList();
+            Assert.Equal(2, users.Count);
+            Assert.Equal("HASH_ADMIN_NEW", users.Single(u => u.Username == "admin").PasswordHash);
+            Assert.False(users.Single(u => u.Username == "user").IsActive);
+
+            string? authInit = await conn.ExecuteScalarAsync<string?>("SELECT Value FROM Settings WHERE Key = 'AuthInitialized';");
+            Assert.Equal("1", authInit);
+
+            int auditCount = await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM SecurityAuditLogs WHERE Details = 'Before restore';");
+            Assert.Equal(1, auditCount);
+        }
+    }
+
     public void Dispose()
     {
         try

@@ -88,12 +88,41 @@ CREATE TABLE IF NOT EXISTS IncomeOverrides (
     UpdatedAt       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS Users (
+    UserId               INTEGER PRIMARY KEY AUTOINCREMENT,
+    Username             TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+    PasswordHash         TEXT    NOT NULL,
+    DisplayName          TEXT    NOT NULL,
+    Role                 TEXT    NOT NULL CHECK (Role IN ('Admin', 'User')),
+    SecurityStamp        TEXT    NOT NULL DEFAULT '',
+    FailedLoginAttempts  INTEGER NOT NULL DEFAULT 0,
+    LockoutEndUtc        TEXT    NULL,
+    IsActive             INTEGER NOT NULL DEFAULT 1,
+    LastLoginAt          TEXT    NULL,
+    CreatedAt            TEXT    NOT NULL DEFAULT (datetime('now')),
+    UpdatedAt            TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS SecurityAuditLogs (
+    AuditLogId      INTEGER PRIMARY KEY AUTOINCREMENT,
+    TimestampUtc    TEXT    NOT NULL DEFAULT (datetime('now')),
+    EventType       TEXT    NOT NULL,
+    Outcome         TEXT    NOT NULL,
+    ActorUserId     INTEGER NULL,
+    ActorUsername   TEXT    NULL,
+    TargetUsername  TEXT    NULL,
+    SourceIp        TEXT    NULL,
+    Details         TEXT    NULL
+);
+
 CREATE INDEX IF NOT EXISTS IX_Transactions_Date ON Transactions(TransactionDate);
 CREATE INDEX IF NOT EXISTS IX_Transactions_Category ON Transactions(CategoryId);
 CREATE INDEX IF NOT EXISTS IX_Transactions_Type ON Transactions(TransactionType);
 CREATE INDEX IF NOT EXISTS IX_Transactions_Merchant ON Transactions(CleanMerchantName);
 CREATE INDEX IF NOT EXISTS IX_Transactions_DedupHash ON Transactions(DedupHash);
 CREATE INDEX IF NOT EXISTS IX_Transactions_UpdatedAt ON Transactions(UpdatedAt);
+CREATE INDEX IF NOT EXISTS IX_Users_Username ON Users(Username);
+CREATE INDEX IF NOT EXISTS IX_SecurityAuditLogs_Timestamp ON SecurityAuditLogs(TimestampUtc);
 
 -- Default Seed Accounts
 INSERT INTO Accounts (AccountName, Institution, AccountType, IsActive)
@@ -122,7 +151,8 @@ INSERT OR IGNORE INTO Settings (Key, Value) VALUES
 ('BackupAutoMode', 'Coalesced'),
 ('BackupDebounceSeconds', '30'),
 ('BackupMinIntervalMinutes', '10'),
-('MaxRetainedBackups', '15');
+('MaxRetainedBackups', '15'),
+('AuthInitialized', '0');
 
 -- Default Seed Categories (Gated by DefaultTaxonomySeeded so deleted defaults never resurrect on restart)
 INSERT OR IGNORE INTO Categories (Name, IsBigBoxMerchantCategory, MonthlyBudget, SortOrder, ColorHex, IsActive)

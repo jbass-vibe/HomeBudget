@@ -1,5 +1,6 @@
 import {
   state,
+  isAdmin,
   apiFetch,
   formatCurrency,
   escapeHtml,
@@ -84,11 +85,29 @@ function formatByteSize(bytes) {
 }
 
 export async function renderTopologyView(container) {
-  const [topology, settings, backupInfo] = await Promise.all([
-    apiFetch('/api/topology'),
-    apiFetch('/api/settings'),
-    apiFetch('/api/backups')
-  ]);
+  const admin = isAdmin();
+  let topology;
+  let settings = null;
+  let backupInfo = { backups: [] };
+  let users = [];
+  let auditLogs = [];
+
+  if (admin) {
+    const [topoRes, settingsRes, backupRes, usersRes, auditRes] = await Promise.all([
+      apiFetch('/api/topology'),
+      apiFetch('/api/settings'),
+      apiFetch('/api/backups'),
+      apiFetch('/api/users'),
+      apiFetch('/api/audit-logs?limit=50')
+    ]);
+    topology = topoRes;
+    settings = settingsRes;
+    backupInfo = backupRes || { backups: [] };
+    users = Array.isArray(usersRes) ? usersRes : [];
+    auditLogs = Array.isArray(auditRes?.items) ? auditRes.items : (Array.isArray(auditRes) ? auditRes : []);
+  } else {
+    topology = await apiFetch('/api/topology');
+  }
 
   const rawCategories = topology.categories;
   const catNameById = Object.fromEntries(rawCategories.map(c => [c.categoryId, c.name]));
@@ -115,8 +134,10 @@ export async function renderTopologyView(container) {
   container.innerHTML = `
     <div class="page-header">
       <div>
-        <h1 class="page-title">Categories, Rules, Income &amp; Backups</h1>
-        <p class="page-subtitle">Manage visualization category topology, retroactive rule back-propagation, and local SQLite backups</p>
+        <h1 class="page-title">${admin ? 'Categories, Rules, Income &amp; Backups' : 'Categories &amp; Auto-Categorization Rules'}</h1>
+        <p class="page-subtitle">${admin
+          ? 'Manage visualization category topology, retroactive rule back-propagation, local SQLite backups, and household users'
+          : 'Manage spending categories, monthly budgets, and forward auto-categorization rules'}</p>
       </div>
     </div>
 
@@ -225,6 +246,7 @@ export async function renderTopologyView(container) {
       </div>
     </div>
 
+    ${admin ? `
     <!-- 3. Source Accounts & Credit Cards Management -->
     <div class="card-panel">
       <div class="toolbar-row">
@@ -442,6 +464,93 @@ export async function renderTopologyView(container) {
         </table>
       </div>
     </div>
+
+    <!-- 6. User Accounts & Security Audit Log (Admin Only) -->
+    <div class="card-panel">
+      <div class="toolbar-row" style="margin-bottom:14px;">
+        <div>
+          <h2 style="margin:0;font-size:17px;font-weight:800;">6. Household User Accounts &amp; Security Audit Log</h2>
+          <p style="margin:2px 0 0 0;font-size:12px;color:#64748B;">Manage passphrases, lockouts, account status, and inspect recent authentication/authorization events</p>
+        </div>
+        <button class="btn btn-outline btn-sm" id="refreshAuditLogsBtn">Refresh Security Log</button>
+      </div>
+
+      <div class="table-responsive" style="margin-bottom:18px;">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Username</th>
+              <th>Display Name</th>
+              <th>Role</th>
+              <th>Status</th>
+              <th>Last Login (UTC)</th>
+              <th style="text-align:right;">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${users.map(u => {
+              const isLocked = Boolean(u.isLockedOut);
+              const isSelf = state.currentUser && u.userId === state.currentUser.userId;
+              return `
+                <tr data-user-id="${u.userId}">
+                  <td><code>${escapeHtml(u.username)}</code></td>
+                  <td><strong>${escapeHtml(u.displayName)}</strong></td>
+                  <td><span class="badge" style="background:${u.role === 'Admin' ? '#ECFDF5' : '#EFF6FF'};color:${u.role === 'Admin' ? '#065F46' : '#1E40AF'};">${escapeHtml(u.role)}</span></td>
+                  <td>
+                    ${!u.isActive
+                      ? '<span class="badge" style="background:#FEF2F2;color:#B91C1C;">Disabled</span>'
+                      : (isLocked
+                        ? `<span class="badge" style="background:#FFFBEB;color:#B45309;">Locked (${u.remainingLockoutMinutes}m)</span>`
+                        : '<span class="badge" style="background:#ECFDF5;color:#065F46;">Active</span>')}
+                  </td>
+                  <td style="font-size:12px;color:#64748B;">${u.lastLoginAt ? escapeHtml(new Date(u.lastLoginAt).toLocaleString()) : 'Never'}</td>
+                  <td style="text-align:right;white-space:nowrap;">
+                    <button class="btn btn-outline btn-sm reset-user-pass-btn" data-user-id="${u.userId}" data-username="${escapeHtml(u.username)}">Reset Passphrase</button>
+                    ${isLocked ? `<button class="btn btn-outline btn-sm unlock-user-btn" data-user-id="${u.userId}">Unlock</button>` : ''}
+                    ${!isSelf && u.role !== 'Admin' ? `
+                      <button class="btn btn-outline btn-sm toggle-user-active-btn" data-user-id="${u.userId}" data-next-active="${u.isActive ? 'false' : 'true'}">
+                        ${u.isActive ? 'Disable' : 'Enable'}
+                      </button>
+                    ` : ''}
+                  </td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+
+      <div style="font-size:13px;font-weight:800;color:#0F172A;margin-bottom:8px;">Recent Security Audit Events (Latest 50)</div>
+      <div class="table-responsive" style="max-height:260px;overflow-y:auto;">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Timestamp (UTC)</th>
+              <th>Event</th>
+              <th>Outcome</th>
+              <th>User</th>
+              <th>IP</th>
+              <th>Detail</th>
+            </tr>
+          </thead>
+          <tbody id="securityAuditTableBody">
+            ${auditLogs.length === 0 ? `
+              <tr><td colspan="6" style="text-align:center;color:#64748B;">No security audit events recorded yet.</td></tr>
+            ` : auditLogs.map(log => `
+              <tr>
+                <td style="font-size:11px;white-space:nowrap;">${escapeHtml(log.timestampUtc)}</td>
+                <td><code>${escapeHtml(log.eventType)}</code></td>
+                <td><span style="font-size:11px;font-weight:700;color:${log.outcome === 'Success' ? '#059669' : '#DC2626'};">${escapeHtml(log.outcome)}</span></td>
+                <td>${escapeHtml(log.actorUsername || log.targetUsername || '-')}</td>
+                <td style="font-size:11px;">${escapeHtml(log.sourceIp || '-')}</td>
+                <td style="font-size:11px;color:#475569;">${escapeHtml(log.details || '')}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    ` : ''}
   `;
 
   const topologyCatSortSelect = container.querySelector('#topologyCatSortSelect');
@@ -623,99 +732,104 @@ export async function renderTopologyView(container) {
     };
   });
 
-  // Preview & Commit Historical Back-Propagation
-  container.querySelector('#previewBackPropBtn').onclick = async () => {
-    const previewMount = container.querySelector('#backPropPreviewMount');
-    previewMount.innerHTML = `<div style="padding:12px;">Running dry-run across historical transactions...</div>`;
-    const res = await apiFetch('/api/rules/back-propagate', {
-      method: 'POST',
-      body: JSON.stringify({ includeManuallyLocked: false, dryRun: true })
-    });
-
-    if (res.affectedTransactionsCount === 0) {
-      previewMount.innerHTML = `
-        <div style="padding:12px;margin-bottom:14px;background:#ECFDF5;border-radius:8px;color:#059669;font-weight:600;">
-          &#10003; All ${res.evaluatedCount} historical transactions already match your current rule topology!
-        </div>`;
-      return;
-    }
-
-    const sortBackPropChanges = (changes, sortMode) => {
-      const list = Array.isArray(changes) ? [...changes] : [];
-      return list.sort((a, b) => {
-        switch (sortMode) {
-          case 'amount_desc': {
-            const diff = Math.abs(Number(b.amount || 0)) - Math.abs(Number(a.amount || 0));
-            if (diff !== 0) return diff;
-            return String(b.transactionDate || '').localeCompare(String(a.transactionDate || ''));
-          }
-          case 'alpha_asc':
-            return String(a.rawDescription || '').localeCompare(String(b.rawDescription || ''), undefined, { sensitivity: 'base' });
-          case 'category_asc': {
-            const catDiff = String(a.newCategoryName || '').localeCompare(String(b.newCategoryName || ''), undefined, { sensitivity: 'base' });
-            if (catDiff !== 0) return catDiff;
-            return String(b.transactionDate || '').localeCompare(String(a.transactionDate || ''));
-          }
-          case 'date_desc':
-          default:
-            return String(b.transactionDate || '').localeCompare(String(a.transactionDate || ''));
-        }
+  // Preview & Commit Historical Back-Propagation (Admin Only)
+  const previewBackPropBtn = container.querySelector('#previewBackPropBtn');
+  if (previewBackPropBtn) {
+    previewBackPropBtn.onclick = async () => {
+      const previewMount = container.querySelector('#backPropPreviewMount');
+      previewMount.innerHTML = `<div style="padding:12px;">Running dry-run across historical transactions...</div>`;
+      const res = await apiFetch('/api/rules/back-propagate', {
+        method: 'POST',
+        body: JSON.stringify({ includeManuallyLocked: false, dryRun: true })
       });
-    };
 
-    const renderBackPropPreview = () => {
-      const currentSort = state.backPropSort || 'date_desc';
-      const sortedChanges = sortBackPropChanges(res.changes, currentSort);
-
-      previewMount.innerHTML = `
-        <div style="padding:14px;margin-bottom:14px;background:#EFF6FF;border:1px solid #BFDBFE;border-radius:10px;">
-          <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px;">
-            <strong>Dry-Run Preview: ${res.affectedTransactionsCount} of ${res.evaluatedCount} historical transactions will be updated</strong>
-            <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;">
-              <label style="font-size:12px;font-weight:700;color:#475569;display:inline-flex;align-items:center;gap:6px;">
-                Sort Preview:
-                <select id="backPropSortSelect" class="select-control" style="font-size:12px;padding:3px 6px;">
-                  <option value="date_desc" ${currentSort === 'date_desc' ? 'selected' : ''}>Newest Date</option>
-                  <option value="amount_desc" ${currentSort === 'amount_desc' ? 'selected' : ''}>Highest Amount ($)</option>
-                  <option value="alpha_asc" ${currentSort === 'alpha_asc' ? 'selected' : ''}>Merchant (A-Z)</option>
-                  <option value="category_asc" ${currentSort === 'category_asc' ? 'selected' : ''}>New Category (A-Z)</option>
-                </select>
-              </label>
-              <button class="btn btn-primary btn-sm" id="commitBackPropBtn">Commit Back-Propagation &amp; Backup</button>
-            </div>
-          </div>
-          <div style="max-height:200px;overflow-y:auto;font-size:12px;">
-            ${sortedChanges.map(ch => `
-              <div style="padding:4px 0;border-bottom:1px dashed #CBD5E1;">
-                ${escapeHtml(ch.transactionDate)} &bull; <strong>${escapeHtml(ch.rawDescription)}</strong> (${formatCurrency(ch.amount)}):
-                <span style="color:#64748B;">${escapeHtml(ch.oldCategoryName)}</span> &rarr;
-                <strong style="color:#2563EB;">${escapeHtml(ch.newCategoryName)}</strong> (Rule: <code>${escapeHtml(ch.matchedRulePattern)}</code>)
-              </div>
-            `).join('')}
-          </div>
-        </div>
-      `;
-
-      const sortSel = previewMount.querySelector('#backPropSortSelect');
-      if (sortSel) {
-        sortSel.onchange = (e) => {
-          setSortPreference('backPropSort', e.target.value);
-          renderBackPropPreview();
-        };
+      if (res.affectedTransactionsCount === 0) {
+        previewMount.innerHTML = `
+          <div style="padding:12px;margin-bottom:14px;background:#ECFDF5;border-radius:8px;color:#059669;font-weight:600;">
+            &#10003; All ${res.evaluatedCount} historical transactions already match your current rule topology!
+          </div>`;
+        return;
       }
 
-      previewMount.querySelector('#commitBackPropBtn').onclick = async () => {
-        const committed = await apiFetch('/api/rules/back-propagate', {
-          method: 'POST',
-          body: JSON.stringify({ includeManuallyLocked: false, dryRun: false })
+      const sortBackPropChanges = (changes, sortMode) => {
+        const list = Array.isArray(changes) ? [...changes] : [];
+        return list.sort((a, b) => {
+          switch (sortMode) {
+            case 'amount_desc': {
+              const diff = Math.abs(Number(b.amount || 0)) - Math.abs(Number(a.amount || 0));
+              if (diff !== 0) return diff;
+              return String(b.transactionDate || '').localeCompare(String(a.transactionDate || ''));
+            }
+            case 'alpha_asc':
+              return String(a.rawDescription || '').localeCompare(String(b.rawDescription || ''), undefined, { sensitivity: 'base' });
+            case 'category_asc': {
+              const catDiff = String(a.newCategoryName || '').localeCompare(String(b.newCategoryName || ''), undefined, { sensitivity: 'base' });
+              if (catDiff !== 0) return catDiff;
+              return String(b.transactionDate || '').localeCompare(String(a.transactionDate || ''));
+            }
+            case 'date_desc':
+            default:
+              return String(b.transactionDate || '').localeCompare(String(a.transactionDate || ''));
+          }
         });
-        showToast(`Back-propagated ${committed.affectedTransactionsCount} transactions • ${formatBackupStatus(committed.backupFileCreated)}`);
-        renderTopologyView(container);
       };
-    };
 
-    renderBackPropPreview();
-  };
+      const renderBackPropPreview = () => {
+        const currentSort = state.backPropSort || 'date_desc';
+        const sortedChanges = sortBackPropChanges(res.changes, currentSort);
+
+        previewMount.innerHTML = `
+          <div style="padding:14px;margin-bottom:14px;background:#EFF6FF;border:1px solid #BFDBFE;border-radius:10px;">
+            <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px;">
+              <strong>Dry-Run Preview: ${res.affectedTransactionsCount} of ${res.evaluatedCount} historical transactions will be updated</strong>
+              <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;">
+                <label style="font-size:12px;font-weight:700;color:#475569;display:inline-flex;align-items:center;gap:6px;">
+                  Sort Preview:
+                  <select id="backPropSortSelect" class="select-control" style="font-size:12px;padding:3px 6px;">
+                    <option value="date_desc" ${currentSort === 'date_desc' ? 'selected' : ''}>Newest Date</option>
+                    <option value="amount_desc" ${currentSort === 'amount_desc' ? 'selected' : ''}>Highest Amount ($)</option>
+                    <option value="alpha_asc" ${currentSort === 'alpha_asc' ? 'selected' : ''}>Merchant (A-Z)</option>
+                    <option value="category_asc" ${currentSort === 'category_asc' ? 'selected' : ''}>New Category (A-Z)</option>
+                  </select>
+                </label>
+                <button class="btn btn-primary btn-sm" id="commitBackPropBtn">Commit Back-Propagation &amp; Backup</button>
+              </div>
+            </div>
+            <div style="max-height:200px;overflow-y:auto;font-size:12px;">
+              ${sortedChanges.map(ch => `
+                <div style="padding:4px 0;border-bottom:1px dashed #CBD5E1;">
+                  ${escapeHtml(ch.transactionDate)} &bull; <strong>${escapeHtml(ch.rawDescription)}</strong> (${formatCurrency(ch.amount)}):
+                  <span style="color:#64748B;">${escapeHtml(ch.oldCategoryName)}</span> &rarr;
+                  <strong style="color:#2563EB;">${escapeHtml(ch.newCategoryName)}</strong> (Rule: <code>${escapeHtml(ch.matchedRulePattern)}</code>)
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        `;
+
+        const sortSel = previewMount.querySelector('#backPropSortSelect');
+        if (sortSel) {
+          sortSel.onchange = (e) => {
+            setSortPreference('backPropSort', e.target.value);
+            renderBackPropPreview();
+          };
+        }
+
+        previewMount.querySelector('#commitBackPropBtn').onclick = async () => {
+          const committed = await apiFetch('/api/rules/back-propagate', {
+            method: 'POST',
+            body: JSON.stringify({ includeManuallyLocked: false, dryRun: false })
+          });
+          showToast(`Back-propagated ${committed.affectedTransactionsCount} transactions • ${formatBackupStatus(committed.backupFileCreated)}`);
+          renderTopologyView(container);
+        };
+      };
+
+      renderBackPropPreview();
+    };
+  }
+
+  if (!admin) return;
 
   // 3. Source Accounts & Credit Cards Handlers
   container.querySelectorAll('.rename-account-row-btn').forEach(btn => {
@@ -733,18 +847,21 @@ export async function renderTopologyView(container) {
   }
 
   // Save Income Settings
-  container.querySelector('#saveSettingsBtn').onclick = async () => {
-    const res = await apiFetch('/api/settings', {
-      method: 'PUT',
-      body: JSON.stringify({
-        googlePayrollMatchPattern: container.querySelector('#setGooglePattern').value.trim(),
-        persistentMonthlyIncome: Number(container.querySelector('#setPersistentIncome').value || 10000),
-        currentMonthIncomeMode: container.querySelector('#setCurrentMonthMode').value,
-        geminiApiKey: ''
-      })
-    });
-    showToast(`Household income settings saved • ${formatBackupStatus(res?.backupFileCreated)}`);
-  };
+  const saveSettingsBtn = container.querySelector('#saveSettingsBtn');
+  if (saveSettingsBtn) {
+    saveSettingsBtn.onclick = async () => {
+      const res = await apiFetch('/api/settings', {
+        method: 'PUT',
+        body: JSON.stringify({
+          googlePayrollMatchPattern: container.querySelector('#setGooglePattern').value.trim(),
+          persistentMonthlyIncome: Number(container.querySelector('#setPersistentIncome').value || 10000),
+          currentMonthIncomeMode: container.querySelector('#setCurrentMonthMode').value,
+          geminiApiKey: ''
+        })
+      });
+      showToast(`Household income settings saved • ${formatBackupStatus(res?.backupFileCreated)}`);
+    };
+  }
 
   // ============================================================================
   // 5. BACKUP MANAGEMENT HANDLERS
@@ -920,6 +1037,95 @@ export async function renderTopologyView(container) {
       openRestoreDatabaseModal(sortedBackups, fileName, () => renderTopologyView(container));
     };
   });
+
+  // ============================================================================
+  // 6. USER MANAGEMENT & SECURITY AUDIT LOG HANDLERS (Admin Only)
+  // ============================================================================
+
+  container.querySelectorAll('.reset-user-pass-btn').forEach(btn => {
+    btn.onclick = () => {
+      const userId = Number(btn.dataset.userId);
+      const username = btn.dataset.username || 'user';
+      openModal(`
+        <h3 style="margin-top:0;">Reset Passphrase for <code>${escapeHtml(username)}</code></h3>
+        <p style="font-size:13px;color:#64748B;">
+          Sets a new passphrase (12–128 characters) and immediately revokes existing sessions for this account.
+        </p>
+        <div id="adminResetPassError" role="alert" aria-live="polite" style="display:none;background:#FEF2F2;border:1px solid #FECACA;color:#B91C1C;border-radius:8px;padding:8px 10px;font-size:12px;font-weight:600;margin-bottom:10px;"></div>
+        <div style="display:flex;flex-direction:column;gap:10px;margin:12px 0;">
+          <div>
+            <label for="adminNewUserPass" style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">New Passphrase</label>
+            <input type="password" id="adminNewUserPass" class="input-control" style="width:100%;" autocomplete="new-password" minlength="12" maxlength="128" />
+          </div>
+          <div>
+            <label for="adminConfirmUserPass" style="font-size:12px;font-weight:700;display:block;margin-bottom:4px;">Confirm New Passphrase</label>
+            <input type="password" id="adminConfirmUserPass" class="input-control" style="width:100%;" autocomplete="new-password" minlength="12" maxlength="128" />
+          </div>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:14px;">
+          <button class="btn btn-outline" id="cancelAdminResetPassBtn">Cancel</button>
+          <button class="btn btn-primary" id="saveAdminResetPassBtn">Reset Passphrase</button>
+        </div>
+      `, (m) => {
+        const errEl = m.querySelector('#adminResetPassError');
+        const saveBtn = m.querySelector('#saveAdminResetPassBtn');
+        m.querySelector('#cancelAdminResetPassBtn').onclick = closeModal;
+        saveBtn.onclick = async () => {
+          errEl.style.display = 'none';
+          const newPassword = m.querySelector('#adminNewUserPass').value;
+          const confirmPass = m.querySelector('#adminConfirmUserPass').value;
+          if (!newPassword || newPassword !== confirmPass) {
+            errEl.textContent = 'Passphrases must match and cannot be empty.';
+            errEl.style.display = 'block';
+            return;
+          }
+          saveBtn.disabled = true;
+          saveBtn.textContent = 'Resetting...';
+          try {
+            await apiFetch(`/api/users/${userId}/reset-password`, {
+              method: 'POST',
+              body: JSON.stringify({ newPassword })
+            });
+            closeModal();
+            showToast(`Passphrase reset for ${username}`);
+            renderTopologyView(container);
+          } catch (err) {
+            errEl.textContent = err.message || 'Failed to reset passphrase.';
+            errEl.style.display = 'block';
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Reset Passphrase';
+          }
+        };
+      });
+    };
+  });
+
+  container.querySelectorAll('.unlock-user-btn').forEach(btn => {
+    btn.onclick = async () => {
+      const userId = Number(btn.dataset.userId);
+      await apiFetch(`/api/users/${userId}/unlock`, { method: 'POST' });
+      showToast('User account unlocked');
+      renderTopologyView(container);
+    };
+  });
+
+  container.querySelectorAll('.toggle-user-active-btn').forEach(btn => {
+    btn.onclick = async () => {
+      const userId = Number(btn.dataset.userId);
+      const isActive = btn.dataset.nextActive === 'true';
+      await apiFetch(`/api/users/${userId}/active`, {
+        method: 'PUT',
+        body: JSON.stringify({ isActive })
+      });
+      showToast(`User account ${isActive ? 'enabled' : 'disabled'}`);
+      renderTopologyView(container);
+    };
+  });
+
+  const refreshAuditLogsBtn = container.querySelector('#refreshAuditLogsBtn');
+  if (refreshAuditLogsBtn) {
+    refreshAuditLogsBtn.onclick = () => renderTopologyView(container);
+  }
 }
 
 

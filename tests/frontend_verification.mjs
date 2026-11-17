@@ -9,6 +9,7 @@ const jsFiles = [
   'src/HomeBudget.Web/wwwroot/js/views/budgetsView.js',
   'src/HomeBudget.Web/wwwroot/js/views/cashflowView.js',
   'src/HomeBudget.Web/wwwroot/js/views/inspectorView.js',
+  'src/HomeBudget.Web/wwwroot/js/views/loginView.js',
   'src/HomeBudget.Web/wwwroot/js/views/topologyView.js',
   'src/HomeBudget.Web/wwwroot/js/views/uploadView.js'
 ];
@@ -229,5 +230,22 @@ assert.ok(
   'topologyView.js must render .rename-account-row-btn for each account'
 );
 
-console.log('✔ Frontend & schema v2.2–v2.8 verification assertions passed.');
+// 10. Verify v2.9 Authentication, CSRF headers, cross-tab sync, step-up confirmation, and Role-based UI gating
+const loginSource = fs.readFileSync(path.resolve('src/HomeBudget.Web/wwwroot/js/views/loginView.js'), 'utf8');
+assert.ok(loginSource.includes('export function renderLoginView('), 'loginView.js must export renderLoginView');
+assert.ok(loginSource.includes('/api/auth/setup'), 'loginView.js must call POST /api/auth/setup');
+assert.ok(loginSource.includes('/api/auth/login'), 'loginView.js must call POST /api/auth/login');
+assert.ok(loginSource.includes('bootstrapToken'), 'loginView.js must send bootstrapToken');
+assert.ok(appSource.includes("'X-HomeBudget-Request': '1'"), 'app.js apiFetch must send X-HomeBudget-Request: 1');
+assert.ok(appSource.includes("credentials: 'same-origin'"), 'app.js apiFetch must send credentials: same-origin');
+assert.ok(appSource.includes('homebudget:auth-sync'), 'app.js must implement cross-tab homebudget:auth-sync');
+assert.ok(appSource.includes('isAllowedViewForCurrentUser'), 'app.js must enforce safe view allowlist');
+assert.ok(appSource.includes('resetAllConfirmPassword'), 'app.js reset all modal must include #resetAllConfirmPassword step-up');
+assert.ok(appSource.includes('restoreConfirmPassword'), 'app.js restore modal must include #restoreConfirmPassword step-up');
+assert.ok(inspectorSource.includes('isAdmin()'), 'inspectorView.js must gate destructive controls with isAdmin()');
+assert.ok(topologySource.includes('isAdmin()'), 'topologyView.js must gate Admin-only sections and fetches with isAdmin()');
+assert.ok(topologySource.includes('/api/users') && topologySource.includes('/api/audit-logs'), 'topologyView.js must render Admin user management and security audit logs');
+assert.ok(schemaSql.includes('CREATE TABLE IF NOT EXISTS Users') && schemaSql.includes('CREATE TABLE IF NOT EXISTS SecurityAuditLogs'), 'deploy/schema.sql must define Users and SecurityAuditLogs');
+
+console.log('✔ Frontend & schema v2.2–v2.9 verification assertions passed.');
 
